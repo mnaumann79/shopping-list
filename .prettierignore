@@ -1,0 +1,13 @@
+node_modules
+.claude
+.codex
+.planning
+playwright-report
+test-results
+.next
+out
+build
+.next
+*.log
+.env*
+public

@@ -1,0 +1,438 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.809 0.105 251.813);
+  --chart-2: oklch(0.623 0.214 259.815);
+  --chart-3: oklch(0.546 0.245 262.881);
+  --chart-4: oklch(0.488 0.243 264.376);
+  --chart-5: oklch(0.424 0.199 265.638);
+  --radius: 0.625rem;
+  --font-sans: var(--font-nunito), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-fraunces), ui-serif, Georgia, serif;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.809 0.105 251.813);
+  --chart-2: oklch(0.623 0.214 259.815);
+  --chart-3: oklch(0.546 0.245 262.881);
+  --chart-4: oklch(0.488 0.243 264.376);
+  --chart-5: oklch(0.424 0.199 265.638);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+/*
+ * Warm Palette Preview
+ * ===================
+ * Temporary preview — REMOVE after decision
+ * Adds warm, inviting colors via .warm-preview class on <html>
+ */
+
+.warm-preview {
+  /* Background & Surface */
+  --background: oklch(0.98 0.01 80);
+  --foreground: oklch(0.35 0.02 50);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.35 0.02 50);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.35 0.02 50);
+
+  /* Primary — Terracotta */
+  --primary: oklch(0.45 0.08 45);
+  --primary-foreground: oklch(0.98 0.01 80);
+
+  /* Secondary — Soft cream */
+  --secondary: oklch(0.92 0.02 85);
+  --secondary-foreground: oklch(0.35 0.02 50);
+
+  /* Muted */
+  --muted: oklch(0.94 0.01 80);
+  --muted-foreground: oklch(0.55 0.01 50);
+
+  /* Accent — Sage */
+  --accent: oklch(0.60 0.05 130);
+  --accent-foreground: oklch(0.98 0.01 80);
+
+  /* Destructive — Warm red */
+  --destructive: oklch(0.50 0.10 25);
+  --destructive-foreground: oklch(0.98 0.01 80);
+
+  /* Border & Input */
+  --border: oklch(0.91 0.01 80);
+  --input: oklch(0.91 0.01 80);
+  --ring: oklch(0.45 0.08 45);
+
+  /* Font override for warm preview */
+  --font-sans: var(--font-nunito), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-fraunces), ui-serif, Georgia, serif;
+}
+
+/* Warm palette dark mode — deep warm darks */
+.warm-preview.dark {
+  /* Background & Surface */
+  --background: oklch(0.15 0.02 50);
+  --foreground: oklch(0.92 0.01 80);
+  --card: oklch(0.18 0.02 50);
+  --card-foreground: oklch(0.92 0.01 80);
+  --popover: oklch(0.18 0.02 50);
+  --popover-foreground: oklch(0.92 0.01 80);
+
+  /* Primary — Terracotta (brighter for dark) */
+  --primary: oklch(0.65 0.12 45);
+  --primary-foreground: oklch(0.15 0.02 50);
+
+  /* Secondary — Dark warm */
+  --secondary: oklch(0.22 0.02 50);
+  --secondary-foreground: oklch(0.92 0.01 80);
+
+  /* Muted */
+  --muted: oklch(0.25 0.02 50);
+  --muted-foreground: oklch(0.60 0.02 50);
+
+  /* Accent — Sage (brighter for dark) */
+  --accent: oklch(0.65 0.06 130);
+  --accent-foreground: oklch(0.15 0.02 50);
+
+  /* Destructive — Warm red */
+  --destructive: oklch(0.60 0.12 25);
+  --destructive-foreground: oklch(0.92 0.01 80);
+
+  /* Border & Input */
+  --border: oklch(0.28 0.02 50);
+  --input: oklch(0.28 0.02 50);
+  --ring: oklch(0.65 0.12 45);
+}
+
+/* Apply warm heading font when preview is active */
+.warm-preview h1,
+.warm-preview h2,
+.warm-preview h3,
+.warm-preview h4 {
+  font-family: var(--font-heading), var(--font-sans);
+}
+
+/*
+ * Clean & Fresh Palette Preview
+ * =============================
+ * Modern grocery app feel — bright, fresh, professional
+ * REMOVE after decision
+ */
+
+/* Clean & Fresh — Light */
+.clean-preview {
+  /* Background & Surface */
+  --background: oklch(0.985 0 0);
+  --foreground: oklch(0.25 0.02 250);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.25 0.02 250);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.25 0.02 250);
+
+  /* Primary — Fresh Green */
+  --primary: oklch(0.65 0.12 145);
+  --primary-foreground: oklch(1 0 0);
+
+  /* Secondary — Soft sky */
+  --secondary: oklch(0.96 0.01 200);
+  --secondary-foreground: oklch(0.25 0.02 250);
+
+  /* Muted */
+  --muted: oklch(0.93 0.01 200);
+  --muted-foreground: oklch(0.50 0.02 250);
+
+  /* Accent — Blueberry */
+  --accent: oklch(0.55 0.15 250);
+  --accent-foreground: oklch(1 0 0);
+
+  /* Destructive */
+  --destructive: oklch(0.55 0.15 25);
+  --destructive-foreground: oklch(1 0 0);
+
+  /* Border & Input */
+  --border: oklch(0.89 0.01 200);
+  --input: oklch(0.89 0.01 200);
+  --ring: oklch(0.65 0.12 145);
+
+  /* Fonts — Poppins + Plus Jakarta Sans */
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Poppins', ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Clean & Fresh — Dark */
+.clean-preview.dark {
+  /* Background & Surface */
+  --background: oklch(0.15 0.02 250);
+  --foreground: oklch(0.95 0 0);
+  --card: oklch(0.18 0.02 250);
+  --card-foreground: oklch(0.95 0 0);
+  --popover: oklch(0.18 0.02 250);
+  --popover-foreground: oklch(0.95 0 0);
+
+  /* Primary — Bright green */
+  --primary: oklch(0.72 0.15 145);
+  --primary-foreground: oklch(0.15 0.02 250);
+
+  /* Secondary */
+  --secondary: oklch(0.22 0.02 250);
+  --secondary-foreground: oklch(0.95 0 0);
+
+  /* Muted */
+  --muted: oklch(0.25 0.02 250);
+  --muted-foreground: oklch(0.60 0.02 250);
+
+  /* Accent — Bright blueberry */
+  --accent: oklch(0.65 0.15 250);
+  --accent-foreground: oklch(0.15 0.02 250);
+
+  /* Destructive */
+  --destructive: oklch(0.60 0.15 25);
+  --destructive-foreground: oklch(0.95 0 0);
+
+  /* Border & Input */
+  --border: oklch(0.30 0.02 250);
+  --input: oklch(0.30 0.02 250);
+  --ring: oklch(0.72 0.15 145);
+}
+
+/* Apply clean heading font when preview is active */
+.clean-preview h1,
+.clean-preview h2,
+.clean-preview h3,
+.clean-preview h4 {
+  font-family: var(--font-heading), var(--font-sans);
+}
+
+/*
+ * Bold & Playful Palette Preview
+ * ==============================
+ * Energetic, strong colors — fun to use
+ * REMOVE after decision
+ */
+
+/* Bold & Playful — Light */
+.bold-preview {
+  /* Background & Surface */
+  --background: oklch(0.985 0.01 60);
+  --foreground: oklch(0.20 0.02 60);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.20 0.02 60);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.20 0.02 60);
+
+  /* Primary — Electric Coral */
+  --primary: oklch(0.65 0.18 50);
+  --primary-foreground: oklch(1 0 0);
+
+  /* Secondary — Soft lavender */
+  --secondary: oklch(0.93 0.02 280);
+  --secondary-foreground: oklch(0.35 0.05 280);
+
+  /* Muted */
+  --muted: oklch(0.92 0.01 60);
+  --muted-foreground: oklch(0.50 0.02 60);
+
+  /* Accent — Electric Teal */
+  --accent: oklch(0.65 0.15 200);
+  --accent-foreground: oklch(1 0 0);
+
+  /* Destructive */
+  --destructive: oklch(0.55 0.15 25);
+  --destructive-foreground: oklch(1 0 0);
+
+  /* Border & Input */
+  --border: oklch(0.88 0.01 60);
+  --input: oklch(0.88 0.01 60);
+  --ring: oklch(0.65 0.18 50);
+
+  /* Fonts — Fredoka + DM Sans */
+  --font-sans: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'Fredoka', ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Bold & Playful — Dark */
+.bold-preview.dark {
+  /* Background & Surface */
+  --background: oklch(0.12 0.03 280);
+  --foreground: oklch(0.96 0.01 60);
+  --card: oklch(0.16 0.03 280);
+  --card-foreground: oklch(0.96 0.01 60);
+  --popover: oklch(0.16 0.03 280);
+  --popover-foreground: oklch(0.96 0.01 60);
+
+  /* Primary — Bright coral */
+  --primary: oklch(0.72 0.18 50);
+  --primary-foreground: oklch(0.12 0.03 280);
+
+  /* Secondary — Deep lavender */
+  --secondary: oklch(0.25 0.04 280);
+  --secondary-foreground: oklch(0.90 0.02 280);
+
+  /* Muted */
+  --muted: oklch(0.22 0.03 280);
+  --muted-foreground: oklch(0.65 0.02 280);
+
+  /* Accent — Bright teal */
+  --accent: oklch(0.72 0.15 200);
+  --accent-foreground: oklch(0.12 0.03 280);
+
+  /* Destructive */
+  --destructive: oklch(0.62 0.15 25);
+  --destructive-foreground: oklch(0.96 0.01 60);
+
+  /* Border & Input */
+  --border: oklch(0.30 0.04 280);
+  --input: oklch(0.30 0.04 280);
+  --ring: oklch(0.72 0.18 50);
+}
+
+/* Apply bold heading font when preview is active */
+.bold-preview h1,
+.bold-preview h2,
+.bold-preview h3,
+.bold-preview h4 {
+  font-family: var(--font-heading), var(--font-sans);
+}
+
+html {
+  overflow-x: hidden;
+}
+
+*, *::before, *::after {
+  transition:
+    background-color 150ms ease,
+    color 150ms ease,
+    border-color 150ms ease;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+/*
+ * Design System Documentation
+ * ============================
+ *
+ * Typography Weight Hierarchy:
+ *   font-semibold  -- headings, section titles, page titles
+ *   font-medium    -- interactive labels, filter labels, button labels, section labels
+ *   font-normal    -- body text, item names, notes, metadata
+ *
+ * Section Label Style:
+ *   text-xs font-medium tracking-[0.2em] uppercase
+ *   Example: <p className="text-muted-foreground text-xs font-medium tracking-[0.2em] uppercase">
+ *
+ * Interactive Element States:
+ *   Hover:     hover:bg-accent
+ *   Focus:     focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+ *   (Applied to buttons, icon buttons, row interactions)
+ *
+ * Color Palette:
+ *   Uses shadcn/ui semantic tokens only -- no hardcoded color classes in TSX.
+ *   Light mode: --background, --foreground, --muted, --muted-foreground, --accent, --accent-foreground, --border, --ring, --destructive
+ *   Dark mode: same tokens with dark-mode values (see .dark block above)
+ */

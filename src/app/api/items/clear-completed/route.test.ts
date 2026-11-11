@@ -1,0 +1,167 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("next/headers", () => ({
+  headers: vi.fn().mockResolvedValue(new Headers()),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  auth: {
+    api: {
+      getSession: vi.fn(),
+    },
+  },
+}));
+
+vi.mock("@/db", () => ({
+  db: {
+    select: vi.fn(),
+    insert: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    transaction: vi.fn(),
+  },
+}));
+
+import { auth } from "@/lib/auth";
+import { POST } from "@/app/api/items/clear-completed/route";
+import { NextRequest } from "next/server";
+
+function makeRequest(): NextRequest {
+  return new NextRequest("http://localhost:3000/api/items/clear-completed", {
+    method: "POST",
+  });
+}
+
+describe("POST /api/items/clear-completed", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns 401 when no session", async () => {
+    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
+
+    const res = await POST(makeRequest());
+
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when there is no active household", async () => {
+    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
+      session: { activeOrganizationId: null },
+      user: { id: "u1" },
+    } as never);
+
+    const res = await POST(makeRequest());
+
+    expect(res.status).toBe(400);
+  });
+
+  it("archives checked items and returns them for the active organization", async () => {
+    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
+      session: { activeOrganizationId: "org-1" },
+      user: { id: "u1" },
+    } as never);
+    const { db } = await import("@/db");
+    const selectWhere = vi.fn().mockResolvedValue([
+      {
+        item: {
+          id: "item-checked-1",
+          name: "Milk",
+          quantity: "1",
+          note: null,
+          categoryId: "cat-1",
+          isChecked: true,
+          isActive: true,
+          archivedAt: null,
+          createdAt: new Date("2026-03-13T00:00:00.000Z"),
+          updatedAt: new Date("2026-03-13T00:00:00.000Z"),
+        },
+        storeId: "store-1",
+      },
+      {
+        item: {
+          id: "item-checked-2",
+          name: "Eggs",
+          quantity: null,
+          note: "Large",
+          categoryId: null,
+          isChecked: true,
+          isActive: true,
+          archivedAt: null,
+          createdAt: new Date("2026-03-13T00:00:00.000Z"),
+          updatedAt: new Date("2026-03-13T00:00:00.000Z"),
+        },
+        storeId: null,
+      },
+    ]);
+    const leftJoin = vi.fn().mockReturnValue({ where: selectWhere });
+    const from = vi.fn().mockReturnValue({ leftJoin });
+    vi.mocked(db.select).mockReturnValue({ from } as never);
+    const updateWhere = vi.fn().mockResolvedValue(undefined);
+    const set = vi.fn().mockReturnValue({ where: updateWhere });
+    vi.mocked(db.update).mockReturnValue({ set } as never);
+
+    const res = await POST(makeRequest());
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({
+      clearedItems: [
+        {
+          id: "item-checked-1",
+          name: "Milk",
+          quantity: "1",
+          note: null,
+          categoryId: "cat-1",
+          isChecked: true,
+          isActive: true,
+          archivedAt: null,
+          createdAt: "2026-03-13T00:00:00.000Z",
+          updatedAt: "2026-03-13T00:00:00.000Z",
+          storeIds: ["store-1"],
+        },
+        {
+          id: "item-checked-2",
+          name: "Eggs",
+          quantity: null,
+          note: "Large",
+          categoryId: null,
+          isChecked: true,
+          isActive: true,
+          archivedAt: null,
+          createdAt: "2026-03-13T00:00:00.000Z",
+          updatedAt: "2026-03-13T00:00:00.000Z",
+          storeIds: [],
+        },
+      ],
+    });
+    expect(selectWhere).toHaveBeenCalledOnce();
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({ archivedAt: expect.any(Date) }));
+    expect(set).not.toHaveBeenCalledWith(expect.objectContaining({ isActive: false }));
+    expect(updateWhere).toHaveBeenCalledOnce();
+  });
+
+  it("returns an empty clearedItems array when no checked items exist", async () => {
+    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
+      session: { activeOrganizationId: "org-1" },
+      user: { id: "u1" },
+    } as never);
+    const { db } = await import("@/db");
+    const selectWhere = vi.fn().mockResolvedValue([]);
+    vi.mocked(db.select).mockReturnValue({
+      from: vi.fn().mockReturnValue({
+        leftJoin: vi.fn().mockReturnValue({ where: selectWhere }),
+      }),
+    } as never);
+    const updateWhere = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(db.update).mockReturnValue({
+      set: vi.fn().mockReturnValue({ where: updateWhere }),
+    } as never);
+
+    const res = await POST(makeRequest());
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ clearedItems: [] });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+});
