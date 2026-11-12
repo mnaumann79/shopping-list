@@ -1,8 +1,17 @@
--- Initial schema for the perf-audit CI workflow.
--- Mirrors src/db/schema/{auth,households,items}.ts.
--- Applied via psql to the ephemeral Postgres service container.
--- If you add a new table or column, regenerate this file (or extend
--- src/db/migrations/ and apply it here in order).
+-- Flat snapshot of the schema, for the perf-audit CI workflow to bootstrap a
+-- database with psql:
+--   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/init.sql
+--
+-- The migration folder is the source of truth. This file is the same schema
+-- as src/db/migrations/0000_init.sql plus the two ALTER migrations that
+-- follow it (0001 adds the unique constraint on categories, 0002 adds
+-- items.archived_at), and it has to be kept in step with them: the constraint
+-- below is named exactly as 0001 names it,
+-- categories_organization_id_name_unique.
+--
+-- Do not add a table or a column here without a migration next to it - a
+-- change that is not in src/db/migrations/ is not applied by
+-- `node scripts/db-migrate.mjs` and the two schemas drift apart again.
 
 CREATE TABLE "user" (
   "id" text PRIMARY KEY,
@@ -86,7 +95,7 @@ CREATE TABLE "categories" (
   "is_default" boolean NOT NULL DEFAULT false,
   "is_active" boolean NOT NULL DEFAULT true,
   "created_at" timestamp NOT NULL DEFAULT now(),
-  CONSTRAINT "categories_org_name_unique" UNIQUE ("organization_id", "name")
+  CONSTRAINT "categories_organization_id_name_unique" UNIQUE ("organization_id", "name")
 );
 
 CREATE TABLE "stores" (
@@ -107,10 +116,12 @@ CREATE TABLE "items" (
   "category_id" uuid REFERENCES "categories"("id") ON DELETE SET NULL,
   "is_active" boolean NOT NULL DEFAULT true,
   "is_checked" boolean NOT NULL DEFAULT false,
-  "archived_at" timestamp,
   "created_at" timestamp NOT NULL DEFAULT now(),
   "updated_at" timestamp NOT NULL DEFAULT now(),
-  "created_by_id" text REFERENCES "user"("id") ON DELETE SET NULL
+  "created_by_id" text REFERENCES "user"("id") ON DELETE SET NULL,
+  -- Last, because 0002 adds it with ALTER TABLE and the migrations are
+  -- what produce the schema: the column order here has to match theirs.
+  "archived_at" timestamp
 );
 
 CREATE TABLE "item_stores" (
