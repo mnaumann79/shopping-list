@@ -22,7 +22,13 @@
  *
  * TLS follows the connection string: sslmode=require verifies the server
  * certificate, sslmode=no-verify turns that off, and sslrootcert names a CA
- * for a private one.
+ * for a private one. With uselibpqcompat=true the driver follows libpq
+ * instead: sslmode=require then checks the certificate chain without the
+ * hostname, and sslmode=no-verify does not turn the verification off.
+ *
+ * The connection has to be a direct or a session-pooled one. A transaction-
+ * pooled endpoint can route the advisory lock and the migration statements
+ * to different backends, and the lock would not serialize them.
  */
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
@@ -46,16 +52,18 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-let url;
-try {
-  url = new URL(databaseUrl);
-} catch {
-  console.error('Cannot migrate: the DATABASE_URL is not a valid URL.');
+// The scheme is read with a regex rather than with `new URL`: a Postgres
+// socket URL has an empty authority - postgresql://user@/dbname?host=/var/run/postgresql
+// - which the WHATWG parser rejects before pg ever gets to see it. pg parses
+// the connection string itself, so the driver is what validates it.
+const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(databaseUrl)?.[1]?.toLowerCase();
+if (!scheme) {
+  console.error('Cannot migrate: the DATABASE_URL is not a Postgres connection string.');
   process.exit(1);
 }
-if (url.protocol !== 'postgresql:' && url.protocol !== 'postgres:') {
+if (scheme !== 'postgresql' && scheme !== 'postgres') {
   console.error(
-    `Cannot migrate: the DATABASE_URL scheme is "${url.protocol}" - the runner needs a Postgres connection string (postgresql://), not an HTTP endpoint.`,
+    `Cannot migrate: the DATABASE_URL scheme is "${scheme}" - the runner needs a Postgres connection string (postgresql://), not an HTTP endpoint.`,
   );
   console.error(
     'The runner applies SQL over a Postgres connection, so it needs a connection string\n' +
@@ -75,13 +83,15 @@ if (url.protocol !== 'postgresql:' && url.protocol !== 'postgres:') {
  * before it connects.
  */
 let client;
+let host;
+let database;
 try {
   client = new pg.Client({ connectionString: databaseUrl });
+  ({ host, database } = client.connectionParameters);
 } catch {
   console.error('Cannot migrate: the DATABASE_URL is not a valid Postgres connection string.');
   process.exit(1);
 }
-const { host, database } = client.connectionParameters;
 
 /**
  * The hosts the runner may migrate.
@@ -96,6 +106,10 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 
 function isDevelopmentHost(host) {
   const name = host.toLowerCase();
+  // A Unix socket is a path on this machine, so it is local by definition.
+  if (name.startsWith('/')) {
+    return true;
+  }
   return LOCAL_HOSTS.has(name) || name.endsWith('.local') || name.endsWith('.localhost');
 }
 
