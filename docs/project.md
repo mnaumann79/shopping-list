@@ -1887,15 +1887,35 @@ applied AS (
          -- per-field rule in section 11 reads metadata the apply never
          -- writes, and the next operation's comparison has nothing to
          -- compare against.
-         field_meta    = t.field_meta || jsonb_build_object(
-                           'name',        jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
-                           'quantity',    jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
-                           'note',        jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
-                           'categoryId',  jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
-                           'isChecked',   jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
-                           'deletedAt',   jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
-                           'archivedAt',  jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id)
-                         ),
+         -- field_meta is written ONLY for the fields this operation won.
+         -- jsonb_strip_nulls drops the keys whose CASE yielded NULL, so an
+         -- unrelated write does not touch the entry for a field it did not
+         -- change. Writing all of them unconditionally would raise
+         -- field_meta["isChecked"].v on every write, and section 11's
+         -- check rule compares baseVersion against that value - so every
+         -- later uncheck would report a false conflict.
+         field_meta    = t.field_meta || jsonb_strip_nulls(jsonb_build_object(
+                           'name',       CASE WHEN $op_type = 'item.update' AND $fields ? 'name'
+                                               AND <wins name>
+                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'quantity',   CASE WHEN $op_type = 'item.update' AND $fields ? 'quantity'
+                                               AND <wins quantity>
+                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'note',       CASE WHEN $op_type = 'item.update' AND $fields ? 'note'
+                                               AND <wins note>
+                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'categoryId', CASE WHEN $op_type = 'item.update' AND $fields ? 'categoryId'
+                                               AND <wins categoryId>
+                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'isChecked',  CASE WHEN $op_type = 'item.check' AND <wins isChecked>
+                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'deletedAt',  CASE WHEN $op_type = 'item.delete'
+                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'archivedAt', CASE WHEN $op_type IN ('item.archive','item.bulkArchive','item.unarchive','item.bulkUnarchive')
+                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'storeIds',   CASE WHEN $op_type = 'item.storeTags'
+                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END
+                         )),
 
          lamport       = GREATEST(t.lamport, $op_lamport),
          last_op_id    = $op_id,
@@ -2184,6 +2204,13 @@ The **Operation** column uses the authoritative `type` values enumerated in
 §10.1a. That table is the single source of truth; this table defines only the
 *conflict rule* for each one.
 
+**What the "Surfaced to user?" column means.** It answers exactly one
+question: **is a losing user edit surfaced to the user?** A *Yes* means the
+user made an edit that did not take effect, and the application must tell them
+so — with the value they wanted, the value that won, and a way to act
+(FR-23). A *No* means the outcome is intuitive and nothing the user authored
+was discarded, so there is nothing to report.
+
 | Operation | Field(s) | Rule | Concurrent outcome | Surfaced to user? |
 | --- | --- | --- | --- | --- |
 | `item.create` | all | Server accepts the client id. Idempotent on `opId`. | Two devices create the same id → impossible unless the same `opId` is replayed → duplicate. | No |
@@ -2193,8 +2220,8 @@ The **Operation** column uses the authoritative `type` values enumerated in
 | `item.storeTags` | `storeIds` | The tag set is resolved **per `(item_id, store_id)` pair**, not as a set — each pair is an independent entity with its own `version`, `lamport`, and `device_id` (§9.1). For a single pair: an addition and a removal are ordered by `(lamport, deviceId)`, and when they are **concurrent** (neither operation's base version includes the other's write) the **removal wins** — a deliberate removal must not be undone by a concurrent re-add. Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]` and surfaced. | A adds "Costco", B adds "Aldi" → both tags present. A removes "Costco" while B concurrently re-adds it → **the removal wins**, and A is told. | **Yes**, for any contested or dropped tag |
 | `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `item.undelete` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
 | `item.undelete` | `deletedAt` | Clears a **delete** tombstone. Rejected if a **newer** delete exists — compared as: the tombstone's effective lamport (`field_meta["deletedAt"].lamport`, the lamport of the delete that set it) must not be **greater than** the undelete's own lamport. The delete's ordering value is persisted on the row for exactly this purpose (§9.1). | Delete-then-undelete ordering is respected: a delete at lamport 10 is not undone by an undelete at lamport 5. | No |
-| `item.unarchive` | `archivedAt` | Clears an **archive** mark and returns the item to the active list. Distinct from `item.undelete`, which clears a *delete* tombstone — conflating them resurrects a deleted item. | Re-adding an archived item on two devices → the item is unarchived once; the second is a no-op. | No |
-| `item.bulkUnarchive` | `archivedAt` | The bulk form of `item.unarchive`, carrying a `baseVersion`. Skips items changed since the base, exactly as `item.bulkArchive` does. | Undoing a bulk archive does not resurrect an item another device changed in the meantime. | No |
+| `item.unarchive` | `archivedAt` | Clears an **archive** mark and returns the item to the active list. Distinct from `item.undelete`, which clears a *delete* tombstone — conflating them resurrects a deleted item. Reports a skipped count, as `item.bulkArchive` does. | Re-adding an archived item on two devices → the item is unarchived once; the second is a no-op and is counted as skipped. | **Yes**, if any item was skipped |
+| `item.bulkUnarchive` | `archivedAt` | The bulk form of `item.unarchive`, carrying a version per candidate item. Skips items changed since the base, exactly as `item.bulkArchive` does, and **reports the skipped count**. | Undoing a bulk archive does not resurrect an item another device changed in the meantime. | **Yes**, if any item was skipped |
 | `item.archive` (clear completed) | `archivedAt` | **Archive-wins** over concurrent edits to other fields, but the op carries a **version per candidate item** and **skips any item whose `version` exceeds it** — i.e. items changed on another device since the clear was initiated are not archived. | A clears completed offline; B unchecks an item and changes its quantity → B's item is **not** archived. | **Yes**, the count of skipped items is reported |
 | `item.bulkArchive` (clear completed, bulk) | `archivedAt` | The bulk form of `item.archive`: the same per-item version skip rule, applied across every checked item. The response reports how many items were skipped and why. | A clears completed offline; B changes an item's quantity → that item is **skipped**, not archived, and A is told how many were skipped. | **Yes**, the skipped count is reported |
 | `category.create` | all | Unique `(household_id, name)`. The insert uses **`ON CONFLICT DO NOTHING`**, and a no-op insert is reported as `DUPLICATE_NAME` for that operation alone. It must **not** rely on catching a unique-violation error: in PostgreSQL an error inside a transaction aborts the whole transaction, so one duplicate name would take every other operation in the request down with it. | Two devices create the same category name → one succeeds, the other is rejected with `DUPLICATE_NAME`. Neither affects the other's operations. | **Yes** |
