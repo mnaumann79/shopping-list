@@ -94,7 +94,13 @@ test.describe("Login", () => {
     // sends the user to its default page. A user whose session has no active
     // household is sent on to /onboarding instead - either way they end up
     // on a signed-in page, which is what this spec asserts.
-    await expect(page).not.toHaveURL(/\/sign-in/);
+    await expect(page).toHaveURL(
+      (url) => url.pathname === "/dashboard" || url.pathname === "/onboarding",
+    );
+    // The page the user lands on is a real signed-in page, not an error one.
+    await expect(
+      page.getByLabel("Item name").or(page.getByText("Create your household")),
+    ).toBeVisible();
     const cookies = await page.context().cookies();
     expect(cookies.some((cookie) => cookie.name === "better-auth.session_token")).toBe(true);
   });
