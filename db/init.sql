@@ -1,128 +1,134 @@
--- Initial schema for the perf-audit CI workflow.
--- Mirrors src/db/schema/{auth,households,items}.ts.
--- Applied via psql to the ephemeral Postgres service container.
--- If you add a new table or column, regenerate this file (or extend
--- src/db/migrations/ and apply it here in order).
-
-CREATE TABLE "user" (
-  "id" text PRIMARY KEY,
-  "name" text NOT NULL,
-  "email" text NOT NULL UNIQUE,
-  "email_verified" boolean NOT NULL DEFAULT false,
-  "image" text,
-  "created_at" timestamp NOT NULL DEFAULT now(),
-  "updated_at" timestamp NOT NULL DEFAULT now()
+-- The flat snapshot of the schema in db/migrations/, for a database that is
+-- bootstrapped from scratch rather than migrated. A database built from this
+-- file and a database built by `node scripts/db-migrate.mjs` have the same
+-- schema - constraint names included.
+CREATE TABLE IF NOT EXISTS "account" (
+	"id" text PRIMARY KEY NOT NULL,
+	"account_id" text NOT NULL,
+	"provider_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"access_token" text,
+	"refresh_token" text,
+	"id_token" text,
+	"access_token_expires_at" timestamp,
+	"refresh_token_expires_at" timestamp,
+	"scope" text,
+	"password" text,
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	"updated_at" timestamp DEFAULT now() NOT NULL
 );
-
-CREATE TABLE "session" (
-  "id" text PRIMARY KEY,
-  "expires_at" timestamp NOT NULL,
-  "token" text NOT NULL UNIQUE,
-  "created_at" timestamp NOT NULL DEFAULT now(),
-  "updated_at" timestamp NOT NULL DEFAULT now(),
-  "ip_address" text,
-  "user_agent" text,
-  "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
-  "active_organization_id" text
+CREATE TABLE IF NOT EXISTS "invitation" (
+	"id" text PRIMARY KEY NOT NULL,
+	"organization_id" text NOT NULL,
+	"email" text NOT NULL,
+	"role" text,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	"inviter_id" text NOT NULL,
+	"created_at" timestamp DEFAULT now() NOT NULL
 );
-
-CREATE TABLE "account" (
-  "id" text PRIMARY KEY,
-  "account_id" text NOT NULL,
-  "provider_id" text NOT NULL,
-  "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
-  "access_token" text,
-  "refresh_token" text,
-  "id_token" text,
-  "access_token_expires_at" timestamp,
-  "refresh_token_expires_at" timestamp,
-  "scope" text,
-  "password" text,
-  "created_at" timestamp NOT NULL DEFAULT now(),
-  "updated_at" timestamp NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS "member" (
+	"id" text PRIMARY KEY NOT NULL,
+	"organization_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"role" text DEFAULT 'member' NOT NULL,
+	"created_at" timestamp DEFAULT now() NOT NULL
 );
-
-CREATE TABLE "verification" (
-  "id" text PRIMARY KEY,
-  "identifier" text NOT NULL,
-  "value" text NOT NULL,
-  "expires_at" timestamp NOT NULL,
-  "created_at" timestamp DEFAULT now(),
-  "updated_at" timestamp DEFAULT now()
+CREATE TABLE IF NOT EXISTS "organization" (
+	"id" text PRIMARY KEY NOT NULL,
+	"name" text NOT NULL,
+	"slug" text,
+	"logo" text,
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	"metadata" text,
+	CONSTRAINT "organization_slug_unique" UNIQUE("slug")
 );
-
-CREATE TABLE "organization" (
-  "id" text PRIMARY KEY,
-  "name" text NOT NULL,
-  "slug" text UNIQUE,
-  "logo" text,
-  "created_at" timestamp NOT NULL DEFAULT now(),
-  "metadata" text
+CREATE TABLE IF NOT EXISTS "session" (
+	"id" text PRIMARY KEY NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	"token" text NOT NULL,
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	"updated_at" timestamp DEFAULT now() NOT NULL,
+	"ip_address" text,
+	"user_agent" text,
+	"user_id" text NOT NULL,
+	"active_organization_id" text,
+	CONSTRAINT "session_token_unique" UNIQUE("token")
 );
-
-CREATE TABLE "member" (
-  "id" text PRIMARY KEY,
-  "organization_id" text NOT NULL REFERENCES "organization"("id") ON DELETE CASCADE,
-  "user_id" text NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
-  "role" text NOT NULL DEFAULT 'member',
-  "created_at" timestamp NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS "user" (
+	"id" text PRIMARY KEY NOT NULL,
+	"name" text NOT NULL,
+	"email" text NOT NULL,
+	"email_verified" boolean DEFAULT false NOT NULL,
+	"image" text,
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	"updated_at" timestamp DEFAULT now() NOT NULL,
+	CONSTRAINT "user_email_unique" UNIQUE("email")
 );
-
-CREATE TABLE "invitation" (
-  "id" text PRIMARY KEY,
-  "organization_id" text NOT NULL REFERENCES "organization"("id") ON DELETE CASCADE,
-  "email" text NOT NULL,
-  "role" text,
-  "status" text NOT NULL DEFAULT 'pending',
-  "expires_at" timestamp NOT NULL,
-  "inviter_id" text NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
-  "created_at" timestamp NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS "verification" (
+	"id" text PRIMARY KEY NOT NULL,
+	"identifier" text NOT NULL,
+	"value" text NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	"created_at" timestamp DEFAULT now(),
+	"updated_at" timestamp DEFAULT now()
 );
-
-CREATE TABLE "categories" (
-  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "organization_id" text NOT NULL REFERENCES "organization"("id") ON DELETE CASCADE,
-  "name" text NOT NULL,
-  "is_default" boolean NOT NULL DEFAULT false,
-  "is_active" boolean NOT NULL DEFAULT true,
-  "created_at" timestamp NOT NULL DEFAULT now(),
-  CONSTRAINT "categories_org_name_unique" UNIQUE ("organization_id", "name")
+CREATE TABLE IF NOT EXISTS "household_join_links" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"token" text NOT NULL,
+	"organization_id" text NOT NULL,
+	"created_by_id" text NOT NULL,
+	"expires_at" timestamp NOT NULL,
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	CONSTRAINT "household_join_links_token_unique" UNIQUE("token")
 );
-
-CREATE TABLE "stores" (
-  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "organization_id" text NOT NULL REFERENCES "organization"("id") ON DELETE CASCADE,
-  "name" text NOT NULL,
-  "is_active" boolean NOT NULL DEFAULT true,
-  "created_at" timestamp NOT NULL DEFAULT now(),
-  "updated_at" timestamp NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS "categories" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"organization_id" text NOT NULL,
+	"name" text NOT NULL,
+	"is_default" boolean DEFAULT false NOT NULL,
+	"is_active" boolean DEFAULT true NOT NULL,
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	CONSTRAINT "categories_organization_id_name_unique" UNIQUE("organization_id","name")
 );
-
-CREATE TABLE "items" (
-  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "organization_id" text NOT NULL REFERENCES "organization"("id") ON DELETE CASCADE,
-  "name" text NOT NULL,
-  "quantity" text,
-  "note" text,
-  "category_id" uuid REFERENCES "categories"("id") ON DELETE SET NULL,
-  "is_active" boolean NOT NULL DEFAULT true,
-  "is_checked" boolean NOT NULL DEFAULT false,
-  "archived_at" timestamp,
-  "created_at" timestamp NOT NULL DEFAULT now(),
-  "updated_at" timestamp NOT NULL DEFAULT now(),
-  "created_by_id" text REFERENCES "user"("id") ON DELETE SET NULL
+CREATE TABLE IF NOT EXISTS "item_stores" (
+	"item_id" uuid NOT NULL,
+	"store_id" uuid NOT NULL
 );
-
-CREATE TABLE "item_stores" (
-  "item_id" uuid NOT NULL REFERENCES "items"("id") ON DELETE CASCADE,
-  "store_id" uuid NOT NULL REFERENCES "stores"("id") ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS "items" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"organization_id" text NOT NULL,
+	"name" text NOT NULL,
+	"quantity" text,
+	"note" text,
+	"category_id" uuid,
+	"is_active" boolean DEFAULT true NOT NULL,
+	"is_checked" boolean DEFAULT false NOT NULL,
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	"updated_at" timestamp DEFAULT now() NOT NULL,
+	"created_by_id" text,
+	"archived_at" timestamp
 );
-
-CREATE TABLE "household_join_links" (
-  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  "token" text NOT NULL UNIQUE,
-  "organization_id" text NOT NULL REFERENCES "organization"("id") ON DELETE CASCADE,
-  "created_by_id" text NOT NULL REFERENCES "user"("id"),
-  "expires_at" timestamp NOT NULL,
-  "created_at" timestamp NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS "stores" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"organization_id" text NOT NULL,
+	"name" text NOT NULL,
+	"is_active" boolean DEFAULT true NOT NULL,
+	"created_at" timestamp DEFAULT now() NOT NULL,
+	"updated_at" timestamp DEFAULT now() NOT NULL
 );
+ALTER TABLE "account" ADD CONSTRAINT "account_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "invitation" ADD CONSTRAINT "invitation_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "invitation" ADD CONSTRAINT "invitation_inviter_id_user_id_fk" FOREIGN KEY ("inviter_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "member" ADD CONSTRAINT "member_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "member" ADD CONSTRAINT "member_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "session" ADD CONSTRAINT "session_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "household_join_links" ADD CONSTRAINT "household_join_links_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "household_join_links" ADD CONSTRAINT "household_join_links_created_by_id_user_id_fk" FOREIGN KEY ("created_by_id") REFERENCES "public"."user"("id") ON DELETE no action ON UPDATE no action;
+ALTER TABLE "categories" ADD CONSTRAINT "categories_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "item_stores" ADD CONSTRAINT "item_stores_item_id_items_id_fk" FOREIGN KEY ("item_id") REFERENCES "public"."items"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "item_stores" ADD CONSTRAINT "item_stores_store_id_stores_id_fk" FOREIGN KEY ("store_id") REFERENCES "public"."stores"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "items" ADD CONSTRAINT "items_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "items" ADD CONSTRAINT "items_category_id_categories_id_fk" FOREIGN KEY ("category_id") REFERENCES "public"."categories"("id") ON DELETE set null ON UPDATE no action;
+ALTER TABLE "items" ADD CONSTRAINT "items_created_by_id_user_id_fk" FOREIGN KEY ("created_by_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+ALTER TABLE "stores" ADD CONSTRAINT "stores_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
