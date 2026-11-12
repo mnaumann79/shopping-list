@@ -992,6 +992,14 @@ separate migration that sets `deleted_at = now()` where `is_active = false`.
 `POST /api/sync` — a single endpoint that both pushes and pulls, so a sync
 cycle is one round trip.
 
+**Ordering is normative: the server applies the pushed operations first, then
+computes the pull.** This is not an implementation detail — it is a correctness
+requirement. The client sends operations derived from a version of the world it
+has seen; if the pull were computed first, a client's own operation would be
+resolved against a version it never saw. Pushing first means the server
+resolves the client's operation against the state the client actually knew
+about, and the pull that follows includes the outcome of that operation.
+
 **Request**
 
 ```jsonc
@@ -1005,7 +1013,7 @@ cycle is one round trip.
       "opId": "uuid-v7",        // globally unique; the idempotency key
       "entityType": "item",
       "entityId": "uuid-v7",
-      "type": "update",
+      "type": "item.update",    // one of the operation types in §10.1a
       "baseVersion": 12,        // server version the client edited from
       "lamport": 88,
       "payload": { "quantity": "2 kg", "name": "Milk" },
@@ -1017,15 +1025,26 @@ cycle is one round trip.
 
 **Response**
 
+Every operation lands in exactly one of three buckets — `applied`,
+`duplicates`, or `rejected` — and **every bucket carries the same envelope**
+so the client never has to special-case one of them:
+
 ```jsonc
 {
-  "acknowledged": ["uuid-v7"],       // applied
-  "duplicates":   ["uuid-v7"],       // already applied earlier — same result replayed
-  "rejected":     [{ "opId": "…", "code": "VERSION_CONFLICT", "reason": "…" }],
+  "acknowledged": ["uuid-v7"],   // opIds now durably applied (not duplicates)
+  "duplicates":   ["uuid-v7"],   // already applied earlier — cached result replayed
+  "rejected": [
+    { "opId": "…", "entityType": "item", "entityId": "…",
+      "code": "VERSION_CONFLICT", "reason": "quantity was changed on another device",
+      "conflicts": [
+        { "field": "quantity", "localValue": "2 kg", "serverValue": "3 kg", "winner": "server" }
+      ] }
+  ],
   "applied": [
     { "opId": "…", "entityType": "item", "entityId": "…",
+      "outcome": "applied",      // "applied" | "partially_applied"
       "result": { /* entity after apply */ },
-      "conflicts": [{ "field": "quantity", "localValue": "2 kg", "serverValue": "3 kg", "winner": "server" }] }
+      "conflicts": [] }          // conflicts on fields this op LOST but that still applied
   ],
   "changes": [
     { "seq": 1043, "entityType": "item", "entity": { /* full snapshot */ },
@@ -1036,6 +1055,50 @@ cycle is one round trip.
   "fullResyncRequired": false
 }
 ```
+
+**The losing path carries its conflict detail.** This is the point most easily
+got wrong: an operation that *loses* a field is not "applied" — it is rejected
+— so if `conflicts[]` lived only on `applied[]`, the loser would never see the
+server's value, and the "Keep mine / Use theirs / Dismiss" presentation in
+§11.2 would have no data to render. `rejected[]` therefore carries the same
+optional `conflicts[]` array, plus `entityType` and `entityId`, as `applied[]`.
+
+**Per-field outcomes.** An operation touching several fields can partially
+succeed — for example, a `quantity` edit that loses a concurrent change while
+its `name` edit succeeds cleanly. In that case the operation is reported as
+`applied` with `outcome: "partially_applied"`, and the lost field appears in
+its `conflicts[]` with `winner: "server"`. A rejected operation changed nothing
+at all.
+
+### 10.1a Operation types (authoritative enumeration)
+
+This table is the single source of truth. The `type` field of an operation is
+exactly one of these strings, and §11's conflict rules are keyed to them.
+
+| `type` | Entity | Payload | Conflict rule (§11) |
+| --- | --- | --- | --- |
+| `item.create` | item | `name`, `quantity`, `note`, `categoryId`, `storeIds` | Server accepts the client id; idempotent on `opId`. |
+| `item.update` | item | any of `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`; the losing value is reported as a conflict. |
+| `item.check` | item | `isChecked` (boolean) | **Check-wins** (§11). |
+| `item.storeTags` | item | `storeIds` (array) | **Add-wins** for concurrent additions; a removal applies only against a base that contained the tag. |
+| `item.delete` | item | — | **Delete-wins**, terminal tombstone. |
+| `item.restore` | item | — | Clears a tombstone; rejected if a newer delete exists. |
+| `item.archive` | item | `baseVersion` (on the op) | **Archive-wins**, but skips items whose `version` exceeds the op's base. |
+| `item.bulkArchive` | item | `baseVersion` | The bulk form of `item.archive`; reports how many items it skipped. |
+| `category.create` | category | `name` | Unique `(household_id, name)`; a duplicate is rejected with `DUPLICATE_NAME`. |
+| `category.rename` | category | `name` | Field-level LWW. |
+| `category.delete` | category | — | Rejected if any item still references it. |
+| `store.create` | store | `name` | Duplicate names are rejected. |
+| `store.rename` | store | `name` | Field-level LWW. |
+| `store.delete` | store | — | Removes the store's item tags; the items themselves survive. |
+
+> **Naming note.** The `type` values are namespaced by entity (`item.update`,
+> not `update`), so that a client reading an unfamiliar operation type can
+> tell whether it understands it. An operation whose `type` is not in this
+> table is rejected with `UNSUPPORTED_OPERATION` and surfaced to the user
+> rather than silently dropped (§13.2).
+
+
 
 ### 10.2 Lifecycle
 
@@ -1069,6 +1132,10 @@ cycle is one round trip.
                                                   │  3. append      │
                                                   │     change log  │
                                                   │  4. ack         │
+                                                  │ ──────────────  │
+                                                  │  5. THEN compute│
+                                                  │     the pull    │
+                                                  │     (>= lastSeq)│
                                                   └───────┬────────┘
                                                            ▼
                                                   changes written back
@@ -1076,6 +1143,15 @@ cycle is one round trip.
                                                   rows removed; conflicts
                                                   recorded
 ```
+
+**Steps 1–4 (push) strictly precede step 5 (pull).** The server resolves the
+client's pushed operations against the state the client knew about, and only
+then computes the changes to hand back. Applying them in the other order would
+resolve a client's own operation against a version it never saw (§10.1).
+
+The client's change-application then follows the same order: the push response
+is applied first (acknowledging or rejecting the client's operations), and the
+pulled changes second, subject to the pending-field rule in §10.7.
 
 ### 10.3 Idempotency (INV-08, scenario 9)
 
@@ -1125,7 +1201,15 @@ sole mechanism.
 
 ### 10.7 Change application on the client
 
-For each `change`:
+The client applies a sync response in two phases, in this order:
+
+**Phase 1 — the push response.** For each operation in `applied[]`,
+`duplicates[]`, and `rejected[]`, the client resolves its outbox row:
+acknowledged and duplicate operations are removed from the outbox and their
+local rows marked no longer pending; rejected operations move to
+`state = "blocked"` and raise the conflicts reported on the response.
+
+**Phase 2 — the pulled changes.** For each `change`:
 1. If `entity.deleted` → write a local tombstone (`deletedAt` set) — never remove
    the row outright (INV-07).
 2. Else → upsert the snapshot.
@@ -1137,6 +1221,12 @@ For each `change`:
    this is what lets "one device checks an item while another edits its
    quantity" merge cleanly.
 
+**The phases must not be interleaved.** Resolving the outbox first is what
+makes rule 3 correct: by the time the pulled changes are applied, the client's
+own operations are already known to be either accepted or rejected, so a
+change produced by the client's *own* just-pushed operation does not overwrite
+the local value it just wrote.
+
 ---
 
 ## 11. Conflict resolution matrix
@@ -1146,6 +1236,10 @@ For each `change`:
 The server compares the incoming operation's `baseVersion` and `lamport` against
 the stored row's `version` and `field_meta`. Ordering is by `(lamport, deviceId)`
 — a total order that does not depend on wall-clock time.
+
+The **Operation** column uses the authoritative `type` values enumerated in
+§10.1a. That table is the single source of truth; this table defines only the
+*conflict rule* for each one.
 
 | Operation | Field(s) | Rule | Concurrent outcome | Surfaced to user? |
 | --- | --- | --- | --- | --- |
@@ -1157,6 +1251,7 @@ the stored row's `version` and `field_meta`. Ordering is by `(lamport, deviceId)
 | `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `restore` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
 | `item.restore` (re-add) | `deletedAt`, `archivedAt` | Clears the tombstone. Rejected if a *newer* delete exists. | Restore-then-delete ordering is respected. | No |
 | `item.archive` (clear completed) | `archivedAt` | **Archive-wins** over concurrent edits to other fields, but the op carries a `baseVersion` and **skips any item whose `version` exceeds it** — i.e. items changed on another device since the clear was initiated are not archived. | A clears completed offline; B unchecks an item and changes its quantity → B's item is **not** archived. | **Yes**, the count of skipped items is reported |
+| `item.bulkArchive` (clear completed, bulk) | `archivedAt` | The bulk form of `item.archive`: the same base-version skip rule, applied across every checked item. The response reports how many items were skipped and why. | A clears completed offline; B changes an item's quantity → that item is **skipped**, not archived, and A is told how many were skipped. | **Yes**, the skipped count is reported |
 | `category.create` | all | Unique `(household_id, name)`. On conflict, the second op is rejected with `DUPLICATE_NAME` and surfaced. | — | **Yes** |
 | `category.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
 | `store.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
