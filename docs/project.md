@@ -1120,7 +1120,7 @@ union of the fields touched by the row's outstanding operations.
 | `id` | `uuid` PK | Unchanged type; the server now accepts client-supplied values. |
 | `deleted_at` | `timestamptz` nullable | **Tombstone.** `NULL` = live. Set on delete; cleared only by an explicit restore. |
 | `version` | `integer` not null default 1 | Incremented on every server-applied change. The client's `baseVersion` is checked against it. |
-| `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata: `{"name": {"v": 4, "lamport": 12, "device": "d-…"}}`. Enables per-field conflict resolution without a separate table. |
+| `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata: `{"name": {"v": 4, "lamport": 12, "device": "d-…"}}`. Enables per-field conflict resolution without a separate table. **It also carries the ordering key for the tombstone:** `field_meta["deletedAt"].lamport` records the effective lamport of the delete that set `deleted_at`, so `item.undelete` can tell whether a *newer* delete exists (§11). |
 | `updated_by` | `text` nullable → `user.id` | Who last changed the row. |
 | `lamport` | `bigint` not null default 0 | Highest Lamport value applied to this row. |
 | `last_op_id` | `uuid` nullable | The `opId` of the operation that last wrote this row. Set by the compare-and-swap in the same batch. The change-log append and the idempotency record are guarded on `last_op_id = $opId`, which is what proves that *this* operation is the one whose write landed — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
@@ -1414,6 +1414,42 @@ epoch live in `household_sync_state` (§9.2). `serverClock` is that household's
 clock — the client merges it into its own (§10.3). `epoch` changes whenever a
 full resync occurs, so a client can tell "the server reset my household's
 history" from "I am merely behind".
+
+**Error codes — a closed set.** The client branches on these, so the set is
+closed and every code has a defined meaning. An unrecognised code must be
+treated as a transient failure and retried, never as a rejection.
+
+| Code | Meaning | Retryable? | Surfaced to the user? |
+| --- | --- | --- | --- |
+| `VALIDATION_FAILED` | The operation's payload does not satisfy the field rules | No | **Yes** — naming the field |
+| `UNSUPPORTED_OPERATION` | The `type` is not in §10.1a, or is not supported by this server version | No | **Yes** — the operation is blocked, not dropped |
+| `VERSION_CONFLICT` | The compare-and-swap matched zero rows: the entity changed underneath the operation | Yes, after re-reading | **Yes** — with the conflict card |
+| `CONFLICT_RETRY_EXHAUSTED` | The operation kept losing the race; it was retried the maximum number of times | No | **Yes** — the change is blocked, not dropped |
+| `DUPLICATE_NAME` | A category or store with that name already exists | No | **Yes** |
+| `DUPLICATE_ENTITY_OPERATION` | The request contains two operations for the same entity | No | **Yes** — the client should coalesce (§10.1) |
+| `ENTITY_NOT_FOUND` | The entity does not exist **in the requested household**, or is tombstoned | No | **Yes** |
+| `ENTITY_EXISTS` | The entity already exists — a create for an id that is taken | No | **Yes** |
+| `CATEGORY_IN_USE` | The category is still referenced by items | No | **Yes** — naming the blocking items |
+| `NOT_AUTHORIZED` | The actor is not permitted to perform this operation | No | **Yes** |
+| `SESSION_EXPIRED` | The session is no longer valid | After re-authentication | **Yes** — "Sign in to sync" |
+
+**One operation per entity per request.** A request may not contain two
+operations for the same entity: the apply is one statement per operation, and
+one statement cannot carry both. The **client coalesces** — it collapses its
+outbox to the final local state per entity before sending, so a user who adds
+an item and then renames it sends one `item.create` with the final name, not
+two operations. The **server rejects** a request that contains two operations
+for the same entity, with `DUPLICATE_ENTITY_OPERATION` for the second one. The
+request continues; the other operations are unaffected.
+
+**Cross-household entity ids are `ENTITY_NOT_FOUND`, not 403.** Every
+`entityId` in a request resolves **within the requested household**. An id
+belonging to another household is simply not found *there*, so it is
+`ENTITY_NOT_FOUND` for that operation and the request continues — a household
+membership check must not become an oracle that confirms the id exists
+elsewhere. `403 NOT_AUTHORIZED` is returned only when the **actor** is not a
+member of the requested household at all, which is a property of the session,
+not of the entity.
 
 **The losing path carries its conflict detail.** This is the point most easily
 got wrong: an operation that *loses* a field is not "applied" — it is rejected
@@ -1721,10 +1757,10 @@ The **Operation** column uses the authoritative `type` values enumerated in
 | `item.create` | all | Server accepts the client id. Idempotent on `opId`. | Two devices create the same id → impossible unless the same `opId` is replayed → duplicate. | No |
 | `item.create` | all | Two devices create *different* items with the same name. | **Both survive** as separate items. No automatic merge. | No |
 | `item.update` | `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`. | The loser's value is stored as a **conflict record**; the winner's value applies. | **Yes** |
-| `item.check` | `isChecked` | **Check-wins.** An uncheck whose `baseVersion` predates a *different* device's check does **not** clear the check. An uncheck based on a version that already includes the check does clear it. | Device A checks; device B (offline) unchecks → **item stays checked**. | **Yes** — the item shows `Checked by <name>` and an entry is added to "Needs attention". The *outcome* is intuitive, but the **user's action was overridden**, and FR-23 requires that an overridden edit is never silently discarded. |
-| `item.storeTags` | `storeIds` | **Add-wins** for concurrent additions. A removal applies only if the removal's `baseVersion` already contained the tag. | A adds "Costco", B adds "Aldi" → both tags present. | No |
+| `item.check` | `isChecked` | **Check-wins**, with the comparison stated exactly: the uncheck **applies** iff `op.baseVersion >= field_meta["isChecked"].v` — that is, iff the uncheck was made against a version that already included the check. Otherwise the check is newer than the uncheck's base, the check stands, and the uncheck is reported as a conflict. | Device A checks; device B (offline) unchecks from an older base → `baseVersion < field_meta["isChecked"].v` → **the item stays checked**. | **Yes** — the item shows `Checked by <name>` and an entry is added to "Needs attention". The *outcome* is intuitive, but the **user's action was overridden**, and FR-23 requires that an overridden edit is never silently discarded. |
+| `item.storeTags` | `storeIds` | The tag set is resolved **per `(item_id, store_id)` pair**, not as a set — each pair is an independent entity with its own `version`, `lamport`, and `device_id` (§9.1). For a single pair: an addition and a removal are ordered by `(lamport, deviceId)`, and when they are **concurrent** (neither operation's base version includes the other's write) the **removal wins** — a deliberate removal must not be undone by a concurrent re-add. Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]` and surfaced. | A adds "Costco", B adds "Aldi" → both tags present. A removes "Costco" while B concurrently re-adds it → **the removal wins**, and A is told. | **Yes**, for any contested or dropped tag |
 | `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `restore` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
-| `item.undelete` | `deletedAt` | Clears a **delete** tombstone. Rejected if a *newer* delete exists. | Restore-then-delete ordering is respected. | No |
+| `item.undelete` | `deletedAt` | Clears a **delete** tombstone. Rejected if a **newer** delete exists — compared as: the tombstone's effective lamport (`field_meta["deletedAt"].lamport`, the lamport of the delete that set it) must not be **greater than** the undelete's own lamport. The delete's ordering value is persisted on the row for exactly this purpose (§9.1). | Delete-then-undelete ordering is respected: a delete at lamport 10 is not undone by an undelete at lamport 5. | No |
 | `item.unarchive` | `archivedAt` | Clears an **archive** mark and returns the item to the active list. Distinct from `item.undelete`, which clears a *delete* tombstone — conflating them resurrects a deleted item. | Re-adding an archived item on two devices → the item is unarchived once; the second is a no-op. | No |
 | `item.bulkUnarchive` | `archivedAt` | The bulk form of `item.unarchive`, carrying a `baseVersion`. Skips items changed since the base, exactly as `item.bulkArchive` does. | Undoing a bulk archive does not resurrect an item another device changed in the meantime. | No |
 | `item.archive` (clear completed) | `archivedAt` | **Archive-wins** over concurrent edits to other fields, but the op carries a **version per candidate item** and **skips any item whose `version` exceeds it** — i.e. items changed on another device since the clear was initiated are not archived. | A clears completed offline; B unchecks an item and changes its quantity → B's item is **not** archived. | **Yes**, the count of skipped items is reported |
