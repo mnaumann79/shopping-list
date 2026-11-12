@@ -48,3 +48,7 @@ next-env.d.ts
 
 # the dependency tree nuke-and-migrate leaves behind; not part of the project
 .nm-old-trash/
+
+# Python bytecode from the §10.8 fixture
+__pycache__/
+*.pyc
