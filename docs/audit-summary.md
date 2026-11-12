@@ -182,9 +182,9 @@ with the losing edit surfaced rather than discarded.
 
 | | |
 | --- | --- |
-| **Specification** | `docs/project.md` — 2,753 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 11 error codes, 15 ADRs, 38 acceptance criteria. |
-| **Roadmap** | `docs/plan.md` — 760 lines. 8 phases, ownership matrix, merge order, 7 open decisions. |
-| **Review** | 7 rounds. All blocking findings applied; 12 refinements deferred to Appendix B with an owner and a phase. |
+| **Specification** | `docs/project.md` — ~2,850 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 15 ADRs, 38 acceptance criteria. |
+| **Roadmap** | `docs/plan.md` — ~760 lines. 8 phases, ownership matrix, merge order, 7 open decisions. |
+| **Review** | 8 rounds, by three specialists. All blocking findings applied; 12 refinements deferred to Appendix B with an owner and a phase. |
 | **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. |
 
 **Deliberate changes to the original plan, made on review:** RLS removed from
