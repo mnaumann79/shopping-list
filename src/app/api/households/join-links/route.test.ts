@@ -35,15 +35,6 @@ vi.mock("@/db/schema/households", () => ({
 import { auth } from "@/lib/auth";
 import { db } from "@/db";
 import { POST } from "./route";
-import { NextRequest } from "next/server";
-
-function makeRequest(body: unknown): NextRequest {
-  return new NextRequest("http://localhost:3000/api/households/join-links", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-}
 
 // HSHD-03: POST /api/households/join-links
 describe("POST /api/households/join-links", () => {
@@ -61,8 +52,7 @@ describe("POST /api/households/join-links", () => {
 
   test("returns 401 if not authenticated", async () => {
     vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
-    const req = makeRequest({});
-    const res = await POST(req);
+    const res = await POST();
     expect(res.status).toBe(401);
     const json = await res.json();
     expect(json.error).toBeDefined();
@@ -73,8 +63,7 @@ describe("POST /api/households/join-links", () => {
       user: { id: "u1" },
       session: { activeOrganizationId: null },
     } as never);
-    const req = makeRequest({});
-    const res = await POST(req);
+    const res = await POST();
     expect(res.status).toBe(400);
     const json = await res.json();
     expect(json.error).toBeDefined();
@@ -85,8 +74,7 @@ describe("POST /api/households/join-links", () => {
       user: { id: "u1" },
       session: { activeOrganizationId: "org-1" },
     } as never);
-    const req = makeRequest({});
-    const res = await POST(req);
+    const res = await POST();
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.url).toBeDefined();
@@ -105,8 +93,7 @@ describe("POST /api/households/join-links", () => {
     } as never);
     const whereMock = vi.fn().mockResolvedValue(undefined);
     vi.mocked(db.delete).mockReturnValue({ where: whereMock } as never);
-    const req = makeRequest({});
-    await POST(req);
+    await POST();
     expect(db.delete).toHaveBeenCalledOnce();
     expect(whereMock).toHaveBeenCalledOnce();
   });
@@ -117,8 +104,7 @@ describe("POST /api/households/join-links", () => {
       user: { id: "u1" },
       session: { activeOrganizationId: "org-1" },
     } as never);
-    const req = makeRequest({});
-    const res = await POST(req);
+    const res = await POST();
     const json = await res.json();
     expect(json.url).toMatch(/^https:\/\/app\.example\.com\/join\?token=/);
     delete process.env.BETTER_AUTH_URL;
