@@ -3,7 +3,8 @@ import fs from "fs";
 import path from "path";
 import { config as loadEnv } from "dotenv";
 
-// playwright.config.ts belongs to another task, so the test env is loaded here.
+// The config loads .env.test too; loading it here keeps this file
+// self-contained, and dotenv never overrides a variable that is already set.
 loadEnv({ path: path.join(__dirname, "../.env.test") });
 
 const authFile = path.join(__dirname, "../playwright/.auth/user.json");
