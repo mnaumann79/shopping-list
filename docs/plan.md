@@ -141,7 +141,7 @@ and CI runs neither.
 | 0.4 | Fix the `db/init.sql` drift (constraint-name mismatch vs. the Drizzle migration) and add a `db:migrate` script that runs the real migrations | Database | `db/init.sql`, `db/migrations/**`, `package.json` |
 | 0.5 | Load `.env.test` in Vitest and Playwright (the `dotenv` dependency is installed but unused) | Lead | `vitest.config.ts`, `playwright.config.ts` |
 | 0.6 | Fix `e2e/auth.setup.ts` so the E2E suite can actually sign up (the retrospective records this as broken) | Frontend | `e2e/auth.setup.ts`, `e2e/auth/**` |
-| 0.7 | Decide the fate of the 31 `test.fixme` placeholder specs: implement them or delete them. **Decision: implement the AUTH-01…04 and HSHD-01…04 matrix.** | Frontend | `e2e/auth/**`, `e2e/household/**` |
+| 0.7 | Decide the fate of the **18 remaining** `test.fixme` placeholder specs: implement them or delete them. **Decision: implement the HSHD-01…04 matrix** — the AUTH-01…04 matrix has landed on `main`, and with it the 14 auth placeholders. | Frontend | `e2e/household/**` |
 
 ### Deliverables
 
@@ -187,7 +187,7 @@ works).
 
 - All six commands pass on `main`.
 - CI runs on `pull_request` and is a required check.
-- The 31 placeholder specs are implemented (not deleted) and passing.
+- The 18 remaining placeholder specs are implemented (not deleted) and passing.
 - The Lead confirms the CI gate blocks a bad PR.
 
 ---
