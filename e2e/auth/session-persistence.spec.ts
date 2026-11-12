@@ -11,7 +11,7 @@ test.describe("Session persistence", () => {
 
     await page.reload();
 
-    // The session survived the refresh, so the middleware did not send the
+    // The session survived the refresh, so the app did not send the
     // user back to /sign-in.
     await expect(page).toHaveURL(/\/dashboard$/);
     await expect(page.getByLabel("Item name")).toBeVisible();

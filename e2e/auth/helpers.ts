@@ -73,3 +73,22 @@ export function trackRequests(page: Page, endpoint: string): string[] {
   });
   return seen;
 }
+
+/**
+ * Opens the account menu and waits for its "Log out" item.
+ *
+ * The menu is a Base UI dropdown: it opens on pointerdown, and a click that
+ * lands before React has hydrated the header is swallowed, so the menu never
+ * opens. Click again when the menu did not open.
+ */
+export async function openAccountMenu(page: Page): Promise<void> {
+  const trigger = page.getByRole("button", { name: "Account menu" });
+  const item = page.getByRole("menuitem", { name: /log out/i });
+
+  await expect(async () => {
+    if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+      await trigger.click();
+    }
+    await expect(item).toBeVisible({ timeout: 3_000 });
+  }).toPass({ timeout: 15_000 });
+}

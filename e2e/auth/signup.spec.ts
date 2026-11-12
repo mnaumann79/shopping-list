@@ -4,7 +4,7 @@ import { PASSWORD, registerUser, submitForm, trackRequests, uniqueEmail } from "
 // AUTH-01: User can sign up with email and password
 //
 // The specs run without the shared storage state: it is signed in, and the
-// middleware sends a signed-in visitor away from /sign-up.
+// the app sends a signed-in visitor away from /sign-up.
 test.describe("Sign up", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 

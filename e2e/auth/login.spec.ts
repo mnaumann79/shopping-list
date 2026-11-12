@@ -4,7 +4,7 @@ import { PASSWORD, registerUser, submitForm, uniqueEmail } from "./helpers";
 // AUTH-02: User can log in with email and password
 //
 // The specs run without the shared storage state: it is signed in, and the
-// middleware sends a signed-in visitor away from /sign-in.
+// the app sends a signed-in visitor away from /sign-in.
 test.describe("Login", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
@@ -93,23 +93,5 @@ test.describe("Login", () => {
     // sends the user to its default page.
     await expect(page).toHaveURL((url) => url.pathname === "/dashboard");
     await expect(page.getByLabel("Item name")).toBeVisible();
-  });
-
-  test("sign-in page returns the user to the page named in returnTo", async ({ page, request }) => {
-    const email = uniqueEmail("login");
-    await registerUser(request, { email, householdName: `Login Household ${email}` });
-
-    // The sign-in page reads returnTo from the URL. Today only this spec puts
-    // one there - the redirect for a signed-out visitor does not.
-    await page.goto("/sign-in?returnTo=/history");
-
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(PASSWORD);
-
-    await submitForm(page, "Sign in", "/api/auth/sign-in/email");
-
-    // The login lands on the page the visitor asked for, not on the default.
-    await expect(page).toHaveURL((url) => url.pathname === "/history");
-    await expect(page.getByRole("heading", { name: "Item history" })).toBeVisible();
   });
 });

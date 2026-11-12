@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { openAccountMenu } from "./helpers";
 
 // AUTH-04: User can log out from any page
 //
@@ -14,13 +15,9 @@ test.describe("Logout", () => {
 
   test("logout from /dashboard redirects to /sign-in", async ({ page }) => {
     // Click the avatar/account menu trigger (aria-label="Account menu")
-    await page.getByRole("button", { name: "Account menu" }).click();
+    await openAccountMenu(page);
 
-    // DropdownMenu is React.lazy() — wait for the menu item to appear
-    const logoutItem = page.getByRole("menuitem", { name: /log out/i });
-    await expect(logoutItem).toBeVisible();
-
-    await logoutItem.click();
+    await page.getByRole("menuitem", { name: /log out/i }).click();
 
     await expect(page).toHaveURL(/\/sign-in$/);
   });
@@ -31,14 +28,14 @@ test.describe("Logout", () => {
     await page.goto("/history");
     await expect(page).toHaveURL(/\/history$/);
 
-    await page.getByRole("button", { name: "Account menu" }).click();
+    await openAccountMenu(page);
     await page.getByRole("menuitem", { name: /log out/i }).click();
 
     await expect(page).toHaveURL(/\/sign-in$/);
   });
 
   test("after logout, navigating to /dashboard redirects to /sign-in", async ({ page }) => {
-    await page.getByRole("button", { name: "Account menu" }).click();
+    await openAccountMenu(page);
     await page.getByRole("menuitem", { name: /log out/i }).click();
     await expect(page).toHaveURL(/\/sign-in$/);
 
@@ -53,7 +50,7 @@ test.describe("Logout", () => {
     const sessionBefore = cookiesBefore.filter((c) => /session|token|auth/i.test(c.name));
     expect(sessionBefore.length).toBeGreaterThan(0);
 
-    await page.getByRole("button", { name: "Account menu" }).click();
+    await openAccountMenu(page);
     await page.getByRole("menuitem", { name: /log out/i }).click();
     await expect(page).toHaveURL(/\/sign-in$/);
 
