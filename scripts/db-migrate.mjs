@@ -1,9 +1,12 @@
 /**
- * db:migrate - applies the migrations in src/db/migrations/ to the database
+ * db:migrate - applies the migrations in db/migrations/ to the database
  * in DATABASE_URL.
  *
  * The migration folder is the source of truth for the schema; db/init.sql is
- * the flat snapshot of the same schema and is never read here.
+ * the flat snapshot of the same schema and is never read here. The folder is
+ * not drizzle-kit's output folder (src/db/migrations/) - drizzle-kit would
+ * overwrite a hand-written migration with its own 0000_*.sql and orphan the
+ * rest.
  *
  * Every migration runs in its own transaction and is recorded in a ledger
  * table, so the script can be run again safely: migrations that are already
@@ -13,9 +16,9 @@
  * A session lock serializes the runs: two of them cannot apply the same
  * migration at the same time.
  *
- * The script refuses to run against a production host. A migration that ran
- * against the wrong database is not undone by a rollback, so the check
- * happens before anything is connected to.
+ * The script refuses to run against anything that is not a development host.
+ * A migration that ran against the wrong database is not undone by a rollback,
+ * so the check happens before anything is connected to.
  *
  * TLS follows the connection string: sslmode=require verifies the server
  * certificate, sslmode=no-verify turns that off, and sslrootcert names a CA
@@ -27,13 +30,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
-const migrationsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  'src',
-  'db',
-  'migrations',
-);
+const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'db', 'migrations');
 const ledgerSchema = 'db_migrate';
 const ledgerTable = 'applied';
 // One lock for all migration runs against one database. A session-level
@@ -87,33 +84,51 @@ try {
 const { host, database } = client.connectionParameters;
 
 /**
- * Why the runner must not connect, or null when it may.
+ * The hosts the runner may migrate.
  *
- * The host and the database name are the only parts looked at, and the only
- * parts ever printed - a password never reaches a log.
+ * An allowlist, not a denylist. This project's production database is a Neon
+ * host (ep-....aws.neon.tech), and no "prod" or "prd" substring would ever
+ * catch it - the runner would migrate production and call it a day. So the
+ * rule is the other way round: only a host that is provably local is
+ * migrated, and every other host is refused unless the operator opts in.
  */
-function refuseReason(host, database) {
-  if (/prod|prd/i.test(host)) {
-    return { text: `the host "${host}" names a production host`, production: true };
-  }
-  if (database && /prod|prd/i.test(database)) {
-    return { text: `the database "${database}" names a production database`, production: true };
-  }
-  return null;
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+function isDevelopmentHost(host) {
+  const name = host.toLowerCase();
+  return LOCAL_HOSTS.has(name) || name.endsWith('.local') || name.endsWith('.localhost');
 }
 
-const refusal = refuseReason(host, database);
-if (refusal) {
+/** The operator's explicit opt-in: migrate a host that is not on the allowlist. */
+function optedIn() {
+  const value = (process.env.DB_MIGRATE_ALLOW_ANY_HOST ?? '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
+// The migration files are read before the guard, so the refusal can name every
+// one of them: migrating production by hand with only the first file would
+// leave the database half migrated.
+const files = (await readdir(migrationsDir))
+  .filter((file) => file.endsWith('.sql'))
+  .sort();
+
+if (!isDevelopmentHost(host) && !optedIn()) {
   console.error(
-    `Refusing to migrate: ${refusal.text} (${host}${database ? `/${database}` : ''}).`,
+    `Refusing to migrate: the host "${host}" is not a development host (${host}${database ? `/${database}` : ''}).`,
   );
   console.error(
     'This script migrates development databases only. A migration that ran against the wrong\n' +
       'database is not recoverable by a rollback, so it stops here - before it connects to anything.',
   );
   console.error(
-    'To migrate production, apply the reviewed migration files by hand:\n' +
-      '  psql "$PRODUCTION_DATABASE_URL" -v ON_ERROR_STOP=1 -f src/db/migrations/0000_init.sql',
+    'Allowed hosts: localhost, 127.0.0.1, ::1, and anything ending in .local or .localhost.\n' +
+      'To migrate another host on purpose, set DB_MIGRATE_ALLOW_ANY_HOST=1.',
+  );
+  console.error(
+    'To migrate production, apply the reviewed migration files by hand, in this order:\n' +
+      files
+        .map((file) => `  psql "$PRODUCTION_DATABASE_URL" -v ON_ERROR_STOP=1 -f db/migrations/${file}`)
+        .join('\n'),
   );
   process.exit(1);
 }
@@ -137,9 +152,6 @@ try {
   );
   const applied = new Map(rows.map((row) => [row.name, row.checksum]));
 
-  const files = (await readdir(migrationsDir))
-    .filter((file) => file.endsWith('.sql'))
-    .sort();
   if (files.length === 0) {
     console.log('No migrations found.');
   }
