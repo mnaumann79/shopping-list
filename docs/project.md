@@ -3351,7 +3351,7 @@ map anyway.
 | --- | --- | --- | --- |
 | 1 | **Verify the target.** The instance's PostgreSQL major version is recorded; §10.8's three statements are re-run against it with the §9 DDL (the fixture is the server-side test, §16.4); a restore from the instance's own backup is performed and read back. | T−7 days | n/a |
 | 2 | **Provision the Supabase Auth users.** For each legacy user, create a GoTrue user with `email_confirm: true` and the legacy display name in `user_metadata`. Record `user_map (old_id text, new_id uuid)`. The legacy password hash is **not** convertible — see below — so the provisioned user gets a random unusable password. | T−1 day | Yes — the users are deleted and re-created |
-| 3 | **Dry run.** Dump Neon, restore into a scratch database on the instance, run the whole mapping (§13.2b), and compare row counts table by table. | T−1 day | Yes |
+| 3 | **Dry run.** Dump Neon, restore into a scratch database on the instance, run the whole mapping (§13.2b), and compare row counts table by table. **The restore is scoped to the shopping list's tables** — see below. | T−1 day | Yes |
 | 4 | **Maintenance window.** Put the app in read-only mode. Take the final dump, restore, run the mapping, verify. | T−0 | **Yes** — Neon is untouched until the next step |
 | 5 | **Repoint and deploy.** Change `DATABASE_URL` and the Supabase URL/keys in the deployment environment, and deploy. | T−0 | **Yes** — revert the two environment variables and redeploy |
 | 6 | **Smoke test.** Sign in as a migrated user, load a household, create and check an item, and confirm the change log records it. | T−0 | Yes, by reverting |
@@ -3361,6 +3361,26 @@ map anyway.
 **The rollback is a configuration change, not a restore — for fourteen days.**
 That is the single most important property of this design, and it is why
 step 7 exists. Nothing is deleted from Neon until the rollback window closes.
+
+**The restore is scoped to the shopping list's tables. The dump of the
+source may be whole-database; the restore may not be.** Three reasons, all
+verified against the target instance:
+
+1. **`auth` is never dumped or restored.** GoTrue owns that schema, and the
+   users are provisioned through the admin API (step 2), not copied from a
+   table. Restoring it would replace GoTrue's state.
+2. **The instance's `public` schema already holds another application's
+   tables** — `accounts`, `conversations`, `knowledge_chunks`,
+   `knowledge_sources`, `messages`, `projects`, `widget_configs`. They are
+   empty, and the shopping list's table names do not collide with them, but
+   a restore that included them would overwrite whatever that application
+   has since written.
+3. **The instance runs a full Supabase stack** — `storage`, `realtime`,
+   `graphql`, `vault` — and none of it is ours to replace.
+
+So the restore is a set of `pg_restore --table=…` calls for the shopping
+list's tables, into `public`, and nothing else. The dry run (step 3) does the
+same into a scratch database, which is why it catches a missing table.
 
 #### 13.2b The identity mapping
 
@@ -3633,6 +3653,18 @@ The list, grouped by what it proves:
 
 That is thirty-three scenarios, each asserted against the document's own DDL and
 the document's own SQL.
+
+**The three statements have also been executed against the self-hosted
+Supabase instance** — the platform they will actually run on. The instance is
+**PostgreSQL 17.11**, the version the fixture was verified against. All
+three statements run there, and both branches of the archive-conflict
+addressee behave as specified: a known archiver gets the conflict, an unknown
+one does not, and the reversal applies either way. `auth.uid()` resolves from
+a transaction-local `request.jwt.claims`, which is the mechanism §9.2b's
+policies depend on. The evidence is in
+`src/db/fixture/VERIFIED-AGAINST-SUPABASE.md`, and it records what is **not**
+verified — the full harness and a backup restore both need a direct
+connection, which the build environment cannot make.
 
 ### 16.5 CI gates
 
