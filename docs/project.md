@@ -1092,7 +1092,7 @@ type OutboxPayload =
   | { isChecked: boolean }                                          // item.check
   | { storeIds: { storeId: string; version: number; present: boolean }[] }  // item.storeTags
   | { fields: string[] }                                            // item.delete / item.undelete
-  | { baseVersion: number }                                         // item.archive / item.bulkArchive
+  | { versions: { [itemId]: number } }                               // item.archive / item.bulkArchive
   | { field: string; value: unknown; serverValue: unknown }         // item.override (Keep mine)
   ;
 ```
@@ -1153,7 +1153,7 @@ union of the fields touched by the row's outstanding operations.
 | `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata. **An entry exists only for a field that a write actually touched** — a row that has only ever had its name changed has a `field_meta` with one key, not eight. The tracked set is exactly: `name`, `quantity`, `note`, `categoryId`, `storeIds`, `isChecked`, `deletedAt`, `archivedAt`. Each entry is `{ v, lamport, device }`, where **`v` is the row `version` that the write produced** — so `field_meta[f].v` is directly comparable with the row's current `version`, and a client can tell whether a given field has moved since its base version. `device` is the id of the device that wrote it, which is what §11's check-wins rule reads (`field_meta["isChecked"].device`). Enables per-field conflict resolution without a separate table. **It also carries the ordering key for the tombstone:** `field_meta["deletedAt"].lamport` records the effective lamport of the delete that set `deleted_at`, so `item.undelete` can tell whether a *newer* delete exists (§11). |
 | `updated_by_id` | `text` nullable → `user(id)` `ON DELETE SET NULL` | Who last changed the row. Named to match the existing `created_by_id` convention, and carries the same foreign key so the column cannot hold a user id that does not exist. |
 | `lamport` | `bigint` not null default 0 | Highest Lamport value applied to this row. |
-| `last_op_id` | `uuid` nullable | The `opId` of the operation that last wrote this row. Set by the compare-and-swap in the same batch. **It is corroborating, not the guard.** The guard is that the compare-and-swap matched **exactly one row** (§10.8). `last_op_id` additionally identifies *which* operation wrote the row, which matters for an operation that touches **several rows under one `opId`** (`item.bulkArchive`). It must not be used as the replay guard: after an operation has been applied, `last_op_id = $opId` is still true, so a replay would pass that predicate. — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
+| `last_op_id` | `uuid` nullable | The `opId` of the operation that last **touched** this row. Set by the compare-and-swap in the same batch, **whether or not the operation changed anything** — a refused operation still stamps it, because that is how the ledger statement distinguishes *"the request decided this operation"* from *"the compare-and-swap was lost"*, and a lost compare-and-swap must stay retryable (a ledger row would make the retry look like a duplicate). **It is corroborating, not the guard.** The guard is that the compare-and-swap matched **exactly one row** (§10.8). `last_op_id` additionally identifies *which* operation wrote the row, which matters for an operation that touches **several rows under one `opId`** (`item.bulkArchive`). It must not be used as the replay guard: after an operation has been applied, `last_op_id = $opId` is still true, so a replay would pass that predicate. — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
 
 **One meaning of "now" per table.** The existing `items.created_at`,
 `items.updated_at` and `items.archived_at` are `timestamp` (no time zone), while
@@ -1236,7 +1236,6 @@ CREATE TABLE sync_changes (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX sync_changes_household_seq ON sync_changes (household_id, seq);
-CREATE INDEX sync_changes_household_created ON sync_changes (household_id, created_at);  -- for pruning
 
 -- Idempotency ledger. The primary key IS the idempotency guarantee.
 -- NEVER PRUNED: it must outlive the change log, because a replayed operation
@@ -1249,7 +1248,13 @@ CREATE TABLE sync_operations (
   device_id    uuid NOT NULL,
   actor_id     text NOT NULL,
   entity_type  text NOT NULL,
-  entity_id    uuid NOT NULL,
+  entity_id    uuid,                      -- NULL for a multi-entity operation (item.bulkArchive):
+                                         -- the operation's identity is its op_id, and a bulk
+                                         -- operation spans several entities, so it has no
+                                         -- single one. Keying the ledger (op_id, entity_id)
+                                         -- instead would force the replay guard to be
+                                         -- per-entity, and one item's ledger row would then
+                                         -- suppress another item's conflicts.
   op_type      text NOT NULL,
   lamport      bigint NOT NULL,
   payload      jsonb NOT NULL,
@@ -1331,7 +1336,9 @@ CREATE INDEX categories_household    ON categories (organization_id);
 CREATE INDEX item_stores_item        ON item_stores (item_id);
 CREATE INDEX item_stores_live        ON item_stores (item_id) WHERE deleted_at IS NULL;
 
--- Pruning by age, per household.
+-- Pruning by age, per household. (Declared once, here — §9.2's CREATE TABLE
+-- block does not also create it, or the schema script fails with
+-- "relation already exists".)
 CREATE INDEX sync_changes_household_created ON sync_changes (household_id, created_at);
 ```
 
@@ -1876,7 +1883,7 @@ There are **three statement shapes**: the **item-row statement**, which applies
 every operation that touches an existing item; the **create statement**, which
 inserts one; and the **ledger statement**, which records one operation's
 outcome. All three have been **executed against PostgreSQL 17 using this
-document's own §9.1/§9.2 DDL, and their outcomes verified** — thirty scenarios
+document's own §9.1/§9.2 DDL, and their outcomes verified** — twenty-nine scenarios
 covering a normal update, a field lost to a concurrent write, a check that
 loses by check-wins, a write to a tombstoned row, an undelete that is too
 old, a lost compare-and-swap, both arrival orders of an archive racing an
@@ -2024,7 +2031,7 @@ applied AS (
                                              THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END
                          )),
          lamport       = CASE WHEN w.row_changed THEN GREATEST(t.lamport, $op_lamport) ELSE t.lamport END,
-         last_op_id    = CASE WHEN w.row_changed THEN $op_id ELSE t.last_op_id END,
+         last_op_id    = $op_id,
          updated_at    = CASE WHEN w.row_changed THEN now() ELSE t.updated_at END,
          updated_by_id = CASE WHEN w.row_changed THEN $actor_id ELSE t.updated_by_id END
     FROM before AS b, flags AS w
@@ -2094,7 +2101,7 @@ archive_conflicts AS (
          $device_id,
          $op_lamport,
          $op_id,
-         NULLIF((b.field_meta -> 'archivedAt') ->> 'device', '')::uuid
+         COALESCE(NULLIF((b.field_meta -> 'archivedAt') ->> 'device', '')::uuid, $device_id)
     FROM before AS b, wins AS w
    WHERE w.w_reverses_archive
      AND NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
@@ -2213,8 +2220,7 @@ SELECT e.id AS entity_id,
            ) AS x
           WHERE x.device_id = $device_id
        ), '[]'::jsonb) AS conflicts
-  FROM entity_snapshot AS e;
-```
+  FROM entity_snapshot AS e;```
 
 #### 10.8.2 The create statement
 
@@ -2295,8 +2301,7 @@ SELECT e.id AS entity_id,
        TRUE AS changed,
        e.entity,
        '[]'::jsonb AS conflicts
-  FROM entity_snapshot AS e;
-```
+  FROM entity_snapshot AS e;```
 
 #### 10.8.3 The ledger statement
 
@@ -2313,24 +2318,118 @@ per operation**, at the end of the batch, and it is the only writer:
 
 ```sql
 -- One ledger row per OPERATION, written once, at the end of the batch.
+--
+-- The envelope is DERIVED HERE, not passed in: a batch's statements are
+-- pre-built, so their parameters are fixed before the transaction starts.
+-- What the operation won, whether the compare-and-swap matched, and which
+-- conflicts arose are all decided INSIDE that transaction, and only the rows
+-- the transaction wrote can say. A second round trip after the batch would
+-- break INV-12's atomicity: a crash between the two would leave a change
+-- applied but unrecorded, and the retry would re-apply it.
+--
+-- The 'skipped' count is the candidates that left NO trace: neither a
+-- change-log row nor a conflict row. A candidate whose compare-and-swap
+-- matched but whose every field was lost is CONTESTED, not skipped -- it
+-- leaves a conflict row -- so counting only the change-log rows would
+-- misreport it as skipped.
+--
 -- It cannot raise: a duplicate opId is a no-op, because a replay is
 -- recognised by the pre-batch ledger check and never reaches the batch.
 INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
                              entity_type, entity_id, op_type, lamport,
                              payload, result, outcome)
 SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, $entity_id,
-       $op_type, $op_lamport, $payload, $result, $outcome
-ON CONFLICT (op_id) DO NOTHING;
-```
+       $op_type, $op_lamport, $payload,
+       jsonb_build_object(
+         'entities', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                     'entityId', c.entity_id, 'entity', c.payload)
+                   ORDER BY c.seq)
+              FROM sync_changes c
+             WHERE c.op_id = $op_id), '[]'::jsonb),
+         'conflicts', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                     'id', x.id, 'field', x.field, 'storeId', x.store_id,
+                     'localValue', x.local_value, 'serverValue', x.server_value,
+                     'resolution', x.resolution,
+                     'winnerDeviceId', x.winner_device_id,
+                     'winnerLamport', x.winner_lamport)
+                   ORDER BY x.id)
+              FROM entity_conflicts x
+             WHERE x.op_id = $op_id AND x.device_id = $device_id), '[]'::jsonb),
+         'skipped', GREATEST(
+           0,
+           CASE WHEN jsonb_typeof($payload->'versions') = 'object'
+                THEN (SELECT count(*) FROM jsonb_object_keys($payload->'versions'))
+                ELSE 0 END
+           - (SELECT count(DISTINCT u.entity_id)
+                FROM (SELECT entity_id FROM sync_changes WHERE op_id = $op_id
+                      UNION ALL
+                      SELECT entity_id FROM entity_conflicts WHERE op_id = $op_id) AS u)
+         )
+       ) AS result,
+       CASE
+         WHEN (SELECT count(*) FROM sync_changes WHERE op_id = $op_id) > 0
+          AND (SELECT count(*) FROM entity_conflicts
+                WHERE op_id = $op_id AND device_id = $device_id) > 0
+           THEN 'partial'
+         WHEN (SELECT count(*) FROM sync_changes WHERE op_id = $op_id) > 0
+           THEN 'applied'
+         ELSE 'rejected'
+       END AS outcome
+  FROM (SELECT 1) AS one
+ WHERE CASE
+         -- A multi-entity operation (its payload carries a versions map) is
+         -- ALWAYS decided: each candidate's outcome is either archived or
+         -- skipped, and both are specified outcomes (S11), not races.
+         WHEN jsonb_typeof($payload->'versions') = 'object' THEN TRUE
+         -- A single-entity operation is decided iff its compare-and-swap
+         -- matched, which the row records in last_op_id. If it did not
+         -- match, the operation must stay retryable and no ledger row is
+         -- written -- a ledger row would make the retry look like a
+         -- duplicate.
+         ELSE EXISTS (SELECT 1 FROM items
+                       WHERE id = $entity_id AND last_op_id = $op_id)
+       END
+ON CONFLICT (op_id) DO NOTHING;```
 
-**Why the ledger is written last, and not by the statement.** Only the request
-knows the whole operation's outcome: for a bulk operation, the aggregate —
-how many items were archived, how many were skipped, and the full result
-envelope. A statement that wrote the ledger would only know its own item's
-result, and the first writer would win, leaving the cached envelope describing
-one item of many. Because the ledger is consulted **before** the batch (§10.8.5),
-a replay never reaches the batch, so the `ON CONFLICT (op_id) DO NOTHING` is
-belt-and-braces rather than the mechanism.
+**Why the envelope is derived here, and not passed in.** A batch executes
+**pre-built** statements: their parameters are fixed before the transaction
+starts. What the operation won, whether the compare-and-swap matched, and
+which conflicts arose are all decided **inside** that transaction — so they
+cannot be parameters. Passing them in would force the ledger row to be written
+in a second round trip, and a crash between the two would leave a change
+applied but unrecorded; the retry would then re-apply it, and the change log
+would stop being a faithful total order (ADR-14). The envelope is therefore
+**derived from the rows this transaction wrote**: the change-log rows for the
+operation, the conflict rows for the operation, and the candidate list in the
+payload's `versions` map. That is also the only place the aggregate can be
+known — a per-item statement knows its own item, not the operation.
+
+**The `skipped` count is the candidates that left no trace.** A candidate
+whose compare-and-swap matched but whose every field was lost is
+**contested**, not skipped: it leaves a conflict row. So `skipped` subtracts
+the distinct entities that left *either* a change-log row or a conflict row
+from the candidate count — counting only the change-log rows would report a
+contested item as skipped, and the household would be told its item had been
+skipped when in fact it had been **contested and lost**.
+
+**A multi-entity operation is always decided; a single-entity one is not.**
+The ledger statement's `WHERE` clause encodes the difference, and it is the
+same distinction §10.8.5 makes:
+
+- A **multi-entity** operation (its payload carries a `versions` map) is
+  always decided. Each candidate's outcome is either archived or skipped, and
+  **both are specified outcomes** (§11), not races — so a ledger row is
+  written even when every candidate was skipped, and `skipped` reports it.
+- A **single-entity** operation is decided **iff its compare-and-swap
+  matched**, which the row records in `last_op_id`. If it did not match, no
+  ledger row is written: the operation must stay **retryable**, and a ledger
+  row would make the retry look like a duplicate.
+
+Because the ledger is consulted **before** the batch (§10.8.5), a replay never
+reaches the batch, so the `ON CONFLICT (op_id) DO NOTHING` is belt-and-braces
+rather than the mechanism.
 
 **The ledger row is written for every operation the request *decided*, and
 not for one it could not.** The two are different outcomes:
@@ -2572,10 +2671,15 @@ cursor.
    change-log row, and the request writes no ledger row for it either — it
    must stay retryable.
 
-   `last_op_id` is **corroborating, not the guard** — after an operation has
-   been applied, `last_op_id = $op_id` is still true, so using it as the
-   predicate would let a replay through. It is kept because it identifies
-   *which* operation wrote a row, which matters for an operation that touches
+   `last_op_id` is **corroborating, not the change log's guard** — it is
+   stamped even by an operation that changed nothing, so a
+   `WHERE last_op_id = $op_id` predicate on the change-log insert would
+   append an entry for a change that never happened. It is stamped on every
+   matched compare-and-swap because it answers a different question — *did
+   this operation reach this row* — which is what the ledger statement needs
+   to tell a **refused** operation (which reached it and was refused) apart
+   from a **lost** one (which never reached it), and it identifies *which*
+   operation touched a row, which matters for an operation that touches
    several rows under one `opId` (`item.bulkArchive`).
 
    `last_op_id` is nonetheless what prevents a *losing* operation's change-log
@@ -2593,6 +2697,14 @@ cursor.
    An empty result set must **not** be treated as a transport failure. The
    batch may well have committed, and a blind retry would re-send operations
    that were already applied.
+
+   **A create whose id was already taken writes no ledger row.** The create
+   statement's `ON CONFLICT (id) DO NOTHING` returns zero rows, the item was
+   not created, and nothing changed — so there is nothing to record. The
+   operation is reported as `DUPLICATE_ID` (or `duplicate`, if the ledger
+   already holds this `opId` — a replay), which is a **permanent** outcome,
+   so the client does not retry it. Writing a ledger row would make the
+   *next* attempt look like a replay of a successful create.
 5. **All the CTEs in one statement share one snapshot.** `WHERE version =
    $cas_version` is evaluated against the snapshot taken at statement start,
    so a transaction that committed after that snapshot is invisible to it.
@@ -3129,7 +3241,7 @@ This is the acceptance demonstration for the whole project.
 
 **A second, lower-level fixture sits under it.** §10.8's three statements have
 already been executed against PostgreSQL 17 with this document's own DDL,
-across **thirty scenarios**, and their outcomes verified. Those thirty
+across **twenty-nine scenarios**, and their outcomes verified. Those twenty-nine
 scenarios are the **server-side fixture** for Phase 3: an implementation that
 reaches a different outcome for any of them fails the test rather than passing
 review. The list is: a normal update; a field lost to a concurrent write; a
@@ -3206,7 +3318,7 @@ The existing `perf-audit.yml` schedule is kept.
 | **ADR-11** | **Keep Next.js, Better Auth, Drizzle, and PostgreSQL.** | They are used well and are not the problem. The problem is the data-ownership model, not the tools. | A different framework — large, risky, and buys nothing for this problem. |
 | **ADR-12** | **Server-side authorization is authoritative and role-checked. Tenant isolation is enforced by a single application-layer scope helper, NOT by PostgreSQL row-level security.** | The current join-link gap (S-1) is a UI-only check, so isolation must be enforced on the server. **RLS is deliberately excluded.** On the Neon HTTP driver, each statement is an independent request with no session state: a policy would need `current_setting('app.current_household')`, which can only be set inside a transaction and cannot be relied upon to persist across the separate queries a request makes. A policy written fail-open silently returns every row; one written fail-closed silently returns none. Either way RLS would give the *appearance* of defence in depth while behaving unpredictably — worse than not having it, because it suppresses the care the application-layer check actually needs. A single scope helper that every query must pass through, plus an integration test that asserts a cross-household read returns 404, is honest and testable. | *RLS as a second layer* — unreliable on the retained driver (see rationale); it would create false confidence rather than real isolation. *UI-only checks* — already proven insufficient. |
 | **ADR-13** | **Integration tests run against a real PostgreSQL, not a mocked `db`.** | The current fake `db` ignores `where()` clauses, so the codebase's tenant-isolation predicates are entirely untested. The `DB_DRIVER` switch already exists (`src/db/index.ts:16-19`). | Continuing to mock the database — it cannot verify isolation, constraints, or migrations. |
-| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap that also stamps the row with the id of the operation that wrote it.** The batch's first statement takes a per-household transaction-scoped advisory lock — `pg_advisory_xact_lock(hashtextextended(household_id, 0))`, 64-bit — which is held to commit because a Neon HTTP batch is one transaction on one connection; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`) **and sets `last_op_id = $opId`**; the change-log append and the idempotency record are then guarded on `last_op_id = $opId`. | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Four constraints force this shape. (1) The Neon HTTP driver throws on `db.transaction()`, so the apply must use `db.batch()`, which maps to Neon's atomic HTTP batch transaction. (2) A batch executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. (4) **The change-log append must be guarded on the operation, not on the version.** Two different operations can both read `version = 12`; the winner writes `version = 13`, and the loser's compare-and-swap updates zero rows — but a change-log insert written as `INSERT … SELECT … FROM items WHERE id = $1 AND version = 13` matches the **winner's** row and appends a second entry for one logical change, so the change log stops being a faithful total order and the pulled `changes[]` contains the same entity twice. There is no shortcut via a unique constraint: `UNIQUE (op_id, entity_id)` does not help, because the two racing operations have *different* `opId`s. The row itself must carry the id of the operation that wrote it — hence `last_op_id` (§9.1). | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. Guarding the change-log insert on `version` alone — a losing operation appends a duplicate entry for the winner's write. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. The Neon WebSocket driver (interactive transactions) remains the fallback if the batch approach proves insufficient in Phase 2. |
+| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap that also stamps the row with the id of the operation that touched it.** The batch's first statement takes a per-household transaction-scoped advisory lock — `pg_advisory_xact_lock(hashtextextended(household_id, 0))`, 64-bit — which is held to commit because a Neon HTTP batch is one transaction on one connection; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`) **and sets `last_op_id = $opId`** — unconditionally, so a *refused* operation still stamps it; the change-log append is then gated on the compare-and-swap having matched (it selects `FROM applied`, which is empty when the update matched no row), and the idempotency record is a **separate statement** whose envelope is derived from the rows the transaction wrote (§10.8.3). | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Four constraints force this shape. (1) The Neon HTTP driver throws on `db.transaction()`, so the apply must use `db.batch()`, which maps to Neon's atomic HTTP batch transaction. (2) A batch executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. (4) **The change-log append must be guarded on the operation, not on the version.** Two different operations can both read `version = 12`; the winner writes `version = 13`, and the loser's compare-and-swap updates zero rows — but a change-log insert written as `INSERT … SELECT … FROM items WHERE id = $1 AND version = 13` matches the **winner's** row and appends a second entry for one logical change, so the change log stops being a faithful total order and the pulled `changes[]` contains the same entity twice. There is no shortcut via a unique constraint: `UNIQUE (op_id, entity_id)` does not help, because the two racing operations have *different* `opId`s. The row itself must carry the id of the operation that touched it — hence `last_op_id` (§9.1). Note that `last_op_id` is **not** the change-log's guard: it is stamped even by an operation that changed nothing, so a `WHERE last_op_id = $opId` predicate would append a change-log entry for a change that never happened. The change log is gated on the compare-and-swap having matched; `last_op_id` answers a different question — *did this operation reach this row at all* — which is what the ledger statement needs to tell a **refused** operation apart from a **lost** one. | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. Guarding the change-log insert on `version` alone — a losing operation appends a duplicate entry for the winner's write. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. The Neon WebSocket driver (interactive transactions) remains the fallback if the batch approach proves insufficient in Phase 2. |
 | **ADR-15** | **Service worker caches the static shell and hashed assets only — never an API response.** | The shell is identical for all users (no user data), so it caches safely and enables offline boot. API responses are per-user and per-household; caching them risks cross-account data leakage on a shared device. | Caching API responses — data-leak risk on shared devices and stale-data bugs. |
 
 ---

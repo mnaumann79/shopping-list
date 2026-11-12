@@ -40,12 +40,14 @@ data loss. All findings have been applied.
 using the specification's own DDL. It **did not parse**, and where it parsed it
 reached the wrong outcome: sixteen blocking defects, every one of them in that
 statement. The statement was rewritten and re-verified; it now executes, and
-its outcomes were checked across **thirty scenarios** — a normal update, a
-field lost to a concurrent write, a check that loses by check-wins, a write to
-a tombstoned row, an undelete that is too old, a lost compare-and-swap, **both
-arrival orders of an archive racing an uncheck**, five store-tag outcomes, a
+its outcomes were checked across **twenty-nine scenarios** — a normal update,
+a field lost to a concurrent write, a check that loses by check-wins, a write
+to a tombstoned row, an undelete that is too old, a lost compare-and-swap,
+**both arrival orders of an archive racing an uncheck**, five store-tag
+outcomes, a mixed bulk operation, a bulk operation where every candidate was
+skipped, a row archived before the sync model, a create whose id was taken, a
 bulk operation, two replays, a create that writes its tags, and a create whose
-id is already taken. **125 assertions pass.** The same round produced one
+id is already taken. **149 assertions pass.** The same round produced one
 schema change: a **tombstone on the tag pairs** (`item_stores.deleted_at`),
 without which a removal's ordering key is destroyed and a long-offline device
 could resurrect a tag somebody had deliberately removed.
@@ -215,7 +217,7 @@ with the losing edit surfaced rather than discarded.
 | **Specification** | `docs/project.md` — ~3,180 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 15 ADRs, 38 acceptance criteria. |
 | **Roadmap** | `docs/plan.md` — ~770 lines. 8 phases, ownership matrix, merge order, 8 open decisions. |
 | **Review** | 8 rounds, by three specialists. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
-| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 125 assertions about their outcomes pass.** |
+| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 149 assertions about their outcomes pass.** |
 
 **Deliberate changes to the original plan, made on review:** RLS removed from
 the isolation strategy (unreliable on the Neon HTTP driver — fail-open returns

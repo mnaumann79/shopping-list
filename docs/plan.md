@@ -400,7 +400,7 @@ plus explicit probes:
   conflict record exists.
 - An induced failure between the entity write and the change-log write → the
   entity write is rolled back.
-- **The thirty scenarios §10.8's statements were verified against, replayed
+- **The twenty-nine scenarios §10.8's statements were verified against, replayed
   against the implementation.** They are the fixture, not a summary: a normal
   update, a field lost to a concurrent write, a check that loses by
   check-wins, a write to a tombstoned row, an undelete that is too old, a lost
@@ -774,7 +774,7 @@ transport (the sync protocol is transport-agnostic).
 | # | Risk | Severity | Mitigation |
 | --- | --- | --- | --- |
 | R-1 | The team discovers mid-implementation that the conflict rules are wrong for a real household scenario | High | Phase 2 proves the rules as pure functions before they are wired. The matrix is also a product decision — **the product owner is asked to approve §11 of `docs/project.md` before Phase 3 starts.** |
-| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's three statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across thirty scenarios. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
+| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's three statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across twenty-nine scenarios. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
 | R-2 | The SSR → client-render switch causes a performance regression that damages the existing Lighthouse score | Medium | The budget is a Phase 7 gate with a documented fallback. The existing perf harness is reused, not rewritten. |
 | R-3 | iOS Safari behaves differently from the emulation (IndexedDB eviction, service worker lifecycle) | Medium | WebKit is in the Playwright matrix from Phase 0. The manual walkthrough on a real device is a Phase 7 gate. The design avoids Background Sync precisely because of iOS. |
 | R-4 | The Neon HTTP driver cannot provide the atomicity the apply path needs | Medium | Proved in Phase 2 (Task 2.4) with the WebSocket-driver fallback already chosen. |
