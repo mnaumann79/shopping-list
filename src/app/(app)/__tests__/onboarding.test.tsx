@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import OnboardingPage from "../../onboarding/page";
+import { ThemeProvider } from "@/components/ThemeProvider";
 
 const mockPush = vi.fn();
 const mockReplace = vi.fn();
@@ -22,9 +23,31 @@ vi.mock("@/lib/auth-client", () => ({
 
 import { authClient } from "@/lib/auth-client";
 
+// The onboarding page renders MinimalHeader -> DarkModeToggle, which reads the
+// theme context. Without a ThemeProvider above it, useTheme() throws.
+function renderOnboarding() {
+  return render(
+    <ThemeProvider>
+      <OnboardingPage />
+    </ThemeProvider>
+  );
+}
+
 describe("OnboardingPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // ThemeProvider resolves the "system" theme through matchMedia, which
+    // jsdom does not implement. Report "light" for every query.
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }));
     // Default: no active organization (new user)
     vi.mocked(authClient.useSession).mockReturnValue({
       data: { session: { activeOrganizationId: null }, user: { name: "Alice" } },
@@ -34,7 +57,7 @@ describe("OnboardingPage", () => {
   });
 
   it("renders household name input and submit button", () => {
-    render(<OnboardingPage />);
+    renderOnboarding();
     return waitFor(async () => {
       expect(await screen.findByLabelText(/household name/i)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: /create household/i })).toBeInTheDocument();
@@ -42,7 +65,7 @@ describe("OnboardingPage", () => {
   });
 
   it("shows validation error for empty name", async () => {
-    render(<OnboardingPage />);
+    renderOnboarding();
     await screen.findByRole("button", { name: /create household/i });
     fireEvent.click(screen.getByRole("button", { name: /create household/i }));
     await waitFor(() => {
@@ -53,7 +76,7 @@ describe("OnboardingPage", () => {
   it("calls organization.create with name and slug on submit", async () => {
     vi.mocked(authClient.organization.create).mockResolvedValueOnce({ data: { id: "org-1" }, error: null } as never);
     vi.mocked(authClient.organization.setActive).mockResolvedValueOnce({ data: {}, error: null } as never);
-    render(<OnboardingPage />);
+    renderOnboarding();
     await screen.findByLabelText(/household name/i);
     fireEvent.change(screen.getByLabelText(/household name/i), { target: { value: "Smith Family" } });
     fireEvent.click(screen.getByRole("button", { name: /create household/i }));
@@ -68,7 +91,7 @@ describe("OnboardingPage", () => {
   it("calls organization.setActive with new org id after create", async () => {
     vi.mocked(authClient.organization.create).mockResolvedValueOnce({ data: { id: "org-1" }, error: null } as never);
     vi.mocked(authClient.organization.setActive).mockResolvedValueOnce({ data: {}, error: null } as never);
-    render(<OnboardingPage />);
+    renderOnboarding();
     await screen.findByLabelText(/household name/i);
     fireEvent.change(screen.getByLabelText(/household name/i), { target: { value: "Test Household" } });
     fireEvent.click(screen.getByRole("button", { name: /create household/i }));
@@ -80,7 +103,7 @@ describe("OnboardingPage", () => {
   it("redirects to /dashboard after creating household", async () => {
     vi.mocked(authClient.organization.create).mockResolvedValueOnce({ data: { id: "org-1" }, error: null } as never);
     vi.mocked(authClient.organization.setActive).mockResolvedValueOnce({ data: {}, error: null } as never);
-    render(<OnboardingPage />);
+    renderOnboarding();
     await screen.findByLabelText(/household name/i);
     fireEvent.change(screen.getByLabelText(/household name/i), { target: { value: "Test Household" } });
     fireEvent.click(screen.getByRole("button", { name: /create household/i }));
@@ -94,7 +117,7 @@ describe("OnboardingPage", () => {
       data: { session: { activeOrganizationId: "existing-org-123" }, user: { name: "Alice" } },
       isPending: false,
     } as never);
-    render(<OnboardingPage />);
+    renderOnboarding();
     await waitFor(() => {
       expect(mockReplace).toHaveBeenCalledWith("/dashboard");
     });
@@ -107,7 +130,7 @@ describe("OnboardingPage", () => {
     } as never);
     vi.mocked(authClient.organization.setActive).mockResolvedValue({ data: {}, error: null } as never);
 
-    render(<OnboardingPage />);
+    renderOnboarding();
 
     await waitFor(() => {
       expect(authClient.organization.list).toHaveBeenCalled();
@@ -119,7 +142,7 @@ describe("OnboardingPage", () => {
   });
 
   it("renders the create form when no existing households are available", async () => {
-    render(<OnboardingPage />);
+    renderOnboarding();
 
     expect(await screen.findByLabelText(/household name/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /create household/i })).toBeInTheDocument();
