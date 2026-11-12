@@ -1306,6 +1306,29 @@ resolved against a version it never saw. Pushing first means the server
 resolves the client's operation against the state the client actually knew
 about, and the pull that follows includes the outcome of that operation.
 
+**Batch granularity: one HTTP request, one transaction, all of the
+request's operations.** This is the only choice that satisfies both
+constraints. Per-operation batches would mean one Neon HTTP request each — 100
+queued operations could not meet the 1 s p95 sync target (§15.1). Per-household
+batches would break the per-operation isolation the response envelope depends
+on. So: **one batch per request, containing every operation in that request.**
+
+Per-operation failure isolation is achieved by keeping the batch free of
+statements that can *raise*. A statement that errors aborts the whole
+transaction in PostgreSQL, and would take its neighbours down with it. So:
+
+- **Validation, authorization, and duplicate-name checks happen before the
+  batch**, and their failures are reported in `rejected[]` without touching
+  the database.
+- **A failed compare-and-swap is not an error** — it updates zero rows and the
+  operation is simply classified as a conflict. No statement raises.
+- **Unique-constraint violations are avoided**, not caught: `ON CONFLICT DO
+  NOTHING` makes the create a no-op that the server reports as
+  `DUPLICATE_NAME` for that operation alone.
+
+With those three rules, every statement in the batch has a defined non-error
+outcome, so all of the request's operations can share one transaction safely.
+
 **Request**
 
 ```jsonc
@@ -1318,7 +1341,8 @@ about, and the pull that follows includes the outcome of that operation.
     {
       "opId": "uuid-v7",        // globally unique; the idempotency key
       "entityType": "item",
-      "entityId": "uuid-v7",
+      "entityId": "uuid-v7",    // omitted for item.bulkArchive / item.bulkUnarchive,
+                                // which name their targets in the payload
       "type": "item.update",    // one of the operation types in §10.1a
       "override": false,        // true = explicit user decision, bypasses LWW for the field
       "baseVersion": 12,        // server version the client edited from
@@ -1363,13 +1387,27 @@ so the client never has to special-case one of them:
     { "seq": 1043, "entityType": "item", "entity": { /* full snapshot */ },
       "deleted": false, "version": 13, "updatedBy": "user_x", "updatedAt": "…" }
   ],
-  "nextSeq": 1043,
+  "nextSeq": 1043,             // the highest seq SCANNED for this household, not the highest applied
+  "hasMore": false,            // true when more changes remain beyond nextSeq
   "serverClock": 91,
   "epoch": "uuid",              // the household's sync epoch — changes when a full resync occurred
   "minRetainedSeq": 900,        // the change-log floor; a client below it must full-resync
   "fullResyncRequired": false
 }
 ```
+
+**The pull cursor.** `sync_changes.seq` is a *global* `bigserial`, filtered
+per household — so there is no "the household's next sequence number". A
+household's changes are interleaved with every other household's in the
+global sequence. `nextSeq` is therefore **the highest `seq` the server scanned
+for this household**, not the highest one applied: the server scans
+`WHERE household_id = $1 AND seq > $lastSeq ORDER BY seq LIMIT $page`, and
+returns that scan's upper bound. The client then repeats with
+`lastSeq = nextSeq` until the response carries `hasMore: false`. Advancing
+`lastSeq` past a `seq` belonging to *another* household is harmless — it is
+simply skipped on the next scan — but advancing past one belonging to *this*
+household that has not yet committed is not, which is exactly what the
+per-household advisory lock prevents (§10.8).
 
 The household's Lamport clock, its change-log retention floor, and its sync
 epoch live in `household_sync_state` (§9.2). `serverClock` is that household's
@@ -1576,9 +1614,9 @@ the local value it just wrote.
 
 ### 10.8 The apply batch in SQL
 
-The apply is **one** statement, not two. This matters: a plain `INSERT` in a
-second statement runs even when the compare-and-swap matched zero rows,
-leaving an orphan change-log entry for a change that never happened. The
+Each operation is applied by **one** statement, not two. This matters: a plain
+`INSERT` in a second statement runs even when the compare-and-swap matched zero
+rows, leaving an orphan change-log entry for a change that never happened. The
 `EXISTS (SELECT 1 FROM items WHERE version = base + 1)` variant is also wrong
 — it is true when *someone else* won the race. Only a data-modifying CTE
 gates correctly.
@@ -1615,8 +1653,17 @@ SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, a.id,
 RETURNING op_id;
 ```
 
-The whole statement is the batch's second element, preceded by
-`SELECT pg_advisory_xact_lock(hashtextextended($household_id, 0))`.
+**The batch holds the whole request.** Its first element is
+`SELECT pg_advisory_xact_lock(hashtextextended($household_id, 0))`; its second
+and subsequent elements are one statement per operation, in the order the
+client sent them. All of them commit or none do (§10.1 — one HTTP request, one
+transaction, all of the request's operations).
+
+Because they share one transaction, **no statement in the batch may raise.**
+Every failure mode must be a defined non-error outcome: validation,
+authorization and duplicate-name checks happen before the batch; a failed
+compare-and-swap updates zero rows; and creates use `ON CONFLICT DO NOTHING`
+rather than letting a unique violation abort the transaction (§10.1).
 
 **Implementation subtleties that will bite an implementer.**
 
@@ -1682,13 +1729,13 @@ The **Operation** column uses the authoritative `type` values enumerated in
 | `item.bulkUnarchive` | `archivedAt` | The bulk form of `item.unarchive`, carrying a `baseVersion`. Skips items changed since the base, exactly as `item.bulkArchive` does. | Undoing a bulk archive does not resurrect an item another device changed in the meantime. | No |
 | `item.archive` (clear completed) | `archivedAt` | **Archive-wins** over concurrent edits to other fields, but the op carries a **version per candidate item** and **skips any item whose `version` exceeds it** — i.e. items changed on another device since the clear was initiated are not archived. | A clears completed offline; B unchecks an item and changes its quantity → B's item is **not** archived. | **Yes**, the count of skipped items is reported |
 | `item.bulkArchive` (clear completed, bulk) | `archivedAt` | The bulk form of `item.archive`: the same per-item version skip rule, applied across every checked item. The response reports how many items were skipped and why. | A clears completed offline; B changes an item's quantity → that item is **skipped**, not archived, and A is told how many were skipped. | **Yes**, the skipped count is reported |
-| `category.create` | all | Unique `(household_id, name)`. On conflict, the second op is rejected with `DUPLICATE_NAME` and surfaced. | — | **Yes** |
+| `category.create` | all | Unique `(household_id, name)`. The insert uses **`ON CONFLICT DO NOTHING`**, and a no-op insert is reported as `DUPLICATE_NAME` for that operation alone. It must **not** rely on catching a unique-violation error: in PostgreSQL an error inside a transaction aborts the whole transaction, so one duplicate name would take every other operation in the request down with it. | Two devices create the same category name → one succeeds, the other is rejected with `DUPLICATE_NAME`. Neither affects the other's operations. | **Yes** |
 | `category.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
 | `store.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
-| `store.create` | all | Duplicate names are rejected with `DUPLICATE_NAME`. The store is created with the client's id. | Two devices create the same store name → one succeeds, one is rejected and surfaced. | **Yes** |
+| `store.create` | all | Duplicate names are handled with **`ON CONFLICT DO NOTHING`** and reported as `DUPLICATE_NAME` for that operation alone, for the same reason as `category.create`: a raised constraint violation would abort the shared transaction. The store is created with the client's id. | Two devices create the same store name → one succeeds, one is rejected and surfaced. Neither affects the other's operations. | **Yes** |
 | `store.delete` | all | Removes the store's item tags. The items themselves survive, untagged. A concurrent `item.storeTags` on the same store loses to the delete. | A tags an item to a store while B deletes the store → the store is gone and the item keeps no tag for it. | No (the outcome is intuitive) |
 | `category.delete` | all | Rejected with `CATEGORY_IN_USE` while any item still references the category. The client is told which items block it. | Two devices delete categories → one succeeds; the other is rejected and surfaced. | **Yes** |
-| `item.override` | the contested field | **Bypasses the LWW comparison** for the named field and applies unconditionally. This is the "Keep mine" action (§11.2) — a user decision, not a race. The value it replaced is written to `entity_conflicts` so the *other* device learns that its edit was overridden. | Device B's edit is overridden by device A's "Keep mine" → B is told, on its next sync, that its value was replaced. | **Yes**, on both sides |
+| `item.override` | the contested field | **Bypasses the LWW comparison** for the named field. This is the "Keep mine" action (§11.2) — a user decision, not a race. Two boundary rules: (1) an override on a **tombstoned** entity is rejected with `ENTITY_NOT_FOUND` — you cannot keep your version of something that has been deleted; (2) overriding **`isChecked` is allowed**, and beats check-wins, because an explicit user decision outranks a rule that another user happened to trigger first. The value it replaced is written to `entity_conflicts` so the *other* device learns that its edit was overridden. | Device B's edit is overridden by device A's "Keep mine" → B is told, on its next sync, that its value was replaced. | **Yes**, on both sides |
 
 ### 11.1 Why these rules
 
