@@ -4,9 +4,11 @@ import tsconfigPaths from "vite-tsconfig-paths";
 import { config as loadEnv } from "dotenv";
 import path from "path";
 
-// The suites need DATABASE_URL and TEST_EMAIL whether they run locally or in
-// CI, and the two get them from different places: CI sets them as
-// environment variables, a developer has a .env.test file.
+// The suites need DATABASE_URL whether they run locally or in CI, and the
+// two get it from different places: CI sets it as an environment variable, a
+// developer has a .env.test file. (TEST_EMAIL and TEST_PASSWORD belong to
+// the Playwright setup, not to Vitest - e2e/auth.setup.ts is what reads
+// them.)
 //
 // dotenv does NOT override a variable that is already set, so this file is a
 // fallback, not an override: CI's DATABASE_URL wins over the file's, which is
