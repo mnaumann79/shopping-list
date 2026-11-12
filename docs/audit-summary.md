@@ -196,7 +196,7 @@ with the losing edit surfaced rather than discarded.
 
 | | |
 | --- | --- |
-| **Specification** | `docs/project.md` — ~3,170 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 15 ADRs, 38 acceptance criteria. |
+| **Specification** | `docs/project.md` — ~3,180 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 15 ADRs, 38 acceptance criteria. |
 | **Roadmap** | `docs/plan.md` — ~770 lines. 8 phases, ownership matrix, merge order, 8 open decisions. |
 | **Review** | 8 rounds, by three specialists. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
 | **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's two apply statements have been executed against PostgreSQL 17 with the specification's own DDL, and 86 assertions about their outcomes pass.** |
