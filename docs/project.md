@@ -1056,6 +1056,22 @@ History" flow (`POST /api/items/[id]/re-add`) sends. They have the same visible
 effect but different semantics, and an implementer who conflates them will
 resurrect a deleted item.
 
+**`item.storeTags` carries a version per tag, not a flat list of ids.** The
+server can only decide whether an addition and a removal of the same tag are
+*concurrent* — and therefore whether the removal wins (§11) — if it knows the
+version the client last saw for that pair. A flat `storeIds: string[]` cannot
+say that: "the client saw this tag absent" and "the client saw it present at
+version 4" are different facts, and only the second lets the server tell a
+concurrent removal from a sequential one. So the payload is a list of
+`{ storeId, version, present }` — the version the client last saw for that
+pair, and whether it believed the tag was present — and **the item snapshot
+carries the same per-pair versions**, so a client always knows what to send.
+
+(The alternative is to test every pair against the operation's single
+`baseVersion`, which requires every tag change to bump `items.version` and so
+makes any unrelated field edit look like a concurrent tag change. The
+per-pair version is more precise and is what §11's rule assumes.)
+
 **The payload is a discriminated union, not `Record<string, unknown>`.** An
 untyped payload is how an implementer ends up sending `storeIds` on an
 operation that ignores them:
@@ -1067,7 +1083,7 @@ type OutboxPayload =
   | { name?: string; quantity?: string | null; note?: string | null;
       categoryId?: string | null }                                   // item.update
   | { isChecked: boolean }                                          // item.check
-  | { storeIds: string[] }                                          // item.storeTags
+  | { storeIds: { storeId: string; version: number; present: boolean }[] }  // item.storeTags
   | { fields: string[] }                                            // item.delete / item.undelete
   | { baseVersion: number }                                         // item.archive / item.bulkArchive
   | { field: string; value: unknown; serverValue: unknown }         // item.override (Keep mine)
@@ -1498,7 +1514,7 @@ type EntitySnapshot = {
   isChecked: boolean;
   archivedAt: string | null;
   deletedAt: string | null;
-  storeIds: string[];                       // assembled from item_stores
+  storeIds: { storeId: string; version: number; present: boolean }[];  // from item_stores
   fieldMeta: Record<string, { v: number; lamport: number; device: string }>;
   version: number;
   lamport: number;
@@ -1611,7 +1627,7 @@ exactly one of these strings, and §11's conflict rules are keyed to them.
 | `item.update` | item | any of `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`; the losing value is reported as a conflict. |
 | `item.override` | item | `field`, `value`, `serverValue` | **Bypasses LWW** for the named field and applies unconditionally. This is the "Keep mine" action (§11.2) — a user decision, not a race. |
 | `item.check` | item | `isChecked` (boolean) | **Check-wins** (§11). |
-| `item.storeTags` | item | `storeIds` (array) | **Add-wins** for concurrent additions; a removal applies only against a base that contained the tag. |
+| `item.storeTags` | item | `storeIds: [{ storeId, version, present }]` | The tag set is resolved **per `(item_id, store_id)` pair** — each pair is an independent entity with its own `version`, `lamport` and `device_id` (§9.1). An addition and a removal of the same pair are ordered by `(lamport, deviceId)`; when they are **concurrent** the **removal wins**, so a deliberate removal is not undone by a concurrent re-add. Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]`. The payload carries a version per pair because the server can only tell a *concurrent* removal from a sequential one if it knows the version the client last saw for that pair. |
 | `item.delete` | item | — | **Delete-wins**, terminal tombstone. |
 | `item.undelete` | item | — | Clears a **delete** tombstone (`deleted_at`); rejected if a newer delete exists. |
 | `item.unarchive` | item | — | Clears an **archive** mark (`archived_at`) and returns the item to the active list. This is the "re-add from History" operation. |
