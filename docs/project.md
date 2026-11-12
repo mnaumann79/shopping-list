@@ -1120,21 +1120,35 @@ union of the fields touched by the row's outstanding operations.
 
 ### 9.1 Changes to existing tables
 
-**`items`** — additive only, no destructive change:
+**`items`** — additive only, with one conversion:
 
 | Column | Type | Purpose |
 | --- | --- | --- |
 | `id` | `uuid` PK | Unchanged type; the server now accepts client-supplied values. |
 | `deleted_at` | `timestamptz` nullable | **Tombstone.** `NULL` = live. Set on delete; cleared only by an explicit restore. |
 | `version` | `integer` not null default 1 | Incremented on every server-applied change. The client's `baseVersion` is checked against it. |
-| `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata: `{"name": {"v": 4, "lamport": 12, "device": "d-…"}}`. Enables per-field conflict resolution without a separate table. **It also carries the ordering key for the tombstone:** `field_meta["deletedAt"].lamport` records the effective lamport of the delete that set `deleted_at`, so `item.undelete` can tell whether a *newer* delete exists (§11). |
+| `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata. **An entry exists only for a field that a write actually touched** — a row that has only ever had its name changed has a `field_meta` with one key, not eight. The tracked set is exactly: `name`, `quantity`, `note`, `categoryId`, `storeIds`, `isChecked`, `deletedAt`, `archivedAt`. Each entry is `{ v, lamport, device }`, where **`v` is the row `version` that the write produced** — so `field_meta[f].v` is directly comparable with the row's current `version`, and a client can tell whether a given field has moved since its base version. `device` is the id of the device that wrote it, which is what §11's check-wins rule reads (`field_meta["isChecked"].device`). Enables per-field conflict resolution without a separate table. **It also carries the ordering key for the tombstone:** `field_meta["deletedAt"].lamport` records the effective lamport of the delete that set `deleted_at`, so `item.undelete` can tell whether a *newer* delete exists (§11). |
 | `updated_by_id` | `text` nullable → `user(id)` `ON DELETE SET NULL` | Who last changed the row. Named to match the existing `created_by_id` convention, and carries the same foreign key so the column cannot hold a user id that does not exist. |
 | `lamport` | `bigint` not null default 0 | Highest Lamport value applied to this row. |
 | `last_op_id` | `uuid` nullable | The `opId` of the operation that last wrote this row. Set by the compare-and-swap in the same batch. The change-log append and the idempotency record are guarded on `last_op_id = $opId`, which is what proves that *this* operation is the one whose write landed — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
 
-`is_active` is **retained but deprecated**; it is kept in step with `deleted_at`
-for one release and removed in a later migration. This avoids a risky
-single-step rewrite.
+**One meaning of "now" per table.** The existing `items.created_at`,
+`items.updated_at` and `items.archived_at` are `timestamp` (no time zone), while
+every column this plan adds is `timestamptz`. A table holding both means two
+different instants for "now", and comparing across them is a bug waiting to
+happen. **The existing `timestamp` columns are converted to `timestamptz` in
+the same migration that adds the new ones** — `ALTER TABLE … ALTER COLUMN …
+TYPE timestamptz USING … AT TIME ZONE 'UTC'`. The conversion is a widening
+change, not a narrowing one, and it must happen before any row is written, so
+no `timestamp` value is ever compared against a `timestamptz` one.
+
+**`is_active` is deprecated by *stopping* to use it, not by keeping it in step.**
+The draft said it would be "kept in step with `deleted_at` for one release",
+which imposes a dual-write on every writer forever with no mechanism to
+enforce it — exactly the kind of trigger-free obligation that rots. Instead:
+**the release that adds `deleted_at` stops reading `is_active` entirely.** The
+column is left in place, unused, and dropped in a later migration. No trigger,
+no dual-write, nothing to remember.
 
 `archived_at` keeps its existing meaning: *cleared from the list, recoverable
 from History*. It is orthogonal to `deleted_at` (*deleted, tombstoned*).
@@ -1342,6 +1356,10 @@ All migrations are **additive**: new nullable columns with defaults, new tables,
 new indexes. No column is dropped and no row is rewritten in the same release
 that introduces the sync model. `is_active` → `deleted_at` backfill is a single
 separate migration that sets `deleted_at = now()` where `is_active = false`.
+**The backfill is idempotent**: `WHERE is_active = false AND deleted_at IS
+NULL`. Without the second predicate, re-running it would re-stamp every
+legacy tombstone with a *new* `deleted_at`, silently moving the moment of
+every historical deletion to the day the migration was re-run.
 
 **The one exception is the partial unique index** on `categories` and `stores`
 (§9.2a). It *replaces* the existing table constraint rather than sitting
@@ -1801,7 +1819,7 @@ rather than letting a unique violation abort the transaction (§10.1).
    | Outcome | Meaning | Action |
    | --- | --- | --- |
    | **One row** | The compare-and-swap won. | Applied. |
-   | **Zero rows** | The compare-and-swap was **lost** — another writer got there first. | Re-read the row **in a fresh round trip**, re-run §11's per-field decision against the fresh state, and re-apply with the new `baseVersion`. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
+   | **Zero rows** | Either the compare-and-swap was **lost**, or the operation was **already applied** by a concurrent request carrying the same `opId`. | **Consult the idempotency ledger first** (§10.3). If `sync_operations` already holds this `opId`, the operation is a **duplicate** — return the cached result envelope and mark it `duplicate`. Only if the `opId` is absent is it a genuine lost race: re-read the row **in a fresh round trip**, re-run §11's per-field decision against the fresh state, and re-apply with the new `baseVersion`. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
    | **The statement raised** | A genuine database error. | Retry the whole batch. |
 
    An empty result set must **not** be treated as a transport failure. The
@@ -2081,7 +2099,7 @@ risk**:
 | --- | --- |
 | A user opens the new version for the first time | The client has an empty IndexedDB. It performs a full bootstrap sync, which pulls the household's entire current state from the server. The local database is built from that snapshot. |
 | Existing server rows | Untouched. Their `id` values remain valid UUIDs. |
-| `is_active = false` rows | One migration sets `deleted_at = now()` for them, so the tombstone model is consistent from the first sync. |
+| `is_active = false` rows | One migration sets `deleted_at = now()` for them (`WHERE is_active = false AND deleted_at IS NULL`, so it is idempotent), and the code stops reading `is_active` in the same release, so the tombstone model is consistent from the first sync. |
 | `archived_at` rows | Untouched. They remain recoverable from History. |
 
 **There is no data to copy and no transformation to get wrong.** This is the
