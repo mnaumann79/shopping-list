@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One run per ref. A new push cancels the run it replaces.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: lint, type-check, unit tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The application connects to Postgres at import time, so a build needs a
+    # reachable database even though no query runs during it.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: shopping_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/shopping_test
+      # The local driver talks to the service container; the Neon HTTP driver
+      # only works against Neon.
+      DB_DRIVER: node-postgres
+      BETTER_AUTH_SECRET: ci-secret
+      BETTER_AUTH_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      # Placeholders: the Better Auth plugin is registered at startup and
+      # tolerates them. Nothing is ever sent.
+      RESEND_API_KEY: ci-dummy-not-used
+      RESEND_FROM_EMAIL: noreply@example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        # NODE_ENV is overridden for the install only: pnpm skips
+        # devDependencies when NODE_ENV=production, and the linter, the
+        # type-checker and the test runner all live there.
+        env:
+          NODE_ENV: development
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
