@@ -127,6 +127,21 @@ export async function listMembers(page: Page): Promise<Member[]> {
   return body.members;
 }
 
+/**
+ * Waits until the settings page can be driven.
+ *
+ * The page loads the session and the household's members first, and only
+ * then renders the member list and the admin-only cards (the invite form,
+ * the join link button). A member row is therefore the point where the app
+ * has taken the page over.
+ */
+export async function waitForSettingsReady(page: Page): Promise<void> {
+  const membersCard = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.locator('[data-slot="card-title"]', { hasText: "Members" }) });
+  await expect(membersCard.locator("li").first()).toBeVisible({ timeout: 60_000 });
+}
+
 /** Creates a join link through the app's own endpoint and returns its URL. */
 export async function generateJoinLink(page: Page): Promise<string> {
   const response = await page.request.post(apiUrl("/api/households/join-links"));
@@ -167,6 +182,7 @@ export async function inviteFromSettings(
   email: string,
 ): Promise<Invitation> {
   await page.goto("/household/settings");
+  await waitForSettingsReady(page);
   await page.getByPlaceholder("name@example.com").fill(email);
   await submitForm(page, "Send invite", "/api/households/invite");
 

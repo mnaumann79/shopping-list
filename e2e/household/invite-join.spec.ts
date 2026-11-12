@@ -9,6 +9,7 @@ import {
   signUp,
   submitForm,
   uniqueEmail,
+  waitForSettingsReady,
 } from "./helpers";
 
 // HSHD-02: Admin can invite by email
@@ -20,6 +21,7 @@ test.describe("Email invite flow", () => {
     const email = uniqueEmail("invitee");
 
     await page.goto("/household/settings");
+    await waitForSettingsReady(page);
     await expect(page.getByRole("button", { name: "Send invite" })).toBeVisible();
     await page.getByPlaceholder("name@example.com").fill(email);
     await submitForm(page, "Send invite", "/api/households/invite");
@@ -132,6 +134,7 @@ test.describe("Email invite flow", () => {
     }
 
     await page.goto("/household/settings");
+    await waitForSettingsReady(page);
 
     // The card title is a div, so the card is found by its title slot rather
     // than by a heading role.

@@ -11,6 +11,7 @@ import {
   signUp,
   submitForm,
   uniqueEmail,
+  waitForSettingsReady,
 } from "./helpers";
 
 // HSHD-03: Admin can generate shareable join link
@@ -20,6 +21,7 @@ test.describe("Shareable join link flow", () => {
 
   test("admin can generate a join link from household settings", async ({ page }) => {
     await page.goto("/household/settings");
+    await waitForSettingsReady(page);
 
     await expect(page.getByRole("button", { name: "Generate join link" })).toBeVisible();
     await submitForm(page, "Generate join link", "/api/households/join-links");
@@ -29,6 +31,7 @@ test.describe("Shareable join link flow", () => {
 
   test("generated link has /join?token= format", async ({ page }) => {
     await page.goto("/household/settings");
+    await waitForSettingsReady(page);
     await submitForm(page, "Generate join link", "/api/households/join-links");
 
     const link = await page.locator("input[readonly]").inputValue();
@@ -149,6 +152,7 @@ test.describe("Shareable join link flow", () => {
 
   test("admin regenerating link invalidates previous link", async ({ page }) => {
     await page.goto("/household/settings");
+    await waitForSettingsReady(page);
     const linkInput = page.locator("input[readonly]");
 
     await submitForm(page, "Generate join link", "/api/households/join-links");
