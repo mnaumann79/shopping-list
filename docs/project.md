@@ -2443,6 +2443,34 @@ The recovery is complete when **all** of the following are demonstrably true.
 
 ---
 
+## Appendix B — Known refinements and deferred details
+
+These are **not** defects. Each was raised during the specialist review and is
+correctly deferred to the phase that implements it, because fixing it in the
+specification now would grow the plan without changing what gets built. They
+are recorded here so that nothing is silently lost.
+
+| # | Refinement | Owner | Settled in |
+| --- | --- | --- | --- |
+| B-1 | The exact `LIMIT` on the change-log pull page (500 is the working figure) and the backoff when `hasMore` is true across many pages | Backend | Phase 3 |
+| B-2 | The pruning job's mechanics: how often it runs, and whether it runs per-household or globally | Database | Phase 3 |
+| B-3 | `entity_conflicts` retention beyond the change-log window — retained at least as long for now, with the exact second pruning window undecided | Database | Phase 3 |
+| B-4 | The `epoch` field's exact semantics — it changes on a full resync, but whether it is also rotated on a household reset is undecided | Backend + Database | Phase 3 |
+| B-5 | The `item_stores` primary key requires existing duplicate tag rows to be de-duplicated **before** the constraint is added | Database | Phase 3 |
+| B-6 | The exact trigger conditions under which the Neon WebSocket driver would be adopted instead of the batch approach | Lead + Database | Phase 2 |
+| B-7 | The "manage your devices" surface — listing members' devices and last-seen times — is a Phase 6 task whose scope depends on D-6 | Frontend + Backend | Phase 6 |
+| B-8 | Whether the `override` operation should be rate-limited or restricted to household admins | Backend | Phase 3 |
+| B-9 | The `deviceName` the client sends — whether it is a free-text label, a browser/OS-derived name, or user-editable | Frontend | Phase 4 |
+| B-10 | The exact wording and iconography of the four "Needs attention" card types, beyond the content specified in §11.2 | Frontend | Phase 6 |
+| B-11 | Whether the history page should also be an offline-capable shell, or remain online-only | Frontend | Phase 6 |
+| B-12 | The `storeTags` per-pair conflict presentation — whether a contested tag is shown on the item, in the panel, or both | Frontend | Phase 6 |
+
+**None of these change the architecture, the data model, the protocol, or the
+conflict rules.** They are presentation, tuning, and operational details that
+belong to the phase that has the context to settle them.
+
+---
+
 ## Appendix A — Evidence index
 
 Every **VERIFIED** and **DEFECT** claim in this document traces to one of:
