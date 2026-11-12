@@ -1180,7 +1180,7 @@ so that `category.delete` and `store.delete` have the same semantics as
 
 **`item_stores`** — the item-to-store tag table needs to carry conflict
 metadata, because `storeIds` is **not** a column on `items` and `field_meta`
-holds one entry per *field*, not per tag. The add-wins rule (§11,
+holds one entry per *field*, not per tag. The per-pair rule (§11,
 `item.storeTags`) therefore has no schema home today. Two options exist:
 
 | Option | Verdict |
@@ -1191,8 +1191,19 @@ holds one entry per *field*, not per tag. The add-wins rule (§11,
 The chosen option adds to `item_stores`:
 `PRIMARY KEY (item_id, store_id)` — **the table currently has no primary key
 at all**, so duplicate tag rows are possible today — plus
-`version integer not null default 1`, `lamport bigint not null default 0`, and
-`device_id text not null` (the device that last added the tag).
+`version integer not null default 1`, `lamport bigint not null default 0`,
+`device_id uuid not null` (the device that last wrote the tag), and
+**`deleted_at timestamptz null`** — the **pair tombstone**.
+
+**A removal tombstones the pair; it does not delete the row.** This is the
+same pattern items, stores and categories already use, and it is not
+cosmetic. Deleting the row destroys the removal's `lamport` and `device_id`, so
+a later write could not be **ordered against** it — and a device that had been
+offline for a week could then re-add a tag that somebody had deliberately
+removed. The tombstone keeps the ordering key alive for as long as the pair
+exists, which is what makes §11's rule implementable at all. The pair's
+tombstone is retained on the same terms as an item's: never hard-deleted
+(§9.3).
 
 ### 9.2 New tables
 
@@ -1307,6 +1318,7 @@ CREATE INDEX items_active_household ON items (organization_id) WHERE deleted_at 
 CREATE INDEX stores_household        ON stores (organization_id);
 CREATE INDEX categories_household    ON categories (organization_id);
 CREATE INDEX item_stores_item        ON item_stores (item_id);
+CREATE INDEX item_stores_live        ON item_stores (item_id) WHERE deleted_at IS NULL;
 
 -- Pruning by age, per household.
 CREATE INDEX sync_changes_household_created ON sync_changes (household_id, created_at);
@@ -1352,6 +1364,9 @@ items.**
    reconnect, and would push an `item.update` for a row the server no longer
    knows is deleted — resurrecting it and breaking FR-24 and INV-07. Purging
    tombstones is therefore **not** offered as a space optimisation.
+   The same rule applies to the **pair tombstones** in `item_stores`: a
+   tombstoned pair keeps its ordering key so that a stale device cannot
+   resurrect a removed tag (§9.1), and is retained on the same terms.
 2. **The change log is pruned after 90 days.** `sync_changes` rows are the only
    thing that grows without bound, so they are the only thing pruned. The
    90-day window therefore defines the **maximum device offline window**: a
@@ -1638,11 +1653,11 @@ exactly one of these strings, and §11's conflict rules are keyed to them.
 
 | `type` | Entity | Payload | Conflict rule (§11) |
 | --- | --- | --- | --- |
-| `item.create` | item | `name`, `quantity`, `note`, `categoryId`, `storeIds` | The server accepts the client id, and the insert uses **`ON CONFLICT (id) DO NOTHING RETURNING id`**. Zero rows returned means the id was already taken: that is `duplicate` if the idempotency ledger holds this `opId`, and `DUPLICATE_ID` otherwise. The change-log row is built from the **inserted** row, never from the pre-existing item — otherwise a collision would log a change that did not happen. |
+| `item.create` | item | `name`, `quantity`, `note`, `categoryId`, `storeIds` | The server accepts the client id, and the insert uses **`ON CONFLICT (id) DO NOTHING RETURNING id`**. Zero rows returned means the id was already taken: that is `duplicate` if the idempotency ledger holds this `opId`, and `DUPLICATE_ID` otherwise. The change-log row is built from the **inserted** row, never from the pre-existing item — otherwise a collision would log a change that did not happen. The create **also writes the payload's `storeIds` as tag rows** — a create that drops them has silently lost the tags, and no later operation would recover them. |
 | `item.update` | item | any of `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`; the losing value is reported as a conflict. |
 | `item.override` | item | `field`, `value`, `serverValue` | **Bypasses LWW** for the named field and applies unconditionally. This is the "Keep mine" action (§11.2) — a user decision, not a race. |
 | `item.check` | item | `isChecked` (boolean) | **Check-wins** (§11). |
-| `item.storeTags` | item | `storeIds: [{ storeId, version, present }]` | The tag set is resolved **per `(item_id, store_id)` pair** — each pair is an independent entity with its own `version`, `lamport` and `device_id` (§9.1). An addition and a removal of the same pair are ordered by `(lamport, deviceId)`; when they are **concurrent** the **removal wins**, so a deliberate removal is not undone by a concurrent re-add. Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]`. The payload carries a version per pair because the server can only tell a *concurrent* removal from a sequential one if it knows the version the client last saw for that pair. |
+| `item.storeTags` | item | `storeIds: [{ storeId, version, present }]` | The tag set is resolved **per `(item_id, store_id)` pair** — each pair is an independent entity with its own `version`, `lamport` and `device_id` (§9.1). **Sequential** (the client's pair version equals the stored pair version, so it has seen the pair as it stands): it wins iff its `(lamport, deviceId)` is **higher**. **Concurrent** (the versions differ, so neither has seen the other): the **removal wins**, so a deliberate removal is not undone by a concurrent re-add. A removal **tombstones** the pair rather than deleting the row, so the removal's ordering key survives (§9.1, §10.8.3). Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]`. The payload carries a version per pair because the server can only tell a *concurrent* removal from a sequential one if it knows the version the client last saw for that pair. |
 | `item.delete` | item | — | **Delete-wins**, terminal tombstone. |
 | `item.undelete` | item | — | Clears a **delete** tombstone (`deleted_at`); rejected if a newer delete exists. |
 | `item.unarchive` | item | — | Clears an **archive** mark (`archived_at`) and returns the item to the active list. This is the "re-add from History" operation. |
@@ -1831,11 +1846,36 @@ rows, leaving an orphan change-log entry for a change that never happened. The
 — it is true when *someone else* won the race. Only a data-modifying CTE
 gates correctly.
 
-**The statement below has been executed against PostgreSQL 17 using this
-document's own §9.1/§9.2 DDL, and its outcomes verified** — a normal update,
-a field lost to a concurrent write, a check that loses by check-wins, and a
-lost compare-and-swap. It is the normative form; an implementer should not
-have to rediscover that it parses.
+There are **two statement shapes**: the **item-row statement**, which applies
+every operation that touches an existing item, and the **create statement**,
+which inserts one. Both have been **executed against PostgreSQL 17 using this
+document's own §9.1/§9.2 DDL, and their outcomes verified** — seventeen
+scenarios covering a normal update, a field lost to a concurrent write, a check
+that loses by check-wins, a write to a tombstoned row, an undelete that is too
+old, a lost compare-and-swap, five store-tag outcomes, and a create with tags.
+They are the normative form; an implementer should not have to rediscover that
+they parse.
+
+> ⚠️ **Two versions, and they must not be confused.** `$op_base_version` is
+> **immutable** — it is the version the *client* edited from, and it is what
+> §11's rules are evaluated against. `$cas_version` is the version the server
+> compares the row against, and it *is* refreshed on a retry. Collapsing the two
+> makes §11's check-wins rule unreachable: a client that has been offline
+> since version 3 sends an uncheck whose `baseVersion` is 3; if the retry
+> substitutes the server's current version 6 as the base, then
+> `baseVersion >= field_meta["isChecked"].v` becomes true, the check is
+> **cleared**, and §11 — which says the item must stay checked — is silently
+> violated. The retry therefore refreshes `$cas_version` and leaves
+> `$op_base_version` exactly as the client sent it.
+
+#### 10.8.1 The item-row statement
+
+Applies `item.update`, `item.check`, `item.archive`, `item.unarchive`,
+`item.bulkArchive`, `item.bulkUnarchive`, `item.delete`, `item.undelete`,
+`item.override` and `item.storeTags`. Its parameters are `$op_base_version`
+(immutable) and `$cas_version` (refreshed on retry), plus `$fields` — the set
+of item fields the operation touches, which is how one statement shape serves
+ten operation types.
 
 ```sql
 WITH before AS (
@@ -1844,64 +1884,120 @@ WITH before AS (
      AND organization_id = $household_id
      AND version = $cas_version
 ),
+pairs AS (
+  SELECT t."storeId" AS store_id, t.version AS base_version, t.present
+    FROM jsonb_to_recordset(COALESCE($payload->'storeIds', '[]'::jsonb))
+         AS t("storeId" uuid, version integer, present boolean)
+   WHERE t."storeId" IS NOT NULL
+),
+cur AS (
+  SELECT s.store_id, s.version, s.lamport, s.device_id, s.deleted_at
+    FROM item_stores AS s
+   WHERE s.item_id = $entity_id
+     AND s.store_id IN (SELECT store_id FROM pairs)
+),
+decide AS (
+  SELECT p.store_id, p.base_version, p.present,
+         c.version AS cur_version, c.lamport AS cur_lamport,
+         c.device_id AS cur_device,
+         (c.deleted_at IS NOT NULL) AS cur_absent,
+         (c.store_id IS NOT NULL AND p.base_version IS DISTINCT FROM c.version) AS concurrent,
+         CASE
+           WHEN b.deleted_at IS NOT NULL      THEN false
+           WHEN c.store_id IS NULL             THEN p.present
+           WHEN p.base_version = c.version     THEN ($op_lamport, $device_id::text) > (c.lamport, c.device_id::text)
+           ELSE NOT p.present
+         END AS client_wins
+    FROM pairs AS p
+    CROSS JOIN before AS b
+    LEFT JOIN cur AS c ON c.store_id = p.store_id
+),
 wins AS (
   SELECT
-    ('name' = ANY($fields) AND $op_type = 'item.update'
-      AND ($op_lamport, $device_id::text) >
-          (COALESCE((b.field_meta->'name')->>'lamport','0')::bigint,
-           COALESCE((b.field_meta->'name')->>'device','')))                AS w_name,
-    ('quantity' = ANY($fields) AND $op_type = 'item.update'
-      AND ($op_lamport, $device_id::text) >
-          (COALESCE((b.field_meta->'quantity')->>'lamport','0')::bigint,
-           COALESCE((b.field_meta->'quantity')->>'device','')))            AS w_quantity,
-    ('note' = ANY($fields) AND $op_type = 'item.update'
-      AND ($op_lamport, $device_id::text) >
-          (COALESCE((b.field_meta->'note')->>'lamport','0')::bigint,
-           COALESCE((b.field_meta->'note')->>'device','')))                AS w_note,
-    ('categoryId' = ANY($fields) AND $op_type = 'item.update'
-      AND ($op_lamport, $device_id::text) >
-          (COALESCE((b.field_meta->'categoryId')->>'lamport','0')::bigint,
-           COALESCE((b.field_meta->'categoryId')->>'device','')))          AS w_category,
-    ($op_type = 'item.check'
+    (b.deleted_at IS NULL)                                                         AS row_writable,
+    ('name' = ANY($fields) AND b.deleted_at IS NULL
+      AND ($op_type = 'item.override'
+        OR ($op_type = 'item.update'
+            AND ($op_lamport, $device_id::text) >
+                (COALESCE((b.field_meta->'name')->>'lamport','0')::bigint,
+                 COALESCE((b.field_meta->'name')->>'device','')))))                AS w_name,
+    ('quantity' = ANY($fields) AND b.deleted_at IS NULL
+      AND ($op_type = 'item.override'
+        OR ($op_type = 'item.update'
+            AND ($op_lamport, $device_id::text) >
+                (COALESCE((b.field_meta->'quantity')->>'lamport','0')::bigint,
+                 COALESCE((b.field_meta->'quantity')->>'device','')))))            AS w_quantity,
+    ('note' = ANY($fields) AND b.deleted_at IS NULL
+      AND ($op_type = 'item.override'
+        OR ($op_type = 'item.update'
+            AND ($op_lamport, $device_id::text) >
+                (COALESCE((b.field_meta->'note')->>'lamport','0')::bigint,
+                 COALESCE((b.field_meta->'note')->>'device','')))))                AS w_note,
+    ('categoryId' = ANY($fields) AND b.deleted_at IS NULL
+      AND ($op_type = 'item.override'
+        OR ($op_type = 'item.update'
+            AND ($op_lamport, $device_id::text) >
+                (COALESCE((b.field_meta->'categoryId')->>'lamport','0')::bigint,
+                 COALESCE((b.field_meta->'categoryId')->>'device','')))))          AS w_category,
+    ($op_type = 'item.check' AND b.deleted_at IS NULL
       AND $op_base_version >=
-          COALESCE((b.field_meta->'isChecked')->>'v','0')::int)           AS w_is_checked
+          COALESCE((b.field_meta->'isChecked')->>'v','0')::int)                    AS w_is_checked,
+    ($op_type IN ('item.archive','item.bulkArchive') AND b.deleted_at IS NULL)     AS w_archived,
+    ($op_type IN ('item.unarchive','item.bulkUnarchive') AND b.deleted_at IS NULL) AS w_unarchived,
+    ($op_type = 'item.delete' AND b.deleted_at IS NULL)                           AS w_deleted,
+    ($op_type = 'item.undelete' AND b.deleted_at IS NOT NULL
+      AND COALESCE((b.field_meta->'deletedAt')->>'lamport','0')::bigint <= $op_lamport)
+                                                                                  AS w_undeleted,
+    ($op_type = 'item.storeTags' AND b.deleted_at IS NULL
+      AND EXISTS (SELECT 1 FROM decide AS d WHERE d.client_wins))                AS w_store_ids
   FROM before AS b
+),
+flags AS (
+  SELECT w.*,
+         (w.w_name OR w.w_quantity OR w.w_note OR w.w_category OR w.w_is_checked
+          OR w.w_archived OR w.w_unarchived OR w.w_deleted OR w.w_undeleted
+          OR w.w_store_ids) AS row_changed
+    FROM wins AS w
 ),
 applied AS (
   UPDATE items AS t
-     SET version       = t.version + 1,
+     SET version       = t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END,
          name          = CASE WHEN w.w_name        THEN $payload->>'name'       ELSE t.name END,
          quantity      = CASE WHEN w.w_quantity    THEN $payload->>'quantity'   ELSE t.quantity END,
          note          = CASE WHEN w.w_note        THEN $payload->>'note'       ELSE t.note END,
          category_id   = CASE WHEN w.w_category    THEN ($payload->>'categoryId')::uuid ELSE t.category_id END,
          is_checked    = CASE WHEN w.w_is_checked  THEN ($payload->>'isChecked')::boolean ELSE t.is_checked END,
-         archived_at   = CASE WHEN $op_type IN ('item.archive','item.bulkArchive')
-                              THEN now() ELSE t.archived_at END,
-         deleted_at    = CASE WHEN $op_type = 'item.delete' THEN now() ELSE t.deleted_at END,
+         archived_at   = CASE WHEN w.w_archived    THEN now()
+                              WHEN w.w_unarchived  THEN NULL
+                              ELSE t.archived_at END,
+         deleted_at    = CASE WHEN w.w_deleted     THEN now()
+                              WHEN w.w_undeleted   THEN NULL
+                              ELSE t.deleted_at END,
          field_meta    = t.field_meta || jsonb_strip_nulls(jsonb_build_object(
-                           'name',       CASE WHEN w.w_name       THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'quantity',   CASE WHEN w.w_quantity   THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'note',       CASE WHEN w.w_note       THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'categoryId', CASE WHEN w.w_category   THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'isChecked',  CASE WHEN w.w_is_checked THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'deletedAt',  CASE WHEN $op_type = 'item.delete'
-                                             THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'archivedAt', CASE WHEN $op_type IN ('item.archive','item.bulkArchive','item.unarchive','item.bulkUnarchive')
-                                             THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'storeIds',   CASE WHEN $op_type = 'item.storeTags'
-                                             THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END
+                           'name',       CASE WHEN w.w_name       THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'quantity',   CASE WHEN w.w_quantity   THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'note',       CASE WHEN w.w_note       THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'categoryId', CASE WHEN w.w_category   THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'isChecked',  CASE WHEN w.w_is_checked THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'deletedAt',  CASE WHEN w.w_deleted OR w.w_undeleted
+                                             THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'archivedAt', CASE WHEN w.w_archived OR w.w_unarchived
+                                             THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'storeIds',   CASE WHEN w.w_store_ids
+                                             THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END
                          )),
-         lamport       = GREATEST(t.lamport, $op_lamport),
-         last_op_id    = $op_id,
-         updated_at    = now(),
-         updated_by_id = $actor_id
-    FROM before AS b, wins AS w
+         lamport       = CASE WHEN w.row_changed THEN GREATEST(t.lamport, $op_lamport) ELSE t.lamport END,
+         last_op_id    = CASE WHEN w.row_changed THEN $op_id ELSE t.last_op_id END,
+         updated_at    = CASE WHEN w.row_changed THEN now() ELSE t.updated_at END,
+         updated_by_id = CASE WHEN w.row_changed THEN $actor_id ELSE t.updated_by_id END
+    FROM before AS b, flags AS w
    WHERE t.id = $entity_id
      AND t.organization_id = $household_id
      AND t.version = $cas_version
   RETURNING t.id, t.organization_id, t.name, t.quantity, t.note, t.category_id,
             t.is_checked, t.archived_at, t.deleted_at, t.field_meta, t.version,
-            t.lamport, t.last_op_id, t.updated_by_id, t.updated_at, t.created_at
+            t.lamport, t.last_op_id, t.updated_by_id, t.updated_at, t.created_at,
+            w.row_changed AS changed
 ),
 lost AS (
   SELECT f.field,
@@ -1911,6 +2007,8 @@ lost AS (
                       WHEN 'note'       THEN to_jsonb(b.note)
                       WHEN 'categoryId' THEN to_jsonb(b.category_id)
                       WHEN 'isChecked'  THEN to_jsonb(b.is_checked)
+                      WHEN 'deletedAt'  THEN to_jsonb(b.deleted_at)
+                      WHEN 'archivedAt' THEN to_jsonb(b.archived_at)
                       END AS server_value,
          NULLIF((b.field_meta -> f.field) ->> 'device', '')::uuid AS winner_device_id,
          COALESCE((b.field_meta -> f.field) ->> 'lamport', '0')::bigint AS winner_lamport
@@ -1921,6 +2019,8 @@ lost AS (
            WHEN 'note'       THEN NOT w.w_note
            WHEN 'categoryId' THEN NOT w.w_category
            WHEN 'isChecked'  THEN NOT w.w_is_checked
+           WHEN 'deletedAt'  THEN NOT (w.w_deleted OR w.w_undeleted)
+           WHEN 'archivedAt' THEN NOT (w.w_archived OR w.w_unarchived)
            ELSE FALSE END
 ),
 conflicts AS (
@@ -1928,33 +2028,242 @@ conflicts AS (
                                 local_value, server_value, store_id, resolution,
                                 winner_device_id, winner_lamport, op_id, device_id)
   SELECT $household_id, $entity_type, $entity_id, l.field,
-         l.local_value, l.server_value, NULL, $resolution,
-         l.winner_device_id, l.winner_lamport, $op_id, $device_id
-    FROM lost AS l
-  RETURNING id
+         l.local_value, l.server_value, NULL,
+         CASE WHEN $op_type = 'item.override'                        THEN 'override'
+              WHEN b.deleted_at IS NOT NULL AND $op_type <> 'item.undelete'
+                                                                     THEN 'delete_wins'
+              WHEN l.field = 'isChecked'                             THEN 'check_wins'
+              WHEN l.field = 'deletedAt'                             THEN 'rejected'
+              ELSE 'lww' END,
+         CASE WHEN b.deleted_at IS NOT NULL AND $op_type <> 'item.undelete'
+              THEN NULLIF((b.field_meta->'deletedAt')->>'device','')::uuid
+              ELSE l.winner_device_id END,
+         CASE WHEN b.deleted_at IS NOT NULL AND $op_type <> 'item.undelete'
+              THEN COALESCE((b.field_meta->'deletedAt')->>'lamport','0')::bigint
+              ELSE l.winner_lamport END,
+         $op_id, $device_id
+    FROM lost AS l, before AS b
+  RETURNING id, field, store_id, local_value, server_value, resolution,
+            winner_device_id, winner_lamport, device_id
+),
+tagged AS (
+  INSERT INTO item_stores (item_id, store_id, version, lamport, device_id, deleted_at)
+  SELECT $entity_id, d.store_id, COALESCE(d.base_version, 0) + 1, $op_lamport, $device_id, NULL
+    FROM decide AS d
+   WHERE d.client_wins AND d.present
+  ON CONFLICT (item_id, store_id) DO UPDATE
+    SET version    = item_stores.version + 1,
+        lamport    = $op_lamport,
+        device_id  = $device_id,
+        deleted_at = NULL
+   WHERE ($op_lamport, $device_id::text) > (item_stores.lamport, item_stores.device_id::text)
+  RETURNING item_id, store_id, version
+),
+untagged AS (
+  UPDATE item_stores AS s
+     SET version    = s.version + 1,
+         lamport    = $op_lamport,
+         device_id  = $device_id,
+         deleted_at = now()
+    FROM decide AS d
+   WHERE s.item_id = $entity_id
+     AND s.store_id = d.store_id
+     AND d.client_wins AND NOT d.present
+  RETURNING s.item_id, s.store_id
+),
+store_ids AS (
+  SELECT COALESCE(
+           jsonb_agg(jsonb_build_object('storeId', u.store_id,
+                                        'version', u.version,
+                                        'present', true)
+                     ORDER BY u.store_id),
+           '[]'::jsonb) AS ids
+    FROM (
+      SELECT ids.store_id,
+             COALESCE(t.version, s.version) AS version
+        FROM (
+          SELECT store_id FROM tagged
+          UNION
+          SELECT store_id FROM item_stores
+           WHERE item_id = $entity_id
+             AND deleted_at IS NULL
+             AND store_id NOT IN (SELECT store_id FROM untagged)
+        ) AS ids
+        LEFT JOIN tagged AS t ON t.store_id = ids.store_id
+        LEFT JOIN item_stores AS s
+               ON s.item_id = $entity_id AND s.store_id = ids.store_id
+    ) AS u
+),
+tag_conflicts AS (
+  INSERT INTO entity_conflicts (household_id, entity_type, entity_id, field,
+                                local_value, server_value, store_id, resolution,
+                                winner_device_id, winner_lamport, op_id, device_id)
+  SELECT $household_id, $entity_type, $entity_id, 'storeIds',
+         jsonb_build_object('storeId', d.store_id, 'present', d.present),
+         jsonb_build_object('storeId', d.store_id, 'present', NOT d.cur_absent,
+                            'version', COALESCE(d.cur_version, 0)),
+         d.store_id,
+         CASE WHEN d.concurrent THEN 'removal_wins' ELSE 'lww' END,
+         CASE WHEN d.client_wins THEN $device_id ELSE d.cur_device END,
+         CASE WHEN d.client_wins THEN $op_lamport ELSE COALESCE(d.cur_lamport, 0) END,
+         $op_id,
+         CASE WHEN d.client_wins THEN d.cur_device ELSE $device_id END
+    FROM decide AS d
+   WHERE NOT d.client_wins AND (d.cur_version IS NOT NULL OR d.present)
+  RETURNING id, field, store_id, local_value, server_value, resolution,
+            winner_device_id, winner_lamport, device_id
+),
+entity_snapshot AS (
+  SELECT a.id,
+         (a.deleted_at IS NOT NULL) AS deleted,
+         a.changed,
+         jsonb_build_object(
+           'id', a.id, 'organizationId', a.organization_id, 'name', a.name,
+           'quantity', a.quantity, 'note', a.note, 'categoryId', a.category_id,
+           'isChecked', a.is_checked, 'archivedAt', a.archived_at,
+           'deletedAt', a.deleted_at, 'fieldMeta', a.field_meta,
+           'version', a.version, 'lamport', a.lamport, 'lastOpId', a.last_op_id,
+           'updatedById', a.updated_by_id, 'updatedAt', a.updated_at,
+           'createdAt', a.created_at, 'storeIds', si.ids
+         ) AS entity
+    FROM applied AS a CROSS JOIN store_ids AS si
 ),
 logged AS (
   INSERT INTO sync_changes (household_id, entity_type, entity_id, op_id,
                              version, lamport, device_id, actor_id, payload, deleted)
-  SELECT $household_id, $entity_type, a.id, $op_id, a.version, $op_lamport,
-         $device_id, $actor_id, to_jsonb(a), (a.deleted_at IS NOT NULL)
-    FROM applied AS a
+  SELECT $household_id, $entity_type, e.id, $op_id, (e.entity->>'version')::int,
+         $op_lamport, $device_id, $actor_id, e.entity, e.deleted
+    FROM entity_snapshot AS e
+   WHERE e.changed
   RETURNING seq
 )
 INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
                              entity_type, entity_id, op_type, lamport,
                              payload, result, outcome)
-SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, a.id,
+SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, e.id,
        $op_type, $op_lamport, $payload,
        jsonb_build_object(
-         'entity',    to_jsonb(a),
-         'conflicts', COALESCE((SELECT jsonb_agg(to_jsonb(c) - 'id')
-                                   FROM conflicts AS c), '[]'::jsonb)
+         'entity', e.entity,
+         'conflicts', COALESCE((
+           SELECT jsonb_agg(jsonb_build_object(
+                    'id', x.id, 'field', x.field, 'storeId', x.store_id,
+                    'localValue', x.local_value, 'serverValue', x.server_value,
+                    'resolution', x.resolution,
+                    'winnerDeviceId', x.winner_device_id,
+                    'winnerLamport', x.winner_lamport)
+                  ORDER BY x.id)
+             FROM (
+               SELECT * FROM conflicts
+               UNION ALL
+               SELECT * FROM tag_conflicts
+             ) AS x
+            WHERE x.device_id = $device_id
+         ), '[]'::jsonb)
        ),
        'applied'
-  FROM applied AS a
+  FROM entity_snapshot AS e
 RETURNING op_id;
 ```
+
+#### 10.8.2 The create statement
+
+`item.create` inserts a client-supplied id, so the id can already exist. It
+also **writes the item's store tags** — a create whose payload carries
+`storeIds` and drops them has silently lost the tags, and no later operation
+would recover them.
+
+```sql
+WITH created AS (
+  INSERT INTO items (id, organization_id, name, quantity, note, category_id,
+                     created_by_id, version, lamport, last_op_id, field_meta)
+  VALUES ($entity_id, $household_id, $payload->>'name', $payload->>'quantity',
+          $payload->>'note', NULLIF($payload->>'categoryId', '')::uuid,
+          $actor_id, 1, $op_lamport, $op_id,
+          jsonb_strip_nulls(jsonb_build_object(
+            'name',       jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id),
+            'quantity',   CASE WHEN $payload ? 'quantity'   THEN jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id) END,
+            'note',       CASE WHEN $payload ? 'note'       THEN jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id) END,
+            'categoryId', CASE WHEN $payload ? 'categoryId' THEN jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id) END,
+            'storeIds',   jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id)
+          )))
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id, organization_id, name, quantity, note, category_id,
+            is_checked, archived_at, deleted_at, field_meta, version,
+            lamport, last_op_id, updated_by_id, updated_at, created_at
+),
+tags AS (
+  INSERT INTO item_stores (item_id, store_id, version, lamport, device_id, deleted_at)
+  SELECT c.id, t.store_id::uuid, 1, $op_lamport, $device_id, NULL
+    FROM created AS c
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+                   COALESCE($payload->'storeIds', '[]'::jsonb)) AS t(store_id)
+   WHERE t.store_id <> ''
+  ON CONFLICT (item_id, store_id) DO NOTHING
+  RETURNING item_id, store_id, version
+),
+tagset AS (
+  SELECT COALESCE(
+           jsonb_agg(jsonb_build_object('storeId', u.store_id,
+                                        'version', u.version,
+                                        'present', true)
+                     ORDER BY u.store_id),
+           '[]'::jsonb) AS ids
+    FROM (
+      SELECT store_id, version FROM tags
+      UNION ALL
+      SELECT s.store_id, s.version
+        FROM item_stores AS s
+       WHERE s.item_id = $entity_id
+         AND s.deleted_at IS NULL
+         AND s.store_id NOT IN (SELECT store_id FROM tags)
+    ) AS u
+),
+entity_snapshot AS (
+  SELECT c.id,
+         (c.deleted_at IS NOT NULL) AS deleted,
+         jsonb_build_object(
+           'id', c.id, 'organizationId', c.organization_id, 'name', c.name,
+           'quantity', c.quantity, 'note', c.note, 'categoryId', c.category_id,
+           'isChecked', c.is_checked, 'archivedAt', c.archived_at,
+           'deletedAt', c.deleted_at, 'fieldMeta', c.field_meta,
+           'version', c.version, 'lamport', c.lamport, 'lastOpId', c.last_op_id,
+           'updatedById', c.updated_by_id, 'updatedAt', c.updated_at,
+           'createdAt', c.created_at, 'storeIds', ts.ids
+         ) AS entity
+    FROM created AS c CROSS JOIN tagset AS ts
+),
+logged AS (
+  INSERT INTO sync_changes (household_id, entity_type, entity_id, op_id,
+                             version, lamport, device_id, actor_id, payload, deleted)
+  SELECT $household_id, $entity_type, e.id, $op_id, (e.entity->>'version')::int,
+         $op_lamport, $device_id, $actor_id, e.entity, e.deleted
+    FROM entity_snapshot AS e
+  RETURNING seq
+)
+INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
+                             entity_type, entity_id, op_type, lamport,
+                             payload, result, outcome)
+SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, e.id,
+       $op_type, $op_lamport, $payload,
+       jsonb_build_object(
+         'entity', e.entity,
+         'conflicts', '[]'::jsonb
+       ),
+       'applied'
+  FROM entity_snapshot AS e
+RETURNING op_id;
+```
+
+**Zero rows means the id was already taken.** That is `duplicate` if the
+idempotency ledger holds this `opId` — a replay — and `DUPLICATE_ID`
+otherwise. **The change-log row is built from the inserted row, never from the
+pre-existing item**: selecting the existing row instead would log a change that
+did not happen, and would report the operation as applied when nothing was
+written. The same reason makes the `tags` CTE select `FROM created` — if the
+item was not created, **no tag row may be written either**, or the tags would
+be attached to somebody else's item.
+
+#### 10.8.3 What each part does, and the rules it encodes
 
 **The batch holds the whole request.** Its first element is
 `SELECT pg_advisory_xact_lock(hashtextextended($household_id, 0))`; its second
@@ -1983,6 +2292,25 @@ authorization and duplicate-name checks happen before the batch; a failed
 compare-and-swap updates zero rows; and creates use `ON CONFLICT DO NOTHING`
 rather than letting a unique violation abort the transaction (§10.1).
 
+**A tombstoned row rejects every write.** The `b.deleted_at IS NULL` guard on
+every gate is §11's *delete-wins, terminal* rule expressed in SQL: a deleted
+item accepts no further edit, no check, no archive and no override — only an
+`item.undelete` whose lamport is **not older** than the tombstone's clears it.
+A write that arrives against a tombstone changes nothing, writes no
+change-log row, and produces a conflict with the resolution `delete_wins`,
+naming the device that deleted the item.
+
+**An operation that wins nothing does not touch the row — but it is still
+acknowledged.** `flags.row_changed` is the single place that decides whether
+the operation changed anything. When it is false, the row's `version`,
+`field_meta`, `lamport`, `last_op_id`, `updated_at` and `updated_by_id` are all
+left exactly as they were, and `logged` writes **no** change-log row — there
+is nothing for other devices to learn. The `sync_operations` ledger row is
+**still written**, because the operation *was* decided. Without it the client
+would never be acknowledged and would retry the same operation forever. This
+is the difference between "the operation was refused" and "the operation never
+happened", and the two must not be confused.
+
 **Zero rows mean different things for different operations.** For
 `item.archive` and `item.bulkArchive`, §11's rule is that an item whose
 `version` exceeds the version the operation carries is **skipped** — so a
@@ -1992,7 +2320,7 @@ report the skipped count. For every other operation type, zero rows mean a
 genuine conflict, as described above.
 
 **The row-level CAS and the per-field gates are different things.** The
-`WHERE version = $base_version` clause gates the *row* — it decides whether
+`WHERE version = $cas_version` clause gates the *row* — it decides whether
 this operation is still the one that should write at all. The `CASE`
 expressions gate the *fields* — an operation that wins the row may still lose
 individual fields to a concurrent write. A `CASE` that wrote the incoming
@@ -2002,16 +2330,19 @@ is exactly the silent discard that FR-23 forbids.
 **`field_meta` must be maintained by the same statement.** Every per-field rule
 in §11 reads `field_meta[f].lamport` or `field_meta[f].v`, so an apply that
 does not write `field_meta` leaves the next operation with nothing to compare
-against — the second concurrent edit would find no metadata and would win
-unconditionally. The `field_meta` assignment merges one entry per field the
-operation **won**, carrying the new row `version`, the operation's lamport, and
-its device.
+against. The `field_meta` assignment merges one entry per field the operation
+**won** — each key is gated on the same condition that gates the value, so an
+operation that lost a field does not claim it, and a row that has only ever had
+its name changed keeps a `field_meta` with one key, not eight (§9.1).
 
 **The conflict record is written by the same statement, from the pre-image.**
 The `before` CTE reads the row from the statement's snapshot — the state before
 the update — so `lost.server_value` is the value that won, and
 `lost.local_value` is what the operation asked for. Writing the conflict in a
-separate statement would race with the write it describes.
+separate statement would race with the write it describes. The `resolution` is
+**derived**, not passed in: `override` for an explicit user decision,
+`delete_wins` for a write against a tombstone, `check_wins` for `isChecked`,
+`rejected` for a refused undelete, and `lww` otherwise.
 
 **The tombstone and the archive mark are set by their own operations**, and
 cleared by their own operations (`item.undelete` clears `deleted_at`,
@@ -2019,6 +2350,66 @@ cleared by their own operations (`item.undelete` clears `deleted_at`,
 **derived from the row** — `(a.deleted_at IS NOT NULL)` — rather than hardcoded,
 so a tombstone is always logged as a deletion and an archive is never
 mistaken for one.
+
+**The change-log payload is camelCase, and it carries the tag set.** The
+snapshot is built with `jsonb_build_object` rather than `to_jsonb(row)`,
+because `to_jsonb` on a row yields **snake_case** keys (`category_id`,
+`is_checked`) while the wire contract in §10.1a and §8.2 is camelCase
+(`categoryId`, `isChecked`). The `storeIds` array is **not** a plain list of
+ids: it is `[{ storeId, version, present }]`, assembled from the rows this
+statement wrote (`tagged`, `untagged`) **unioned** with the snapshot's other
+rows for that item. Reading `item_stores` alone would miss the rows this
+statement just wrote; reading only the CTEs would miss the tags it did not
+touch. A client could not otherwise rebuild its tag set from a snapshot — and
+the per-pair `version` it carries is what the client sends back in the next
+`item.storeTags` payload.
+
+**Store tags are resolved per pair, and a removal tombstones the pair.**
+`item_stores` rows are independent entities with their own `version`, `lamport`
+and `device_id` (§9.1). For each pair in the payload:
+
+| Case | Outcome |
+| --- | --- |
+| The pair does not exist | An addition creates it; a removal is a no-op. |
+| The client's pair version **equals** the stored pair version (**sequential**) | The client is up to date with this pair. It wins iff its `(lamport, deviceId)` is **higher** than the stored one. |
+| The client's pair version **differs** from the stored pair version (**concurrent**) | The **removal wins** (§11) — a deliberate removal is not undone by a concurrent re-add. An addition against a live tag is refused; an addition against a tombstone is refused; a removal is applied. |
+
+A removal **tombstones the pair** (`deleted_at`) rather than deleting the row.
+That is not cosmetic: deleting the row destroys the removal's lamport, and a
+later write could then not be ordered against it — so a device that had been
+offline for a week could resurrect a tag that was deliberately removed. The
+tombstone is the same pattern items, stores and categories already use, and it
+is what makes §11's rule implementable at all.
+
+**Every pair whose outcome differs from what the operation asked for is
+recorded.** A refused pair writes an `entity_conflicts` row with
+`field = 'storeIds'` and `store_id` naming the pair, `resolution`
+`removal_wins` when the pair was concurrent and `lww` when it was sequential,
+and the **loser** in `device_id`. When the *other* device lost, that conflict
+is addressed to it and reaches it through the conflict cursor (§10.8.4), not
+through this response.
+
+**`item.override` reuses the same statement.** Its payload is normalised to
+the field-keyed shape of `item.update` before the statement runs — `field:
+"name", value: "Oat milk"` becomes `{"name": "Oat milk"}` with
+`$fields = ['name']` — and the LWW comparison is bypassed for that field
+alone. The ledger keeps the operation's original payload.
+
+**A bulk operation is expanded into one statement per candidate item.** The
+bulk payloads carry `versions: { [itemId]: version }`; each item becomes its
+own statement with that item's version as its `$cas_version`. The operation's
+`opId` is shared, so the ledger records it once, and the response reports how
+many items were skipped because their version had moved on.
+
+**`jsonb_to_recordset` matches the JSON key to the column name byte for
+byte.** The wire format is camelCase (`storeId`), and an **unquoted** column
+alias `storeId` is folded by PostgreSQL to `storeid` — which does **not** match
+the key, so the column is silently `NULL`. An addition then violates the
+not-null constraint and aborts the whole transaction; a removal deletes nothing
+and is still reported as applied. The alias must be **quoted**: `AS t("storeId"
+uuid, version integer, present boolean)`. This was verified against PostgreSQL
+17, and it is the single most likely thing to get wrong when implementing this
+statement.
 
 **Conflicts must reach the device that did not create them.** Some
 conflicts concern a device that never pushed the losing operation — most
@@ -2030,72 +2421,11 @@ response carries a **top-level `conflicts[]` array** alongside `changes[]`, and
 request's `lastConflictSeq` and reported back as `nextConflictSeq`. It is a
 **separate cursor** from `lastSeq`, because `sync_changes` and
 `entity_conflicts` are different sequence spaces and sharing a counter would
-skip one of them.
+skip one of them. The response's `conflicts[]` array carries only the
+conflicts **addressed to this operation's device**; the others wait for the
+cursor.
 
-**`item.storeTags` needs its own write.** Bumping `items.version` and writing
-nothing else would lose the tag change entirely, and the change-log payload
-built from `to_jsonb(a)` carries no `storeIds` — so the snapshot's tag set
-could never be populated and a client could never rebuild its tags. The
-statement therefore writes the tag rows themselves, per pair, each with its
-own `version`, `lamport` and `device_id`:
-
-```sql
-tagged AS (
-  INSERT INTO item_stores (item_id, store_id, version, lamport, device_id)
-  SELECT $entity_id, t.store_id, 1, $op_lamport, $device_id
-    FROM jsonb_to_recordset($payload->'storeIds')
-         AS t(store_id uuid, version integer, present boolean)
-   WHERE t.present
-  ON CONFLICT (item_id, store_id) DO UPDATE
-    SET version  = item_stores.version + 1,
-        lamport  = GREATEST(item_stores.lamport, $op_lamport),
-        device_id = $device_id
-  RETURNING item_id, store_id, version
-),
-untagged AS (
-  DELETE FROM item_stores
-   WHERE item_id = $entity_id
-     AND store_id IN (SELECT (t.store_id)::uuid
-                        FROM jsonb_to_recordset($payload->'storeIds')
-                             AS t(store_id uuid, version integer, present boolean)
-                      WHERE NOT t.present)
-  RETURNING item_id, store_id
-)
-```
-
-**The payload's tag set is assembled from two sources**, because the CTEs in
-one statement share a snapshot: the rows this statement wrote (from `tagged`
-and `untagged`), **union** the snapshot's other rows for that item. Reading
-`item_stores` alone would miss the rows this statement just wrote; reading
-only the CTEs would miss the tags it did not touch. The change-log payload is
-therefore `to_jsonb(a) || jsonb_build_object('storeIds', …)` with that union.
-
-**A create is a different statement shape.** `item.create` inserts a
-client-supplied id, so the id can already exist:
-
-```sql
-WITH created AS (
-  INSERT INTO items (id, organization_id, name, quantity, note, category_id,
-                     created_by_id, version, lamport, last_op_id)
-  VALUES ($entity_id, $household_id, $payload->>'name', $payload->>'quantity',
-          $payload->>'note', ($payload->>'categoryId')::uuid,
-          $actor_id, 1, $op_lamport, $op_id)
-  ON CONFLICT (id) DO NOTHING
-  RETURNING id, organization_id, name, quantity, note, category_id,
-            is_checked, archived_at, deleted_at, field_meta, version,
-            lamport, last_op_id, updated_by_id, updated_at, created_at
-)
--- ... then the same change-log and idempotency inserts, selecting FROM created
-```
-
-Zero rows means the id was already taken. That is `duplicate` if the
-idempotency ledger holds this `opId` — a replay — and `DUPLICATE_ID`
-otherwise. **The change-log row is built from the inserted row, never from the
-pre-existing item**: selecting the existing row instead would log a change
-that did not happen, and would report the operation as applied when nothing was
-written.
-
-**Implementation subtleties that will bite an implementer.**
+#### 10.8.4 Implementation subtleties that will bite an implementer
 
 1. **Drizzle has no builder for `WITH … UPDATE … RETURNING`.** Use the `sql`
    template literal and pass the resulting `SQL` object to `db.batch()`.
@@ -2107,7 +2437,7 @@ written.
 3. **The guard is that the compare-and-swap matched exactly one row.** The
    `sync_changes` and `sync_operations` inserts both select `FROM applied`,
    and `applied` yields a row only when the `UPDATE … WHERE version =
-   $base_version` matched. That is the whole guard: a replayed operation
+   $cas_version` matched. That is the whole guard: a replayed operation
    matches zero rows, so it writes no change-log row and no second ledger
    entry.
 
@@ -2125,27 +2455,15 @@ written.
 
    | Outcome | Meaning | Action |
    | --- | --- | --- |
-   | **One row** | The compare-and-swap won. | Applied. |
-   | **Zero rows** | Either the compare-and-swap was **lost**, or the operation was **already applied** by a concurrent request carrying the same `opId`. | Re-read the row **in a fresh round trip** and consult the ledger first. If `sync_operations` holds a row for this `opId`, the operation was applied concurrently — report `duplicate` and replay its cached `result`. Otherwise it is a genuine lost race: re-run §11's per-field decision against the fresh state and re-apply against a **refreshed CAS version**. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
-
-> ⚠️ **Two versions, and they must not be confused.** The operation's
-> `baseVersion` is **immutable** — it is the version the *client* edited from,
-> and it is what §11's rules are evaluated against. The **CAS version** is the
-> version the server compares the row against, and it *is* refreshed on a
-> retry. Collapsing the two makes §11's check-wins rule unreachable: a client
-> that has been offline since version 3 sends an uncheck whose
-> `baseVersion` is 3; if the retry substitutes the server's current version 6
-> as the base, then `baseVersion >= field_meta["isChecked"].v` becomes true,
-> the check is **cleared**, and §11 — which says the item must stay checked —
-> is silently violated. The retry therefore refreshes `$cas_version` and leaves
-> `$op_base_version` exactly as the client sent it.
-   | **The statement raised** | A genuine database error. | Retry the whole batch. |
+   | **One row, `changed = true`** | The compare-and-swap won and the operation changed something. | Applied. |
+   | **One row, `changed = false`** | The compare-and-swap won but the operation lost every field it contested. | Acknowledged and recorded in the ledger; **no** change-log row; the conflicts are in `entity_conflicts` and in the response. |
+   | **Zero rows** | Either the compare-and-swap was **lost**, or the operation was **already applied** by a concurrent request carrying the same `opId`. | Re-read the row **in a fresh round trip** and consult the ledger first. If `sync_operations` holds a row for this `opId`, the operation was applied concurrently — report `duplicate` and replay its cached `result`. Otherwise it is a genuine lost race: re-run §11's per-field decision against the fresh state and re-apply against a **refreshed `$cas_version`**. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
 
    An empty result set must **not** be treated as a transport failure. The
    batch may well have committed, and a blind retry would re-send operations
    that were already applied.
 5. **All the CTEs in one statement share one snapshot.** `WHERE version =
-   $base_version` is evaluated against the snapshot taken at statement start,
+   $cas_version` is evaluated against the snapshot taken at statement start,
    so a transaction that committed after that snapshot is invisible to it.
    That is exactly why the losing operation must re-read in a **separate round
    trip** rather than inside the batch — and it is why the outer statements
@@ -2159,7 +2477,7 @@ written.
    rebuild a tombstone. The `RETURNING` list above is therefore exhaustive;
    an abbreviated list silently drops fields from every logged snapshot.
 7. **`db.batch()` accepts `SQL` objects**, not Drizzle query builders, for
-   raw statements. The advisory lock and the CTE above are both `sql`
+   raw statements. The advisory lock and the CTEs above are both `sql`
    templates.
 
 **`last_op_id` — three constraints, because it is redundant with mechanisms
@@ -2167,7 +2485,7 @@ that already exist.** It is *additional* to the idempotency ledger (ADR-06)
 and to `field_meta[f].device`, not a replacement for either.
 
 - It is **additive to, never a substitute for,** the version compare-and-swap.
-  If `last_op_id` replaced `version = $base_version`, concurrency detection
+  If `last_op_id` replaced `version = $cas_version`, concurrency detection
   would be lost: a losing operation would overwrite the winner's row.
 - It carries **no foreign key** to `sync_operations`. An FK would make that
   ledger un-prunable, so the idempotency history could never be trimmed.
@@ -2203,7 +2521,7 @@ was discarded, so there is nothing to report.
 | `item.create` | all | Two devices create *different* items with the same name. | **Both survive** as separate items. No automatic merge. | No |
 | `item.update` | `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`. | The loser's value is stored as a **conflict record**; the winner's value applies. | **Yes** |
 | `item.check` | `isChecked` | **Check-wins**, with the comparison stated exactly: the uncheck **applies** iff `op.baseVersion >= field_meta["isChecked"].v` — that is, iff the uncheck was made against a version that already included the check. Otherwise the check is newer than the uncheck's base, the check stands, and the uncheck is reported as a conflict. **`op.baseVersion` is the operation's original, immutable base version** — the one the client edited from — and never the server's current version, even on a retry (§10.8). | Device A checks; device B (offline) unchecks from an older base → `baseVersion < field_meta["isChecked"].v` → **the item stays checked**. | **Yes** — the item shows `Checked by <name>` and an entry is added to "Needs attention". The *outcome* is intuitive, but the **user's action was overridden**, and FR-23 requires that an overridden edit is never silently discarded. |
-| `item.storeTags` | `storeIds` | The tag set is resolved **per `(item_id, store_id)` pair**, not as a set — each pair is an independent entity with its own `version`, `lamport`, and `device_id` (§9.1). For a single pair: an addition and a removal are ordered by `(lamport, deviceId)`, and when they are **concurrent** (neither operation's base version includes the other's write) the **removal wins** — a deliberate removal must not be undone by a concurrent re-add. Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]` and surfaced. | A adds "Costco", B adds "Aldi" → both tags present. A removes "Costco" while B concurrently re-adds it → **the removal wins**, and A is told. | **Yes**, for any contested or dropped tag |
+| `item.storeTags` | `storeIds` | The tag set is resolved **per `(item_id, store_id)` pair**, not as a set — each pair is an independent entity with its own `version`, `lamport`, and `device_id` (§9.1). For a single pair there are two cases. **Sequential** — the client's pair version equals the stored pair version, so it has seen the pair as it stands: it wins iff its `(lamport, deviceId)` is **higher**. **Concurrent** — the versions differ, so neither has seen the other: the **removal wins**, because a deliberate removal must not be undone by a concurrent re-add. A removal **tombstones** the pair (`deleted_at`) rather than deleting the row, so the removal's ordering key survives and a stale device cannot resurrect a removed tag (§9.1, §10.8.3). Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]` and surfaced. | A adds "Costco", B adds "Aldi" → both tags present. A removes "Costco" while B concurrently re-adds it → **the removal wins**, and A is told. B re-adds a tag that A had removed → **the removal wins**, the pair stays tombstoned, and B is told. | **Yes**, for any contested or dropped tag |
 | `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `item.undelete` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
 | `item.undelete` | `deletedAt` | Clears a **delete** tombstone. Rejected if a **newer** delete exists — compared as: the tombstone's effective lamport (`field_meta["deletedAt"].lamport`, the lamport of the delete that set it) must not be **greater than** the undelete's own lamport. The delete's ordering value is persisted on the row for exactly this purpose (§9.1). | Delete-then-undelete ordering is respected: a delete at lamport 10 is not undone by an undelete at lamport 5. | No |
 | `item.unarchive` | `archivedAt` | Clears an **archive** mark and returns the item to the active list. Distinct from `item.undelete`, which clears a *delete* tombstone — conflating them resurrects a deleted item. Reports a skipped count, as `item.bulkArchive` does. | Re-adding an archived item on two devices → the item is unarchived once; the second is a no-op and is counted as skipped. | **Yes**, if any item was skipped |
@@ -2225,8 +2543,11 @@ was discarded, so there is nothing to report.
 - **Delete-wins** because a deleted item reappearing is the most confusing
   possible outcome for a shopper, and because it makes the tombstone a reliable
   guard against resurrection (FR-24, INV-07).
-- **Add-wins for store tags** because tags are a set of independent facts, and
-  because losing a tag silently re-routes a shopper to the wrong store.
+- **Removal-wins for a concurrent store-tag contest** because a tag that
+  somebody deliberately removed should not come back on its own, and because a
+  resurrected tag re-routes a shopper to the wrong store. It is not *silent*:
+  the device whose addition lost is told (§10.8.3), so nothing is discarded
+  unseen, and the household can re-apply it as a sequential operation.
 - **Archive skips items changed after the base version** because a bulk action
   that silently destroys a concurrent edit is the exact failure the product
   owner called out as scenario 18.
@@ -2633,6 +2954,18 @@ that:
 
 This is the acceptance demonstration for the whole project.
 
+**A second, lower-level fixture sits under it.** §10.8's two apply statements
+have already been executed against PostgreSQL 17 with this document's own DDL,
+across seventeen scenarios, and their outcomes verified. Those seventeen
+scenarios are the **server-side fixture** for Phase 3: an implementation that
+reaches a different outcome for any of them fails the test rather than passing
+review. The list is: a normal update; a field lost to a concurrent write; a
+check that loses by check-wins; a write to a tombstoned row; an undelete whose
+lamport is older than the tombstone's; a lost compare-and-swap; and, for store
+tags, an addition, a sequential removal, a concurrent removal, a concurrent
+re-add refused by a tombstone, and a sequential removal that loses on lamport;
+plus a create that writes its tags and a create whose id is already taken.
+
 ### 16.5 CI gates
 
 `.github/workflows/ci.yml`, triggered on `pull_request` and `push` to `main`:
@@ -2778,22 +3111,42 @@ are recorded here so that nothing is silently lost.
 
 | # | Refinement | Owner | Settled in |
 | --- | --- | --- | --- |
-| B-1 | The exact `LIMIT` on the change-log pull page (500 is the working figure) and the backoff when `hasMore` is true across many pages | Backend | Phase 3 |
-| B-2 | The pruning job's mechanics: how often it runs, and whether it runs per-household or globally | Database | Phase 3 |
-| B-3 | `entity_conflicts` retention beyond the change-log window — retained at least as long for now, with the exact second pruning window undecided | Database | Phase 3 |
-| B-4 | The `epoch` field's exact semantics — it changes on a full resync, but whether it is also rotated on a household reset is undecided | Backend + Database | Phase 3 |
-| B-5 | The `item_stores` primary key requires existing duplicate tag rows to be de-duplicated **before** the constraint is added | Database | Phase 3 |
-| B-6 | The exact trigger conditions under which the Neon WebSocket driver would be adopted instead of the batch approach | Lead + Database | Phase 2 |
-| B-7 | The "manage your devices" surface — listing members' devices and last-seen times — is a Phase 6 task whose scope depends on D-6 | Frontend + Backend | Phase 6 |
-| B-8 | Whether the `override` operation should be rate-limited or restricted to household admins | Backend | Phase 3 |
-| B-9 | The `deviceName` the client sends — whether it is a free-text label, a browser/OS-derived name, or user-editable | Frontend | Phase 4 |
-| B-10 | The exact wording and iconography of the four "Needs attention" card types, beyond the content specified in §11.2 | Frontend | Phase 6 |
-| B-11 | Whether the history page should also be an offline-capable shell, or remain online-only | Frontend | Phase 6 |
-| B-12 | The `storeTags` per-pair conflict presentation — whether a contested tag is shown on the item, in the panel, or both | Frontend | Phase 6 |
+| R-1 | The exact `LIMIT` on the change-log pull page (500 is the working figure) and the backoff when `hasMore` is true across many pages | Backend | Phase 3 |
+| R-2 | The pruning job's mechanics: how often it runs, and whether it runs per-household or globally | Database | Phase 3 |
+| R-3 | `entity_conflicts` retention beyond the change-log window — retained at least as long for now, with the exact second pruning window undecided | Database | Phase 3 |
+| R-4 | The `epoch` field's exact semantics — it changes on a full resync, but whether it is also rotated on a household reset is undecided | Backend + Database | Phase 3 |
+| R-5 | The `item_stores` primary key requires existing duplicate tag rows to be de-duplicated **before** the constraint is added | Database | Phase 3 |
+| R-6 | The exact trigger conditions under which the Neon WebSocket driver would be adopted instead of the batch approach | Lead + Database | Phase 2 |
+| R-7 | The "manage your devices" surface — listing members' devices and last-seen times — is a Phase 6 task whose scope depends on D-6 | Frontend + Backend | Phase 6 |
+| R-8 | Whether the `override` operation should be rate-limited or restricted to household admins | Backend | Phase 3 |
+| R-9 | The `deviceName` the client sends — whether it is a free-text label, a browser/OS-derived name, or user-editable | Frontend | Phase 4 |
+| R-10 | The exact wording and iconography of the four "Needs attention" card types, beyond the content specified in §11.2 | Frontend | Phase 6 |
+| R-11 | Whether the history page should also be an offline-capable shell, or remain online-only | Frontend | Phase 6 |
+| R-12 | The `storeTags` per-pair conflict presentation — whether a contested tag is shown on the item, in the panel, or both | Frontend | Phase 6 |
+| R-13 | §10.6's full resync rebuilds the local tables and only then replays the outbox, so pending edits are invisible until the next round trip → re-apply pending ops locally right after the rebuild | Frontend | Phase 3 |
+| R-14 | `devices` cannot answer "which device is behind, and by how much" → add `devices.last_seq bigint` | Backend + Database | Phase 3 |
+| R-15 | `entity_conflicts` records the losing op but not the winning one → add `winner_op_id uuid` + `winner_version integer` | Database | Phase 3 |
+| R-16 | The change-log payload is built from the row's columns, so its keys must be **camelCase** — `categoryId`, `isChecked` — to match §8.2 and the wire contract. **Applied** in §10.8.3: the payload is assembled with `jsonb_build_object` rather than `to_jsonb(row)`, which would yield snake_case keys. | Backend | Phase 3 |
+| R-17 | The full-resync snapshot and the epoch bump are not in the same statement, so a concurrent write can land between them → take both under the household lock | Database | Phase 3 |
+| R-18 | §9.1's `field_meta` tracked set lists `storeIds`, but the tags are per-pair in `item_stores` — the item-level `storeIds` entry records *that* the tag set was written, not the individual tags | Database | Phase 3 |
+| R-19 | §9.2's `entity_type`, `op_type` and `resolution` columns have no `CHECK` constraint, so a typo in a type name would be stored silently → add them | Database | Phase 3 |
+| R-20 | `entity_conflicts.seq` is `bigserial` and also carries a `UNIQUE` index — `bigserial` is already unique → drop the redundant index | Database | Phase 3 |
+| R-21 | `item_stores.device_id` is `uuid` in §9.1 while the rest of the device identifiers are `uuid` too — confirm no `text` device ids remain anywhere in the sync tables | Database | Phase 3 |
+| R-22 | The `entity_conflicts.resolution` enum must carry `removal_wins` — it is what §10.8.3 writes for a concurrent store-tag contest — and `rejected` for a refused undelete | Database | Phase 3 |
 
-**None of these change the architecture, the data model, the protocol, or the
-conflict rules.** They are presentation, tuning, and operational details that
-belong to the phase that has the context to settle them.
+**None of these change the architecture, the protocol, or the conflict rules.**
+They are presentation, tuning, and operational details that belong to the phase
+that has the context to settle them. R-16 is the exception that proves the
+rule: it named a wire-format mismatch, which was **fixed** in §10.8.3 rather
+than deferred, because a mismatch in the payload's key names would have been
+discovered by an implementer guessing.
+
+**Why these are numbered `R-n` and not `B-n`.** §2 already uses `B-1 … B-16`
+for the verified defects in the existing application. Two numbering schemes
+sharing a prefix would have made "B-7" ambiguous — the seventh defect or the
+seventh refinement — so the refinements are numbered `R-n` (refinement). Any
+earlier cross-reference to a refinement by its old `B-n` number should be read
+as `R-n`.
 
 ---
 

@@ -30,10 +30,24 @@ instance, and driven with a real Chromium browser via Playwright. Where the
 document says **VERIFIED**, that means it was observed in that environment.
 
 **Review.** The Backend, Database and Frontend specialists reviewed the
-planning documents over seven rounds. They found roughly forty **blocking**
+planning documents over eight rounds. They found roughly **fifty blocking**
 defects in the *specification* — several of which would have cost weeks to
 discover during implementation, and two of which would have caused silent
 data loss. All findings have been applied.
+
+**The last round was the sharpest.** The Database Expert extracted §10.8's SQL
+— the statement an implementer would copy — and ran it against PostgreSQL 17
+using the specification's own DDL. It **did not parse**, and where it parsed it
+reached the wrong outcome: sixteen blocking defects, every one of them in that
+statement. The statement was rewritten and re-verified; it now executes, and
+its outcomes were checked across **seventeen scenarios** — a normal update, a
+field lost to a concurrent write, a check that loses by check-wins, a write to
+a tombstoned row, an undelete that is too old, a lost compare-and-swap, five
+store-tag outcomes, a create that writes its tags, and a create whose id is
+already taken. **86 assertions pass.** The same round produced one schema
+change: a **tombstone on the tag pairs** (`item_stores.deleted_at`), without
+which a removal's ordering key is destroyed and a long-offline device could
+resurrect a tag somebody had deliberately removed.
 
 ---
 
@@ -182,15 +196,17 @@ with the losing edit surfaced rather than discarded.
 
 | | |
 | --- | --- |
-| **Specification** | `docs/project.md` — ~2,850 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 15 ADRs, 38 acceptance criteria. |
-| **Roadmap** | `docs/plan.md` — ~760 lines. 8 phases, ownership matrix, merge order, 7 open decisions. |
-| **Review** | 8 rounds, by three specialists. All blocking findings applied; 12 refinements deferred to Appendix B with an owner and a phase. |
-| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. |
+| **Specification** | `docs/project.md` — ~3,170 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 15 ADRs, 38 acceptance criteria. |
+| **Roadmap** | `docs/plan.md` — ~770 lines. 8 phases, ownership matrix, merge order, 8 open decisions. |
+| **Review** | 8 rounds, by three specialists. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
+| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's two apply statements have been executed against PostgreSQL 17 with the specification's own DDL, and 86 assertions about their outcomes pass.** |
 
 **Deliberate changes to the original plan, made on review:** RLS removed from
 the isolation strategy (unreliable on the Neon HTTP driver — fail-open returns
 every row, fail-closed returns none); "Keep mine" made an explicit **override**
-rather than a race; tombstones made **never hard-deleted**.
+rather than a race; tombstones made **never hard-deleted**; the change-log
+payload made **camelCase** to match the wire contract; and a **pair tombstone**
+added so that a removal's ordering key survives.
 
 ---
 
@@ -201,11 +217,12 @@ Seven are listed in `docs/plan.md` §6. Two gate Phase 3:
 | | Decision | Why it is yours |
 | --- | --- | --- |
 | **D-1** | **The conflict-resolution matrix** — in particular **check-wins** and **delete-wins** (`docs/project.md` §11) | A product judgement about how a household should behave, not a technical one. Every other rule is an implementation detail; this one is about people. |
+| **D-1a** | **Which side wins a *concurrent* store-tag contest** — the removal (as specified and verified) or the addition | A sub-decision inside D-1. Both surface the losing edit to the user; they differ only in which edit stands. The removal-wins rule is implemented and verified; flipping it is a change to one `CASE`. |
 | **D-7** | **A checked item stays in place**, dimmed, rather than moving to a "Completed" section | Today the row leaves the shopper's thumb the instant they tick it. This is the most important in-aisle change in the plan. |
 
 The other five — retention window, sync cadence, delete-recoverability,
 sign-out behaviour with unsynchronised changes, and device management — are
-listed in `docs/plan.md` §6.
+listed in `docs/plan.md` §6, along with D-1a.
 
 ---
 

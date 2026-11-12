@@ -336,9 +336,9 @@ proven against a real PostgreSQL.
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
-| 3.1 | Additive migrations: `items.deleted_at`, `items.version`, `items.field_meta`, `items.updated_by`, `items.lamport`, `items.last_op_id`; the same set plus `deleted_at` for `stores` and `categories`; version the `item_stores` rows — add `PRIMARY KEY (item_id, store_id)` (the table has **no primary key today**, so duplicate tag rows are possible), plus `version`, `lamport`, `device_id`; create `household_sync_state`; the `is_active → deleted_at` backfill as a separate migration | Database | `src/db/schema/**`, `src/db/migrations/**` |
+| 3.1 | Additive migrations: `items.deleted_at`, `items.version`, `items.field_meta`, `items.updated_by`, `items.lamport`, `items.last_op_id`; the same set plus `deleted_at` for `stores` and `categories`; version the `item_stores` rows — add `PRIMARY KEY (item_id, store_id)` (the table has **no primary key today**, so duplicate tag rows are possible), plus `version`, `lamport`, `device_id`, and **`deleted_at`** — the *pair tombstone*, without which a removal's ordering key is lost and a long-offline device can resurrect a removed tag (§9.1, §10.8.3); create `household_sync_state`; the `is_active → deleted_at` backfill as a separate migration | Database | `src/db/schema/**`, `src/db/migrations/**` |
 | 3.2 | Create the `sync_changes`, `sync_operations`, `devices`, and `entity_conflicts` tables with their indexes | Database | `src/db/migrations/**` |
-| 3.3 | Implement the apply engine (ADR-14): deduplicate on `opId`; resolve the conflict per §11; then apply the request in **one HTTP request and one transaction** — the advisory lock (`pg_advisory_xact_lock(hashtextextended(household_id, 0))`) followed by one statement per operation, each a data-modifying CTE that performs the compare-and-swap and inserts the change-log row **only if the update matched**, plus the idempotency record. No statement in the batch may raise: validation, authorization, and duplicate-name checks run before it, a failed compare-and-swap updates zero rows, and creates use `ON CONFLICT DO NOTHING` — so one duplicate name cannot abort its neighbours | Backend | `src/server/sync/apply.ts` |
+| 3.3 | Implement the apply engine (ADR-14): deduplicate on `opId`; resolve the conflict per §11; then apply the request in **one HTTP request and one transaction** — the advisory lock (`pg_advisory_xact_lock(hashtextextended(household_id, 0))`) followed by one statement per operation, each a data-modifying CTE that performs the compare-and-swap and inserts the change-log row **only if the update matched**, plus the idempotency record. No statement in the batch may raise: validation, authorization, and duplicate-name checks run before it, a failed compare-and-swap updates zero rows, and creates use `ON CONFLICT DO NOTHING` — so one duplicate name cannot abort its neighbours. **Implement §10.8's two statements as written** — they are the normative form and have been executed against PostgreSQL 17 (§10.8); they are not a sketch to be re-derived. Three details are load-bearing and easy to get wrong: the `$op_base_version` / `$cas_version` split (§10.8), the quoted `"storeId"` alias in `jsonb_to_recordset` (§10.8.3), and the `flags.row_changed` gate that lets an operation win nothing, write no change-log row, and **still** be acknowledged in the idempotency ledger | Backend | `src/server/sync/apply.ts` |
 | 3.4 | Implement `POST /api/sync` per the frozen contract: push + pull in one round trip, batched, with `fullResyncRequired` detection | Backend | `src/app/api/sync/route.ts`, `src/server/sync/**` |
 | 3.5 | Implement the incremental pull query and the full-snapshot path; prune **only** the change log (90 days). Tombstoned item rows are never hard-deleted, and a full resync discards the client's local tombstones because the snapshot is authoritative (FR-31, §9.3) | Backend + Database | `src/server/sync/pull.ts`, `src/db/**` |
 | 3.6 | Enforce the authorization matrix on `/api/sync` and on every entity it touches | Backend | `src/app/api/sync/route.ts` |
@@ -387,6 +387,12 @@ plus explicit probes:
   conflict record exists.
 - An induced failure between the entity write and the change-log write → the
   entity write is rolled back.
+- **The seventeen scenarios §10.8's statements were verified against, replayed
+  against the implementation.** They are the fixture, not a summary: a normal
+  update, a field lost to a concurrent write, a check that loses by
+  check-wins, a write to a tombstoned row, an undelete that is too old, a lost
+  compare-and-swap, five store-tag outcomes, and a create with tags. An
+  implementation that reaches a different outcome fails here.
 
 ### Definition of done
 
@@ -735,6 +741,7 @@ transport (the sync protocol is transport-agnostic).
 | # | Risk | Severity | Mitigation |
 | --- | --- | --- | --- |
 | R-1 | The team discovers mid-implementation that the conflict rules are wrong for a real household scenario | High | Phase 2 proves the rules as pure functions before they are wired. The matrix is also a product decision — **the product owner is asked to approve §11 of `docs/project.md` before Phase 3 starts.** |
+| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's two statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across seventeen scenarios. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
 | R-2 | The SSR → client-render switch causes a performance regression that damages the existing Lighthouse score | Medium | The budget is a Phase 7 gate with a documented fallback. The existing perf harness is reused, not rewritten. |
 | R-3 | iOS Safari behaves differently from the emulation (IndexedDB eviction, service worker lifecycle) | Medium | WebKit is in the Playwright matrix from Phase 0. The manual walkthrough on a real device is a Phase 7 gate. The design avoids Background Sync precisely because of iOS. |
 | R-4 | The Neon HTTP driver cannot provide the atomicity the apply path needs | Medium | Proved in Phase 2 (Task 2.4) with the WebSocket-driver fallback already chosen. |
@@ -752,6 +759,7 @@ assessment; the ones that block work are here.
 | # | Decision | Blocks |
 | --- | --- | --- |
 | D-1 | Approve the conflict-resolution matrix (`docs/project.md` §11), in particular **check-wins** and **delete-wins**. | Phase 3 |
+| D-1a | **Sub-decision inside D-1: which side wins a *concurrent* store-tag contest?** §11 now says the **removal** wins — a tag somebody deliberately removed does not come back because another device re-added it at the same time. The alternative is that the **addition** wins, on the grounds that losing a tag re-routes a shopper to the wrong store. Both surface the losing edit to the user; they differ only in which edit stands. The removal-wins rule is the one implemented and verified in §10.8.3, and it is the conservative default (a tag that was meant to be gone stays gone). Flipping it is a change to one `CASE` in the `decide` CTE — but it must be decided **before** Phase 3, because the pair resolution and its tests are written against it. | Phase 3 |
 | D-2 | Confirm the change-log retention window (proposed: 90 days). It defines the **maximum device offline window** — beyond it a device must full-resync, and a full resync is authoritative over local state. Note that tombstones are **not** subject to this window: a tombstoned item row is never hard-deleted, because purging it would let a long-offline device resurrect the item (FR-24, INV-07). | Phase 3.1, 3.5 |
 | D-3 | Confirm the sync interval (proposed: push 2 s after a change, poll every 30 s while pending) — a trade of battery against freshness. | Phase 5.2 |
 | D-4 | Confirm that deleting an item makes it recoverable from History (today it does not) and that "clear completed" remains separately recoverable. | Phase 1.6 |
