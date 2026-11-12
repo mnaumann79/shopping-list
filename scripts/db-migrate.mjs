@@ -10,9 +10,16 @@
  * applied are skipped, and a migration whose file changed after it was
  * applied is an error instead of a silent re-run.
  *
+ * A session lock serializes the runs: two of them cannot apply the same
+ * migration at the same time.
+ *
  * The script refuses to run against a production host. A migration that ran
  * against the wrong database is not undone by a rollback, so the check
  * happens before anything is connected to.
+ *
+ * TLS follows the connection string: sslmode=require verifies the server
+ * certificate, sslmode=no-verify turns that off, and sslrootcert names a CA
+ * for a private one.
  */
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
@@ -29,47 +36,9 @@ const migrationsDir = join(
 );
 const ledgerSchema = 'db_migrate';
 const ledgerTable = 'applied';
-
-/**
- * Why DATABASE_URL must not be used, or null when it may be.
- *
- * The host and the database name are the only parts looked at, and the only
- * parts ever printed - a password never reaches a log.
- */
-function refuseReason(databaseUrl) {
-  let url;
-  try {
-    url = new URL(databaseUrl);
-  } catch {
-    return { text: 'the DATABASE_URL is not a valid URL', production: false };
-  }
-  if (url.protocol !== 'postgresql:' && url.protocol !== 'postgres:') {
-    return {
-      text: `the DATABASE_URL scheme is "${url.protocol}" - the runner needs a Postgres connection string (postgresql://), not an HTTP endpoint`,
-      production: false,
-    };
-  }
-  const host = url.hostname;
-  const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
-  if (/prod|prd/i.test(host)) {
-    return { text: `the host "${host}" names a production host`, production: true };
-  }
-  if (database && /prod|prd/i.test(database)) {
-    return { text: `the database "${database}" names a production database`, production: true };
-  }
-  return null;
-}
-
-/** The target without its password, for the messages. */
-function describeTarget(databaseUrl) {
-  try {
-    const url = new URL(databaseUrl);
-    const database = decodeURIComponent(url.pathname.replace(/^\//, ''));
-    return `${url.hostname}${database ? `/${database}` : ''}`;
-  } catch {
-    return 'the DATABASE_URL';
-  }
-}
+// One lock for all migration runs against one database. A session-level
+// lock, so it survives the COMMIT at the end of every migration.
+const lockKey = 874512301;
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) {
@@ -80,40 +49,83 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const refusal = refuseReason(databaseUrl);
-if (refusal) {
-  if (refusal.production) {
-    console.error(`Refusing to migrate: ${refusal.text} (${describeTarget(databaseUrl)}).`);
-    console.error(
-      'This script migrates development databases only. A migration that ran against the wrong\n' +
-        'database is not recoverable by a rollback, so it stops here - before it connects to anything.',
-    );
-    console.error(
-      'To migrate production, apply the reviewed migration files by hand:\n' +
-        '  psql "$PRODUCTION_DATABASE_URL" -v ON_ERROR_STOP=1 -f src/db/migrations/0000_init.sql',
-    );
-  } else {
-    console.error(`Cannot migrate: ${refusal.text} (${describeTarget(databaseUrl)}).`);
-    console.error(
-      'The runner applies SQL over a Postgres connection, so it needs a connection string\n' +
-        'like postgresql://user:password@host:5432/database.',
-    );
-  }
+let url;
+try {
+  url = new URL(databaseUrl);
+} catch {
+  console.error('Cannot migrate: the DATABASE_URL is not a valid URL.');
+  process.exit(1);
+}
+if (url.protocol !== 'postgresql:' && url.protocol !== 'postgres:') {
+  console.error(
+    `Cannot migrate: the DATABASE_URL scheme is "${url.protocol}" - the runner needs a Postgres connection string (postgresql://), not an HTTP endpoint.`,
+  );
+  console.error(
+    'The runner applies SQL over a Postgres connection, so it needs a connection string\n' +
+      'like postgresql://user:password@host:5432/database.',
+  );
   process.exit(1);
 }
 
-const poolConfig = { connectionString: databaseUrl, max: 1 };
-// libpq's sslmode=require encrypts the connection without verifying the
-// certificate chain; node-postgres verifies it by default.
-if (/[?&]sslmode=require/i.test(databaseUrl)) {
-  poolConfig.ssl = { rejectUnauthorized: false };
+/**
+ * The connection the driver would really use.
+ *
+ * pg parses the connection string itself: a `host` query parameter wins over
+ * the host in the URL, and PGHOST/PGDATABASE fill in what the URL leaves out.
+ * Asking the driver is what makes the check below look at the database the
+ * runner would actually connect to, and not at the one the URL appears to
+ * name. Nothing is connected here - the parameters are read off the client
+ * before it connects.
+ */
+let client;
+try {
+  client = new pg.Client({ connectionString: databaseUrl });
+} catch {
+  console.error('Cannot migrate: the DATABASE_URL is not a valid Postgres connection string.');
+  process.exit(1);
+}
+const { host, database } = client.connectionParameters;
+
+/**
+ * Why the runner must not connect, or null when it may.
+ *
+ * The host and the database name are the only parts looked at, and the only
+ * parts ever printed - a password never reaches a log.
+ */
+function refuseReason(host, database) {
+  if (/prod|prd/i.test(host)) {
+    return { text: `the host "${host}" names a production host`, production: true };
+  }
+  if (database && /prod|prd/i.test(database)) {
+    return { text: `the database "${database}" names a production database`, production: true };
+  }
+  return null;
 }
 
-console.log(`Migrating ${describeTarget(databaseUrl)}`);
+const refusal = refuseReason(host, database);
+if (refusal) {
+  console.error(
+    `Refusing to migrate: ${refusal.text} (${host}${database ? `/${database}` : ''}).`,
+  );
+  console.error(
+    'This script migrates development databases only. A migration that ran against the wrong\n' +
+      'database is not recoverable by a rollback, so it stops here - before it connects to anything.',
+  );
+  console.error(
+    'To migrate production, apply the reviewed migration files by hand:\n' +
+      '  psql "$PRODUCTION_DATABASE_URL" -v ON_ERROR_STOP=1 -f src/db/migrations/0000_init.sql',
+  );
+  process.exit(1);
+}
 
-const pool = new pg.Pool(poolConfig);
-const client = await pool.connect();
+console.log(`Migrating ${host}${database ? `/${database}` : ''}`);
+
 try {
+  await client.connect();
+  // Before the ledger is created or read: a second run waits here instead of
+  // applying a migration the first one is already applying.
+  await client.query(`SELECT pg_advisory_lock(${lockKey})`);
+
   await client.query(`CREATE SCHEMA IF NOT EXISTS "${ledgerSchema}"`);
   await client.query(
     `CREATE TABLE IF NOT EXISTS "${ledgerSchema}"."${ledgerTable}" (` +
@@ -154,7 +166,7 @@ try {
     try {
       await client.query(sql);
       await client.query(
-        `INSERT INTO "${ledgerSchema}"."${ledgerTable}" ("name", "checksum") VALUES ($1, $2)`,
+        `INSERT INTO "${ledgerSchema}"."${ledgerTable}" ("name","checksum") VALUES ($1,$2)`,
         [file, checksum],
       );
       await client.query('COMMIT');
@@ -168,6 +180,8 @@ try {
   console.error(`\nMigration failed: ${error.message}`);
   process.exitCode = 1;
 } finally {
-  client.release();
-  await pool.end();
+  // The lock is released here and by the server when the session ends, so a
+  // crashed run does not block the next one.
+  await client.query(`SELECT pg_advisory_unlock(${lockKey})`).catch(() => {});
+  await client.end();
 }
