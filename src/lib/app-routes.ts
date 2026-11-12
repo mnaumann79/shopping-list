@@ -44,3 +44,8 @@ export function getAcceptInviteUrl(invitationId: string, email?: string) {
 export function getJoinUrl(token: string) {
   return `${getAppBaseUrl()}${getJoinPath(token)}`;
 }
+
+// Deliberate type error. This branch exists only to prove the CI gate
+// blocks a bad PR (docs/plan.md, Phase 0, definition of done). It is never
+// merged.
+export const ciGateProof: number = "not a number";
