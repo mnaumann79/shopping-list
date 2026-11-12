@@ -196,9 +196,9 @@ builds the authorization helper that Phase 3 reuses.
 | 1.5 | Fix the quantity input: accept free-form text end to end (closes B-6) | Frontend | `src/lib/utils.ts`, `src/app/(app)/dashboard/_components/QuickAddBar.tsx`, `src/app/(app)/dashboard/_components/ItemDialogs.tsx` |
 | 1.6 | Separate *delete* (tombstone) from *clear completed* (archive); make deletion recoverable and consistent (closes B-11) | Database + Backend | `src/db/schema/items.ts`, `src/db/migrations/**`, `src/server/services/items.ts`, `src/app/api/items/**` |
 | 1.7 | Make the item-store replacement atomic using `db.batch()` (closes B-13); make the bulk "clear completed" skip items changed since the request began (closes B-12) | Backend | `src/server/services/items.ts` |
-| 1.8 | Replace the optimistic-update rollback with a per-item update that cannot clobber a concurrent edit (closes B-14, B-15) | Frontend | `src/app/(app)/dashboard/_components/ShoppingList.tsx`, `ItemRow.tsx` |
+| 1.8 | ~~Replace the optimistic-update rollback with a per-item update that cannot clobber a concurrent edit (closes B-14, B-15)~~ — **superseded by Phase 4, task 4.4**, which rewrites `ShoppingList.tsx` and `ItemRow.tsx` wholesale. Do not implement this here; Phase 4's replacement covers it | Frontend | — |
 | 1.9 | Add integration tests against a **real PostgreSQL** that assert the tenant-isolation predicates, the authorization matrix, and the idempotency of a repeated create | Backend | `src/server/services/__tests__/**`, `src/test/**` |
-| 1.10 | Replace `window.confirm` with the existing `AlertDialog` component (AC-30) | Frontend | `src/app/(app)/dashboard/_components/ShoppingList.tsx` |
+| 1.10 | ~~Replace `window.confirm` with the existing `AlertDialog` component (AC-30)~~ — **superseded by Phase 4, task 4.4**, which rewrites `ShoppingList.tsx` wholesale. Do not implement this here | Frontend | — |
 
 > Tasks 1.6 and 1.7 both touch `src/server/services/items.ts`. They are executed
 > **sequentially by the same owner**, not concurrently.
@@ -411,14 +411,14 @@ network for domain data** (INV-01, INV-05, INV-06).
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
-| 4.1 | Add the Dexie local database: schema, versioned migrations, a `meta` store (local schema version, app version, cached identity, device id), and a `households` store holding the signed-in user's household list (`id`, `name`). The household list is what makes offline household switching possible and must exist from Phase 4, not Phase 6 | Frontend | `src/client/db/**` |
+| 4.1 | Add the Dexie local database: schema, versioned migrations, a `meta` store (local schema version, app version, cached identity, device id), and a `households` store holding the signed-in user's household list (`id`, `name`). The household list is what makes offline household switching possible and must exist from Phase 4, not Phase 6. **Add `dexie` and `dexie-react-hooks` to `package.json`** — Frontend owns this task's `package.json` change | Frontend | `src/client/db/**`, `package.json` |
 | 4.2 | Implement the repository layer: local CRUD that writes the record **and** enqueues the operation in one IndexedDB transaction (INV-03). Catch and **propagate** `QuotaExceededError` at this boundary — Phase 4 must not swallow it, or Phase 6's banner has nothing to hook | Frontend | `src/client/db/repository.ts` |
 | 4.3 | Implement the outbox: operation creation, the Lamport clock, `baseVersion` capture, and the `pending / inflight / failed / blocked` state machine | Frontend | `src/client/db/outbox.ts`, `src/client/sync/clock.ts` |
-| 4.4 | Implement `useLiveQuery`-based reactive reads; convert `ShoppingList`, `ItemRow`, `ItemDialogs`, `QuickAddBar`, `HistoryList` to read from the local store. Implement the three distinct empty states — *empty* / *not downloaded on this device* / *couldn't load, retry* (§6.4 (empty states)) | Frontend | `src/app/(app)/dashboard/_components/**`, `src/app/(app)/history/_components/**` |
+| 4.4 | Implement `useLiveQuery`-based reactive reads; convert `ShoppingList`, `ItemRow`, `ItemDialogs`, `QuickAddBar`, `HistoryList` to read from the local store. Implement the three distinct empty states — *empty* / *not downloaded on this device* / *couldn't load, retry* (§6.4 (empty states)). **Three carry-over defects must be fixed in this rewrite, not in Phase 1:** (a) the `ItemRow` memo comparator (`ItemRow.tsx:132-145`) compares a fixed prop list, so the new `pending`/`pendingFields`/`version` fields would never trigger a re-render and a pending badge would go stale — compare them, or drop the hand-rolled comparator; (b) `ItemDialogs.handleSave` (`ItemDialogs.tsx:83-103`) diffs against the props snapshot the dialog opened with, so a remote change made while it is open is written back on save — diff against the version the dialog opened with, or rebase on the live row; (c) the per-item optimistic rollback (B-14) and the premature `Item removed` toast (B-15) — the whole path is replaced by the local-first repository, so there is nothing to roll back | Frontend | `src/app/(app)/dashboard/_components/**`, `src/app/(app)/history/_components/**` |
 | 4.5 | Convert the dashboard and history routes to **static shells**: remove the server-side session fetch from the layout **and** from `dashboard/page.tsx` and `history/page.tsx` (each currently calls `getRequestSession()` and redirects), add a client-side auth gate, stop passing `userName` in from the server session (`AppHeader.tsx` takes it as a prop today), stop pre-formatting history labels on the server, and keep server-side authorization on every API | Frontend | `src/app/(app)/layout.tsx`, `src/app/(app)/dashboard/page.tsx`, `src/app/(app)/history/page.tsx`, `src/components/AppHeader.tsx` |
 | 4.6 | Implement the bootstrap path: on an empty local database, pull the full household snapshot and write it to IndexedDB before the first list render, distinguishing *not downloaded* from *bootstrap failed* (§6.4 (empty states)) | Frontend | `src/client/sync/bootstrap.ts` |
 | 4.7 | Add the static lint rules that enforce INV-01 / INV-05 / INV-06 (no `fetch` in components; domain reads only via the repository) | Frontend | `eslint.config.mjs` |
-| 4.8 | Component tests with `fake-indexeddb`: a write commits locally with the network blocked; the write and the outbox entry land together; a failed transaction leaves neither | Frontend | `src/client/**/__tests__/**` |
+| 4.8 | Component tests with `fake-indexeddb`: a write commits locally with the network blocked; the write and the outbox entry land together; a failed transaction leaves neither. **Add `fake-indexeddb` to Vitest's `setupFiles`** in `vitest.config.ts` — Frontend owns this task's `vitest.config.ts` change | Frontend | `src/client/**/__tests__/**`, `vitest.config.ts` |
 | 4.9 | Build the **basic** sync status chip — `Up to date`, `N changes pending`, `Offline`, `Offline · N changes pending`, `Sign in to sync · N pending` — reading from the local outbox, never from the network. It must not read `Up to date` before IndexedDB has been read (§6.4 (chip readiness)). The states that depend on the sync engine land in Phase 6 (task 6.3) | Frontend | `src/components/**`, `src/app/(app)/dashboard/_components/**` |
 
 ### Deliverables
@@ -562,6 +562,7 @@ situations without losing data.
 | 6.7 | Handle storage unavailability and quota exhaustion (scenario 15): a clear blocking banner, an export path, and never a silent loss | Frontend | `src/client/db/**` |
 | 6.8 | Mobile pass: 44 px touch targets, safe-area insets, the quick-add bar reflowed for a 375 px viewport, `viewport-fit=cover` | Frontend | `src/app/(app)/dashboard/_components/**`, `src/app/globals.css` |
 | 6.9 | Add the offline Playwright scenarios: offline cold start, offline reload, offline mutations, offline restart, session expiry, sign-out with pending work, household switch offline | Frontend | `e2e/offline/**` |
+| 6.12 | Extend the offline Playwright suite to cover **all eighteen scenarios** in `docs/project.md` §5 — SC-01 to SC-18 — each mapped to a named test. The offline scenarios that need two devices (SC-03, SC-04, SC-05, SC-06, SC-18) are written here; the rest are single-device and may already exist | Frontend | `e2e/offline/**` |
 | 6.10 | Add the "manage your devices" surface (household settings) listing known devices and their last-seen time | Frontend + Backend | `src/app/(app)/household/settings/**`, `src/app/api/households/**` |
 | 6.11 | Implement the in-aisle interaction model (`docs/project.md` §6.3): a checked item **stays in place**, dimmed, and never leaves its category group; the bottom "Completed (N)" becomes a collapsed **summary** with an "Archive checked items" action and a count confirmation; and the 5-second inline **undo** strip for add / check / uncheck / delete / archive — where undo is itself an outbox operation (`item.undelete`, `item.unarchive`, `item.bulkArchive`), never a UI-only trick | Frontend | `src/app/(app)/dashboard/_components/**`, `src/client/db/outbox.ts` |
 
@@ -570,8 +571,10 @@ situations without losing data.
 - The app is installable on iOS and Android.
 - With the network disabled **and the local database and service-worker cache
   already populated**, a cold start renders the household's list.
-- Every scenario in `docs/project.md` §5's scenario list (1–18) has a defined
-  behaviour and an automated test.
+- Every scenario in `docs/project.md` §5's scenario list (1–18) has a **defined
+  behaviour**, and the ones Phase 6 can express in a single browser context have
+  an automated test. The multi-device scenarios (SC-03, SC-04, SC-05, SC-06,
+  SC-18) are automated in Phase 7, task 7.2, where the two-device harness exists.
 - The status chip is always truthful.
 - A checked item stays in place, and undo works offline for every reversible
   action.

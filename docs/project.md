@@ -236,6 +236,20 @@ creation, initial authentication, invitation acceptance, join-link redemption,
 and permission changes** require a server. Everything a shopper does in an
 aisle is offline-capable.
 
+**The three conflict kinds.** Three of these scenarios can end in a conflict,
+and each produces a different card in "Needs attention" (§11.2). A conflict is
+never silent (FR-23):
+
+| Kind | Scenario | What the user is told | What they can do |
+| --- | --- | --- | --- |
+| **Field conflict** | SC-03 — two devices edited the same field | Both values, and which device won | Keep mine / Use theirs / Dismiss |
+| **Deleted elsewhere** | SC-05 — another device deleted an item you edited | That it was deleted elsewhere, and your edit is stranded | Undo my edit / Dismiss |
+| **Server rejection** | SC-14 — the server refused a locally accepted change | The reason (e.g. the category no longer exists) | Fix the input / Discard the change |
+
+A fourth case — the **check-wins** override in SC-04 — is a field conflict
+whose card reads `Still checked`; it has no "Keep mine", because the item
+genuinely is checked.
+
 ---
 
 ### SC-01 — Opening the list with no internet access
@@ -335,6 +349,10 @@ two devices touched different fields — so neither is even in conflict.
 - Device A checks the item; device B changes the quantity from an older base.
 - After reconnect: `isChecked === true` and the quantity is B's value.
 - **No conflict entry is raised**, because no field was contested.
+- If instead device B **unchecks** from an older base, the item stays checked
+  **and** B is told: the item shows `Checked by <name>` and a "Needs attention"
+  entry explains that the uncheck did not take effect. The outcome is
+  intuitive, but B's action was overridden and must not be silent (FR-23).
 
 ---
 
@@ -1026,6 +1044,14 @@ the rule "the server's change does not overwrite the local pending value for
 the fields the local op touched" could not be applied. `pendingFields` is the
 union of the fields touched by the row's outstanding operations.
 
+> ⚠️ **`pending`, `pendingFields` and `version` are render-relevant.** The
+> current `ItemRow` memo comparator (`ItemRow.tsx:132-145`) compares a fixed
+> list of props — id, name, quantity, note, categoryId, isChecked, storeIds —
+> and returns "equal" for anything else. A pending badge or a "pending" visual
+> state driven by those three new fields would therefore **never re-render** and
+> would go stale. The comparator must compare them too, or the memoisation must
+> be replaced by the reactive query's own change detection.
+
 ### 8.3 Why UUIDv7 for client-generated ids
 
 - The client must be able to create a record offline and know its final id
@@ -1459,7 +1485,7 @@ The **Operation** column uses the authoritative `type` values enumerated in
 | `item.create` | all | Server accepts the client id. Idempotent on `opId`. | Two devices create the same id → impossible unless the same `opId` is replayed → duplicate. | No |
 | `item.create` | all | Two devices create *different* items with the same name. | **Both survive** as separate items. No automatic merge. | No |
 | `item.update` | `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`. | The loser's value is stored as a **conflict record**; the winner's value applies. | **Yes** |
-| `item.check` | `isChecked` | **Check-wins.** An uncheck whose `baseVersion` predates a *different* device's check does **not** clear the check. An uncheck based on a version that already includes the check does clear it. | Device A checks; device B (offline) unchecks → **item stays checked**. | No (the outcome is the intuitive one) |
+| `item.check` | `isChecked` | **Check-wins.** An uncheck whose `baseVersion` predates a *different* device's check does **not** clear the check. An uncheck based on a version that already includes the check does clear it. | Device A checks; device B (offline) unchecks → **item stays checked**. | **Yes** — the item shows `Checked by <name>` and an entry is added to "Needs attention". The *outcome* is intuitive, but the **user's action was overridden**, and FR-23 requires that an overridden edit is never silently discarded. |
 | `item.storeTags` | `storeIds` | **Add-wins** for concurrent additions. A removal applies only if the removal's `baseVersion` already contained the tag. | A adds "Costco", B adds "Aldi" → both tags present. | No |
 | `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `restore` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
 | `item.restore` (re-add) | `deletedAt`, `archivedAt` | Clears the tombstone. Rejected if a *newer* delete exists. | Restore-then-delete ordering is respected. | No |
@@ -1487,13 +1513,60 @@ The **Operation** column uses the authoritative `type` values enumerated in
 
 ### 11.2 Conflict presentation
 
-A conflict is shown as a compact card in a "Needs attention" panel:
+**Entry point.** The "Needs attention" panel is opened by tapping the status
+chip when it reads `N need attention` (§6.1). That chip state is the only
+entry point; there is no separate "conflicts" nav item, because a shopper in
+an aisle does not go looking for one.
+
+**Three kinds of entry, three card types.** The panel is not one generic
+error list — each kind of conflict needs different information and different
+actions, and only the first has a "Keep mine".
+
+**(a) Field conflict** — SC-03. Two devices edited the same field.
 
 ```
 Milk — quantity differs
   This device   2 kg      ← your offline edit
   Other device  3 kg      ← won
   [Keep mine]  [Use theirs]  [Dismiss]
+```
+
+The card MUST name the **winning device** (e.g. `Other device — Sara's phone`)
+and must never imply recency — the winner is decided by a logical clock, not
+by wall-clock time (§5, SC-03).
+
+**(b) Deleted elsewhere** — SC-05. Another device deleted an item you edited.
+
+```
+Milk — deleted on another device
+  This device   2 kg      ← your edit
+  Other device  deleted it
+  [Undo my edit]  [Dismiss]
+```
+
+There is no "Keep mine": the item is gone, and the only meaningful action is
+to undo your own edit (§6.3) or accept the deletion.
+
+**(c) Server rejection** — SC-14. The server refused a locally accepted
+change (a deleted category, a duplicate name, a lost authorization).
+
+```
+Milk — could not be saved
+  Reason       Category "Produce" no longer exists
+  [Choose another category]  [Discard the change]
+```
+
+There is no "Keep mine" here either — the server's rejection is about a
+*constraint*, not a race, and the fix is to change the input.
+
+**Checked by someone else** — the check-wins case (§11, `item.check`). The
+item itself shows `Checked by <name>` inline, and a panel entry explains why
+an uncheck did not take effect:
+
+```
+Milk — still checked
+  Another device checked this item
+  [Dismiss]
 ```
 
 **"Keep mine" is a user decision, not a race.** It does **not** re-queue the
@@ -1960,6 +2033,7 @@ The recovery is complete when **all** of the following are demonstrably true.
 | AC-32 | Undo works **offline** for add, check, uncheck, delete, and archive-checked, and is itself an outbox operation — an undone delete is an `item.undelete` that syncs, not a client-only reversal. |
 | AC-33 | The empty state distinguishes *empty* / *not downloaded on this device* / *couldn't load, retry*. A household that has never been downloaded is never told its list is empty. |
 | AC-34 | The status chip renders exactly one of the nine states in §6.1, never reads `Up to date` before IndexedDB has been read, and "Keep mine" always wins the contested field (it is an override, not a race). |
+| AC-35 | Every overridden edit is surfaced, per FR-23 — including the **check-wins** case, where the item shows `Checked by <name>` and a "Needs attention" entry explains that the uncheck did not take effect. No conflict may be silently discarded. |
 
 ---
 
