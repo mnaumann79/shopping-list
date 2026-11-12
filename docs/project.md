@@ -39,7 +39,8 @@ The product promise is not "a list that syncs". It is:
 
 > *A member of the household can open the list in a basement store with no signal,
 > add what they need, tick off what they bought, and close the app. Nothing is lost.
-> When signal returns, every other device in the household converges to the same list.*
+> When the app next opens with signal, every other device in the household converges
+> to the same list.*
 
 ### 1.2 Primary users
 
@@ -641,10 +642,16 @@ work. Items changed elsewhere since the bulk action began are skipped, and the
 user is told how many were skipped.
 
 **Technical handling.** "Clear completed" is queued as a bulk operation
-carrying the `baseVersion` the user was looking at. On the server, it archives
-only items that are checked **and** whose `version` does not exceed that base
-version (§11). Items another device changed in the meantime are skipped, and
-the count is returned in the sync response.
+carrying **a version per candidate item** — `versions: { [itemId]: version }` —
+not a single threshold. One threshold cannot represent the versions seen for
+several items: if A is at version 100 and B at version 2, a threshold of 100
+would also archive B once B moved to version 3. Each row is therefore compared
+against **its own** version. On the server, the operation archives only items
+that are **still checked** and whose `version` does not exceed the version
+carried for that item (§11). Items another device changed are skipped, and the
+count is returned in the sync response. An item that another device
+**unchecks** is not archived, whichever order the two arrive in — see §11's
+`item.archive` row.
 
 **Acceptance criteria.**
 - Device A clears completed items offline; device B unchecks an item and
@@ -1211,6 +1218,10 @@ tombstone is retained on the same terms as an item's: never hard-deleted
 -- Append-only log of every applied change, per household.
 CREATE TABLE sync_changes (
   seq          bigserial PRIMARY KEY,     -- global, monotonic; filter by household
+                                         -- (ORDERING: the apply path takes a per-household
+                                         --  advisory lock, so allocation order equals
+                                         --  commit order for a household. A plain sequence
+                                         --  does NOT order commits on its own — ADR-05.)
   household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
   entity_type  text NOT NULL,             -- CHECK: 'item' | 'category' | 'store'
   entity_id    uuid NOT NULL,
@@ -1505,7 +1516,7 @@ so the client never has to special-case one of them:
   ],
   "applied": [
     { "opId": "…", "entityType": "item", "entityId": "…",
-      "outcome": "applied",      // "applied" | "partially_applied"
+      "outcome": "applied",      // "applied" | "partial" | "rejected" | "duplicate"
       "result": { /* entity after apply */ },
       "conflicts": [] }          // conflicts on fields this op LOST but that still applied
   ],
@@ -1642,9 +1653,16 @@ optional `conflicts[]` array, plus `entityType` and `entityId`, as `applied[]`.
 **Per-field outcomes.** An operation touching several fields can partially
 succeed — for example, a `quantity` edit that loses a concurrent change while
 its `name` edit succeeds cleanly. In that case the operation is reported as
-`applied` with `outcome: "partially_applied"`, and the lost field appears in
-its `conflicts[]` with `winner: "server"`. A rejected operation changed nothing
+`applied` with `outcome: "partial"`, and the lost field appears in its
+`conflicts[]` with `winner: "server"`. A rejected operation changed nothing
 at all.
+
+**One vocabulary, used everywhere.** The outcome is one of exactly four
+values — **`applied` | `partial` | `rejected` | `duplicate`** — and the same
+four words are used in `sync_operations.outcome` (§9.2), in this envelope, and
+in the ledger row the request writes (§10.8.3). The bucket an operation lands
+in follows from its outcome: `applied` and `partial` go in `applied[]`,
+`rejected` in `rejected[]`, and `duplicate` in `duplicates[]`.
 
 ### 10.1a Operation types (authoritative enumeration)
 
@@ -1768,6 +1786,14 @@ this rule a "fresh" lamport is only fresh relative to the *local* counter, so
 - Exponential backoff with jitter: 1 s, 2 s, 4 s, 8 s, 16 s, 30 s (cap).
 - A failed attempt does **not** remove the op from the outbox; it increments
   `attempts` and sets `state = "failed"` after 5 consecutive failures.
+- **A pull-only sync runs on a timer even when the outbox is empty.** The
+  push trigger is conditional on pending work, but the *pull* is not: if
+  another member edits the list while this device sits open with nothing
+  pending, that edit must still arrive. The engine therefore polls every 30 s
+  while the app is visible and the household is active, and the poll is a
+  pull-only request that carries no operations. **A timer that only runs
+  while there is pending work is a bug**: it makes an idle open device
+  permanently stale.
 - `4xx` responses that indicate a permanent problem (validation, authorization,
   deleted category) move the op to `state = "blocked"` and raise a conflict entry
   the user can act on. `5xx` and network errors are transient and are retried.
@@ -1846,15 +1872,17 @@ rows, leaving an orphan change-log entry for a change that never happened. The
 — it is true when *someone else* won the race. Only a data-modifying CTE
 gates correctly.
 
-There are **two statement shapes**: the **item-row statement**, which applies
-every operation that touches an existing item, and the **create statement**,
-which inserts one. Both have been **executed against PostgreSQL 17 using this
-document's own §9.1/§9.2 DDL, and their outcomes verified** — seventeen
-scenarios covering a normal update, a field lost to a concurrent write, a check
-that loses by check-wins, a write to a tombstoned row, an undelete that is too
-old, a lost compare-and-swap, five store-tag outcomes, and a create with tags.
-They are the normative form; an implementer should not have to rediscover that
-they parse.
+There are **three statement shapes**: the **item-row statement**, which applies
+every operation that touches an existing item; the **create statement**, which
+inserts one; and the **ledger statement**, which records one operation's
+outcome. All three have been **executed against PostgreSQL 17 using this
+document's own §9.1/§9.2 DDL, and their outcomes verified** — thirty scenarios
+covering a normal update, a field lost to a concurrent write, a check that
+loses by check-wins, a write to a tombstoned row, an undelete that is too
+old, a lost compare-and-swap, both arrival orders of an archive racing an
+uncheck, five store-tag outcomes, a bulk operation, two replays, a create with
+tags, and a create whose id is already taken. They are the normative form; an
+implementer should not have to rediscover that they parse.
 
 > ⚠️ **Two versions, and they must not be confused.** `$op_base_version` is
 > **immutable** — it is the version the *client* edited from, and it is what
@@ -1876,6 +1904,10 @@ Applies `item.update`, `item.check`, `item.archive`, `item.unarchive`,
 (immutable) and `$cas_version` (refreshed on retry), plus `$fields` — the set
 of item fields the operation touches, which is how one statement shape serves
 ten operation types.
+
+It **returns** the operation's outcome — the entity, whether anything changed,
+and the conflicts addressed to this device. It does not write the ledger; see
+§10.8.3 for why.
 
 ```sql
 WITH before AS (
@@ -1903,9 +1935,9 @@ decide AS (
          (c.deleted_at IS NOT NULL) AS cur_absent,
          (c.store_id IS NOT NULL AND p.base_version IS DISTINCT FROM c.version) AS concurrent,
          CASE
-           WHEN b.deleted_at IS NOT NULL      THEN false
-           WHEN c.store_id IS NULL             THEN p.present
-           WHEN p.base_version = c.version     THEN ($op_lamport, $device_id::text) > (c.lamport, c.device_id::text)
+           WHEN b.deleted_at IS NOT NULL          THEN false
+           WHEN c.store_id IS NULL                 THEN p.present
+           WHEN p.base_version = c.version         THEN ($op_lamport, $device_id::text) > (c.lamport, c.device_id::text)
            ELSE NOT p.present
          END AS client_wins
     FROM pairs AS p
@@ -1942,21 +1974,25 @@ wins AS (
     ($op_type = 'item.check' AND b.deleted_at IS NULL
       AND $op_base_version >=
           COALESCE((b.field_meta->'isChecked')->>'v','0')::int)                    AS w_is_checked,
-    ($op_type IN ('item.archive','item.bulkArchive') AND b.deleted_at IS NULL)     AS w_archived,
+    ($op_type IN ('item.archive','item.bulkArchive') AND b.deleted_at IS NULL
+      AND b.is_checked)                                                            AS w_archived,
     ($op_type IN ('item.unarchive','item.bulkUnarchive') AND b.deleted_at IS NULL) AS w_unarchived,
     ($op_type = 'item.delete' AND b.deleted_at IS NULL)                           AS w_deleted,
     ($op_type = 'item.undelete' AND b.deleted_at IS NOT NULL
       AND COALESCE((b.field_meta->'deletedAt')->>'lamport','0')::bigint <= $op_lamport)
                                                                                   AS w_undeleted,
     ($op_type = 'item.storeTags' AND b.deleted_at IS NULL
-      AND EXISTS (SELECT 1 FROM decide AS d WHERE d.client_wins))                AS w_store_ids
+      AND EXISTS (SELECT 1 FROM decide AS d WHERE d.client_wins))                AS w_store_ids,
+    ($op_type = 'item.check' AND b.deleted_at IS NULL
+      AND NOT ($payload->>'isChecked')::boolean
+      AND b.archived_at IS NOT NULL)                                              AS w_reverses_archive
   FROM before AS b
 ),
 flags AS (
   SELECT w.*,
          (w.w_name OR w.w_quantity OR w.w_note OR w.w_category OR w.w_is_checked
           OR w.w_archived OR w.w_unarchived OR w.w_deleted OR w.w_undeleted
-          OR w.w_store_ids) AS row_changed
+          OR w.w_store_ids OR w.w_reverses_archive) AS row_changed
     FROM wins AS w
 ),
 applied AS (
@@ -1969,6 +2005,7 @@ applied AS (
          is_checked    = CASE WHEN w.w_is_checked  THEN ($payload->>'isChecked')::boolean ELSE t.is_checked END,
          archived_at   = CASE WHEN w.w_archived    THEN now()
                               WHEN w.w_unarchived  THEN NULL
+                              WHEN w.w_reverses_archive THEN NULL
                               ELSE t.archived_at END,
          deleted_at    = CASE WHEN w.w_deleted     THEN now()
                               WHEN w.w_undeleted   THEN NULL
@@ -1981,7 +2018,7 @@ applied AS (
                            'isChecked',  CASE WHEN w.w_is_checked THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
                            'deletedAt',  CASE WHEN w.w_deleted OR w.w_undeleted
                                              THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'archivedAt', CASE WHEN w.w_archived OR w.w_unarchived
+                           'archivedAt', CASE WHEN w.w_archived OR w.w_unarchived OR w.w_reverses_archive
                                              THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END,
                            'storeIds',   CASE WHEN w.w_store_ids
                                              THEN jsonb_build_object('v', t.version + CASE WHEN w.row_changed THEN 1 ELSE 0 END, 'lamport', $op_lamport, 'device', $device_id) END
@@ -2043,6 +2080,24 @@ conflicts AS (
               ELSE l.winner_lamport END,
          $op_id, $device_id
     FROM lost AS l, before AS b
+   WHERE NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
+  RETURNING id, field, store_id, local_value, server_value, resolution,
+            winner_device_id, winner_lamport, device_id
+),
+archive_conflicts AS (
+  INSERT INTO entity_conflicts (household_id, entity_type, entity_id, field,
+                                local_value, server_value, store_id, resolution,
+                                winner_device_id, winner_lamport, op_id, device_id)
+  SELECT $household_id, $entity_type, $entity_id, 'archivedAt',
+         to_jsonb(b.archived_at), to_jsonb(NULL::timestamptz),
+         NULL, 'rejected',
+         $device_id,
+         $op_lamport,
+         $op_id,
+         NULLIF((b.field_meta -> 'archivedAt') ->> 'device', '')::uuid
+    FROM before AS b, wins AS w
+   WHERE w.w_reverses_archive
+     AND NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
   RETURNING id, field, store_id, local_value, server_value, resolution,
             winner_device_id, winner_lamport, device_id
 ),
@@ -2110,6 +2165,7 @@ tag_conflicts AS (
          CASE WHEN d.client_wins THEN d.cur_device ELSE $device_id END
     FROM decide AS d
    WHERE NOT d.client_wins AND (d.cur_version IS NOT NULL OR d.present)
+     AND NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
   RETURNING id, field, store_id, local_value, server_value, resolution,
             winner_device_id, winner_lamport, device_id
 ),
@@ -2137,32 +2193,27 @@ logged AS (
    WHERE e.changed
   RETURNING seq
 )
-INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
-                             entity_type, entity_id, op_type, lamport,
-                             payload, result, outcome)
-SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, e.id,
-       $op_type, $op_lamport, $payload,
-       jsonb_build_object(
-         'entity', e.entity,
-         'conflicts', COALESCE((
-           SELECT jsonb_agg(jsonb_build_object(
-                    'id', x.id, 'field', x.field, 'storeId', x.store_id,
-                    'localValue', x.local_value, 'serverValue', x.server_value,
-                    'resolution', x.resolution,
-                    'winnerDeviceId', x.winner_device_id,
-                    'winnerLamport', x.winner_lamport)
-                  ORDER BY x.id)
-             FROM (
-               SELECT * FROM conflicts
-               UNION ALL
-               SELECT * FROM tag_conflicts
-             ) AS x
-            WHERE x.device_id = $device_id
-         ), '[]'::jsonb)
-       ),
-       'applied'
-  FROM entity_snapshot AS e
-RETURNING op_id;
+SELECT e.id AS entity_id,
+       e.changed,
+       e.entity,
+       COALESCE((
+         SELECT jsonb_agg(jsonb_build_object(
+                  'id', x.id, 'field', x.field, 'storeId', x.store_id,
+                  'localValue', x.local_value, 'serverValue', x.server_value,
+                  'resolution', x.resolution,
+                  'winnerDeviceId', x.winner_device_id,
+                  'winnerLamport', x.winner_lamport)
+                ORDER BY x.id)
+           FROM (
+             SELECT * FROM conflicts
+             UNION ALL
+             SELECT * FROM tag_conflicts
+             UNION ALL
+             SELECT * FROM archive_conflicts
+           ) AS x
+          WHERE x.device_id = $device_id
+       ), '[]'::jsonb) AS conflicts
+  FROM entity_snapshot AS e;
 ```
 
 #### 10.8.2 The create statement
@@ -2184,7 +2235,7 @@ WITH created AS (
             'quantity',   CASE WHEN $payload ? 'quantity'   THEN jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id) END,
             'note',       CASE WHEN $payload ? 'note'       THEN jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id) END,
             'categoryId', CASE WHEN $payload ? 'categoryId' THEN jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id) END,
-            'storeIds',   jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id)
+            'storeIds',   CASE WHEN $payload ? 'storeIds' THEN jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id) END
           )))
   ON CONFLICT (id) DO NOTHING
   RETURNING id, organization_id, name, quantity, note, category_id,
@@ -2240,30 +2291,73 @@ logged AS (
     FROM entity_snapshot AS e
   RETURNING seq
 )
+SELECT e.id AS entity_id,
+       TRUE AS changed,
+       e.entity,
+       '[]'::jsonb AS conflicts
+  FROM entity_snapshot AS e;
+```
+
+#### 10.8.3 The ledger statement
+
+**The ledger row is written once per *operation*, not once per statement.**
+A bulk operation expands into one statement per candidate item, all sharing one
+`opId`; if each statement wrote the ledger, the second would insert a
+duplicate primary key, the statement would raise, and — because the whole
+batch is one transaction — **the first item's work would be rolled back with
+it**. The same thing happens when an operation that won nothing is replayed:
+its version never advanced, so the compare-and-swap matches again.
+
+So the apply statements do not write the ledger. The request writes **one row
+per operation**, at the end of the batch, and it is the only writer:
+
+```sql
+-- One ledger row per OPERATION, written once, at the end of the batch.
+-- It cannot raise: a duplicate opId is a no-op, because a replay is
+-- recognised by the pre-batch ledger check and never reaches the batch.
 INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
                              entity_type, entity_id, op_type, lamport,
                              payload, result, outcome)
-SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, e.id,
-       $op_type, $op_lamport, $payload,
-       jsonb_build_object(
-         'entity', e.entity,
-         'conflicts', '[]'::jsonb
-       ),
-       'applied'
-  FROM entity_snapshot AS e
-RETURNING op_id;
+SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, $entity_id,
+       $op_type, $op_lamport, $payload, $result, $outcome
+ON CONFLICT (op_id) DO NOTHING;
 ```
 
-**Zero rows means the id was already taken.** That is `duplicate` if the
-idempotency ledger holds this `opId` — a replay — and `DUPLICATE_ID`
-otherwise. **The change-log row is built from the inserted row, never from the
-pre-existing item**: selecting the existing row instead would log a change that
-did not happen, and would report the operation as applied when nothing was
-written. The same reason makes the `tags` CTE select `FROM created` — if the
-item was not created, **no tag row may be written either**, or the tags would
-be attached to somebody else's item.
+**Why the ledger is written last, and not by the statement.** Only the request
+knows the whole operation's outcome: for a bulk operation, the aggregate —
+how many items were archived, how many were skipped, and the full result
+envelope. A statement that wrote the ledger would only know its own item's
+result, and the first writer would win, leaving the cached envelope describing
+one item of many. Because the ledger is consulted **before** the batch (§10.8.5),
+a replay never reaches the batch, so the `ON CONFLICT (op_id) DO NOTHING` is
+belt-and-braces rather than the mechanism.
 
-#### 10.8.3 What each part does, and the rules it encodes
+**The ledger row is written for every operation the request *decided*, and
+not for one it could not.** The two are different outcomes:
+
+| What happened | Ledger row? | Why |
+| --- | --- | --- |
+| The compare-and-swap matched and the operation changed something | **Yes** | `outcome = 'applied'` |
+| The compare-and-swap matched but every contested field was refused | **Yes** | `outcome = 'rejected'` — the client must be told, or it retries forever |
+| The compare-and-swap matched and the operation changed something *and* lost something | **Yes** | `outcome = 'partial'` |
+| The compare-and-swap was **lost** | **No** | The operation must stay retryable; a ledger row would make the retry look like a duplicate |
+
+**The outcome vocabulary is one vocabulary.** `sync_operations.outcome` takes
+exactly four values — `'applied' | 'partial' | 'rejected' | 'duplicate'` — and
+the per-operation `outcome` in the response envelope (§10.1) uses the **same
+four words**. The bucket an operation lands in follows from its outcome:
+`applied` and `partial` go in `applied[]`, `rejected` in `rejected[]`, and
+`duplicate` in `duplicates[]`. A previous draft of this document used
+`"partially_applied"` in one place and `'partial'` in another; there is now
+only one word for each thing.
+
+**A replay must not write a second conflict row.** The conflict inserts carry
+a guard — `WHERE NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id =
+$op_id)` — so that a replayed operation does not append a duplicate record of
+a conflict that has already been recorded. The compare-and-swap already
+protects the entity and the change log; this protects the conflict history.
+
+#### 10.8.4 What each part does, and the rules it encodes
 
 **The batch holds the whole request.** Its first element is
 `SELECT pg_advisory_xact_lock(hashtextextended($household_id, 0))`; its second
@@ -2289,8 +2383,9 @@ protocol.
 Because they share one transaction, **no statement in the batch may raise.**
 Every failure mode must be a defined non-error outcome: validation,
 authorization and duplicate-name checks happen before the batch; a failed
-compare-and-swap updates zero rows; and creates use `ON CONFLICT DO NOTHING`
-rather than letting a unique violation abort the transaction (§10.1).
+compare-and-swap updates zero rows; the ledger insert cannot raise; and
+creates use `ON CONFLICT DO NOTHING` rather than letting a unique violation
+abort the transaction (§10.1).
 
 **A tombstoned row rejects every write.** The `b.deleted_at IS NULL` guard on
 every gate is §11's *delete-wins, terminal* rule expressed in SQL: a deleted
@@ -2305,19 +2400,11 @@ acknowledged.** `flags.row_changed` is the single place that decides whether
 the operation changed anything. When it is false, the row's `version`,
 `field_meta`, `lamport`, `last_op_id`, `updated_at` and `updated_by_id` are all
 left exactly as they were, and `logged` writes **no** change-log row — there
-is nothing for other devices to learn. The `sync_operations` ledger row is
-**still written**, because the operation *was* decided. Without it the client
-would never be acknowledged and would retry the same operation forever. This
-is the difference between "the operation was refused" and "the operation never
-happened", and the two must not be confused.
-
-**Zero rows mean different things for different operations.** For
-`item.archive` and `item.bulkArchive`, §11's rule is that an item whose
-`version` exceeds the version the operation carries is **skipped** — so a
-zero-row compare-and-swap on that item is the *specified outcome*, not a
-conflict: count it, write no change-log row for it, do not re-apply it, and
-report the skipped count. For every other operation type, zero rows mean a
-genuine conflict, as described above.
+is nothing for other devices to learn. The ledger row is **still written**,
+because the operation *was* decided. Without it the client would never be
+acknowledged and would retry the same operation forever. This is the difference
+between "the operation was refused" and "the operation never happened", and the
+two must not be confused.
 
 **The row-level CAS and the per-field gates are different things.** The
 `WHERE version = $cas_version` clause gates the *row* — it decides whether
@@ -2342,7 +2429,7 @@ the update — so `lost.server_value` is the value that won, and
 separate statement would race with the write it describes. The `resolution` is
 **derived**, not passed in: `override` for an explicit user decision,
 `delete_wins` for a write against a tombstone, `check_wins` for `isChecked`,
-`rejected` for a refused undelete, and `lww` otherwise.
+`rejected` for a refused undelete or a reversed archive, and `lww` otherwise.
 
 **The tombstone and the archive mark are set by their own operations**, and
 cleared by their own operations (`item.undelete` clears `deleted_at`,
@@ -2350,6 +2437,23 @@ cleared by their own operations (`item.undelete` clears `deleted_at`,
 **derived from the row** — `(a.deleted_at IS NOT NULL)` — rather than hardcoded,
 so a tombstone is always logged as a deletion and an archive is never
 mistaken for one.
+
+**An archive is conditional, and an uncheck reverses it.** The archive's
+premise is that the item **is checked and unchanged** — the `w_archived` gate
+requires `b.is_checked`. And an uncheck that arrives for an archived item
+**clears the archive mark**, because the archive's premise no longer holds.
+Together these make "clear completed" **order-independent**: whichever device
+reconnects first, an item that somebody un-checked ends up **not archived and
+not checked**:
+
+| Arrival order | What happens | Outcome |
+| --- | --- | --- |
+| The **uncheck** arrives first | The item's version moves past the archive's per-item base version, so the archive **skips** it and reports it in the skipped count | Not archived, not checked |
+| The **archive** arrives first | The item is archived; the arriving uncheck is concurrent with that archive, so it **reverses** it — `archived_at` is cleared — and the archiver is told, with a conflict on `archivedAt` and the resolution `rejected` | Not archived, not checked |
+
+Without the reversal the outcome would depend on which device happened to
+reconnect first, and SC-18's "B's item is **not** archived" would hold in one
+order only. Both orders are verified (§16.4).
 
 **The change-log payload is camelCase, and it carries the tag set.** The
 snapshot is built with `jsonb_build_object` rather than `to_jsonb(row)`,
@@ -2376,8 +2480,8 @@ and `device_id` (§9.1). For each pair in the payload:
 
 A removal **tombstones the pair** (`deleted_at`) rather than deleting the row.
 That is not cosmetic: deleting the row destroys the removal's lamport, and a
-later write could then not be ordered against it — so a device that had been
-offline for a week could resurrect a tag that was deliberately removed. The
+later write could then not be **ordered against** it — so a device that had been
+offline for a week could then re-add a tag that was deliberately removed. The
 tombstone is the same pattern items, stores and categories already use, and it
 is what makes §11's rule implementable at all.
 
@@ -2386,30 +2490,56 @@ recorded.** A refused pair writes an `entity_conflicts` row with
 `field = 'storeIds'` and `store_id` naming the pair, `resolution`
 `removal_wins` when the pair was concurrent and `lww` when it was sequential,
 and the **loser** in `device_id`. When the *other* device lost, that conflict
-is addressed to it and reaches it through the conflict cursor (§10.8.4), not
+is addressed to it and reaches it through the conflict cursor (§10.8.5), not
 through this response.
 
 **`item.override` reuses the same statement.** Its payload is normalised to
 the field-keyed shape of `item.update` before the statement runs — `field:
 "name", value: "Oat milk"` becomes `{"name": "Oat milk"}` with
 `$fields = ['name']` — and the LWW comparison is bypassed for that field
-alone. The ledger keeps the operation's original payload.
+alone. The **ledger keeps the operation's original payload**, because the
+request — not the statement — writes the ledger row.
+
+**An operation may depend on an entity created earlier in the same request.**
+Offline, a user can add an item and then rename or delete it before the next
+sync, and the outbox sends both operations in one request. The server resolves
+them **in the order the client sent them**, and the create is applied first —
+so the later operation finds the row the create made. Two rules make that
+work:
+
+1. **The batch's statements run in order, on one connection, in one
+   transaction.** A statement that depends on an earlier statement's *write*
+   sees it, because they share a transaction and the earlier statement has
+   already committed its change to that transaction's snapshot.
+2. **The create's `opId` is what orders it, not its position in the array.**
+   The outbox preserves creation order, and the request sends the operations
+   in that order. An operation that depends on a create therefore **must not
+   be reordered** by the client, and the server must not reorder them either.
+
+An operation whose target does not exist — because the create failed, or
+because the create was rejected — is **rejected with `ENTITY_NOT_FOUND`**, not
+silently dropped, and the client shows it in "Needs attention". A create and a
+later operation on the same item are two separate ledger rows with separate
+`opId`s, so a replay of one does not replay the other.
 
 **A bulk operation is expanded into one statement per candidate item.** The
 bulk payloads carry `versions: { [itemId]: version }`; each item becomes its
 own statement with that item's version as its `$cas_version`. The operation's
-`opId` is shared, so the ledger records it once, and the response reports how
-many items were skipped because their version had moved on.
+`opId` is shared, so the request writes **one** ledger row for the operation,
+and the response reports how many items were skipped because their version had
+moved on.
 
 **`jsonb_to_recordset` matches the JSON key to the column name byte for
-byte.** The wire format is camelCase (`storeId`), and an **unquoted** column
-alias `storeId` is folded by PostgreSQL to `storeid` — which does **not** match
-the key, so the column is silently `NULL`. An addition then violates the
-not-null constraint and aborts the whole transaction; a removal deletes nothing
-and is still reported as applied. The alias must be **quoted**: `AS t("storeId"
-uuid, version integer, present boolean)`. This was verified against PostgreSQL
-17, and it is the single most likely thing to get wrong when implementing this
-statement.
+byte.** The rule is exact string equality between the JSON key and the column
+name *as PostgreSQL stores it* — and an **unquoted** identifier is folded to
+lower case. The wire format is camelCase (`storeId`), so the alias must be
+**quoted**: `AS t("storeId" uuid, version integer, present boolean)`. An
+unquoted `storeId` becomes `storeid` and does not match the key, so the column
+is silently `NULL`; an addition then violates the not-null constraint and
+aborts the whole transaction, and a removal deletes nothing and is still
+reported as applied. The old draft's `store_id` failed for exactly the same
+reason. This was verified against PostgreSQL 17, and it is the single most
+likely thing to get wrong when implementing this statement.
 
 **Conflicts must reach the device that did not create them.** Some
 conflicts concern a device that never pushed the losing operation — most
@@ -2425,21 +2555,22 @@ skip one of them. The response's `conflicts[]` array carries only the
 conflicts **addressed to this operation's device**; the others wait for the
 cursor.
 
-#### 10.8.4 Implementation subtleties that will bite an implementer
+#### 10.8.5 Implementation subtleties that will bite an implementer
 
 1. **Drizzle has no builder for `WITH … UPDATE … RETURNING`.** Use the `sql`
    template literal and pass the resulting `SQL` object to `db.batch()`.
-2. **A data-modifying CTE that is not referenced by the main query still
-   executes.** The outer `INSERT` must `SELECT … FROM applied` — otherwise the
-   `applied` CTE may be optimised away, the update never happens, and the
-   batch commits an empty change log. The `logged` CTE above is included for
-   the same reason.
+2. **A data-modifying CTE always executes, referenced or not.** PostgreSQL
+   runs every data-modifying CTE in a `WITH` clause to completion. The
+   `applied` CTE therefore does not need to be referenced for the update to
+   happen — but the outer statement must read **from** `applied` to *gate* the
+   change-log and the ledger on the compare-and-swap having matched. The
+   `logged` CTE is written for the same reason.
 3. **The guard is that the compare-and-swap matched exactly one row.** The
-   `sync_changes` and `sync_operations` inserts both select `FROM applied`,
-   and `applied` yields a row only when the `UPDATE … WHERE version =
-   $cas_version` matched. That is the whole guard: a replayed operation
-   matches zero rows, so it writes no change-log row and no second ledger
-   entry.
+   `sync_changes` insert selects `FROM applied`, and `applied` yields a row
+   only when the `UPDATE … WHERE version = $cas_version` matched. That is the
+   whole guard: a replayed operation matches zero rows, so it writes no
+   change-log row, and the request writes no ledger row for it either — it
+   must stay retryable.
 
    `last_op_id` is **corroborating, not the guard** — after an operation has
    been applied, `last_op_id = $op_id` is still true, so using it as the
@@ -2455,8 +2586,8 @@ cursor.
 
    | Outcome | Meaning | Action |
    | --- | --- | --- |
-   | **One row, `changed = true`** | The compare-and-swap won and the operation changed something. | Applied. |
-   | **One row, `changed = false`** | The compare-and-swap won but the operation lost every field it contested. | Acknowledged and recorded in the ledger; **no** change-log row; the conflicts are in `entity_conflicts` and in the response. |
+   | **One row, `changed = true`** | The compare-and-swap won and the operation changed something. | Applied. Ledger row with `outcome = 'applied'`. |
+   | **One row, `changed = false`** | The compare-and-swap won but the operation lost every field it contested. | Acknowledged. Ledger row with `outcome = 'rejected'`; **no** change-log row; the conflicts are in `entity_conflicts` and in the response. |
    | **Zero rows** | Either the compare-and-swap was **lost**, or the operation was **already applied** by a concurrent request carrying the same `opId`. | Re-read the row **in a fresh round trip** and consult the ledger first. If `sync_operations` holds a row for this `opId`, the operation was applied concurrently — report `duplicate` and replay its cached `result`. Otherwise it is a genuine lost race: re-run §11's per-field decision against the fresh state and re-apply against a **refreshed `$cas_version`**. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
 
    An empty result set must **not** be treated as a transport failure. The
@@ -2479,6 +2610,10 @@ cursor.
 7. **`db.batch()` accepts `SQL` objects**, not Drizzle query builders, for
    raw statements. The advisory lock and the CTEs above are both `sql`
    templates.
+8. **The ledger statement is a plain `INSERT` with an `ON CONFLICT DO
+   NOTHING`,** and it is written once per operation at the end of the batch. It
+   must never raise: a raised statement aborts the whole transaction and takes
+   every other operation in the request down with it.
 
 **`last_op_id` — three constraints, because it is redundant with mechanisms
 that already exist.** It is *additional* to the idempotency ledger (ADR-06)
@@ -2526,7 +2661,7 @@ was discarded, so there is nothing to report.
 | `item.undelete` | `deletedAt` | Clears a **delete** tombstone. Rejected if a **newer** delete exists — compared as: the tombstone's effective lamport (`field_meta["deletedAt"].lamport`, the lamport of the delete that set it) must not be **greater than** the undelete's own lamport. The delete's ordering value is persisted on the row for exactly this purpose (§9.1). | Delete-then-undelete ordering is respected: a delete at lamport 10 is not undone by an undelete at lamport 5. | No |
 | `item.unarchive` | `archivedAt` | Clears an **archive** mark and returns the item to the active list. Distinct from `item.undelete`, which clears a *delete* tombstone — conflating them resurrects a deleted item. Reports a skipped count, as `item.bulkArchive` does. | Re-adding an archived item on two devices → the item is unarchived once; the second is a no-op and is counted as skipped. | **Yes**, if any item was skipped |
 | `item.bulkUnarchive` | `archivedAt` | The bulk form of `item.unarchive`, carrying a version per candidate item. Skips items changed since the base, exactly as `item.bulkArchive` does, and **reports the skipped count**. | Undoing a bulk archive does not resurrect an item another device changed in the meantime. | **Yes**, if any item was skipped |
-| `item.archive` (clear completed) | `archivedAt` | **Archive-wins** over concurrent edits to other fields, but the op carries a **version per candidate item** and **skips any item whose `version` exceeds it** — i.e. items changed on another device since the clear was initiated are not archived. | A clears completed offline; B unchecks an item and changes its quantity → B's item is **not** archived. | **Yes**, the count of skipped items is reported |
+| `item.archive` (clear completed) | `archivedAt` | **The archive is conditional, and an uncheck reverses it.** The archive's premise is that the item **is checked and unchanged** — the operation carries a **version per candidate item** and **skips any item whose `version` exceeds it**, and it never archives an item that is not checked. The two rules together make the outcome **order-independent**: if the **uncheck arrives first**, the item's version has moved on, so the archive skips it and reports it; if the **archive arrives first**, a later-arriving uncheck **reverses** the archive — the item is un-archived and left unchecked — and the archiving device is told (a conflict on `archivedAt`, resolution `rejected`). Either way the item ends up **not archived and not checked**. | A clears completed offline; B unchecks an item and changes its quantity → B's item is **not** archived, **in either arrival order**. | **Yes**, the count of skipped items is reported |
 | `item.bulkArchive` (clear completed, bulk) | `archivedAt` | The bulk form of `item.archive`: the same per-item version skip rule, applied across every checked item. The response reports how many items were skipped and why. | A clears completed offline; B changes an item's quantity → that item is **skipped**, not archived, and A is told how many were skipped. | **Yes**, the skipped count is reported |
 | `category.create` | all | Unique `(household_id, name)`. The insert uses **`ON CONFLICT DO NOTHING`**, and a no-op insert is reported as `DUPLICATE_NAME` for that operation alone. It must **not** rely on catching a unique-violation error: in PostgreSQL an error inside a transaction aborts the whole transaction, so one duplicate name would take every other operation in the request down with it. | Two devices create the same category name → one succeeds, the other is rejected with `DUPLICATE_NAME`. Neither affects the other's operations. | **Yes** |
 | `category.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
@@ -2683,6 +2818,30 @@ You have 7 unsynchronised changes.
 [Sign out and discard]      — permanently deletes the pending changes
 ```
 
+**"Keep a copy" means a JSON export, not a retained database.** The two were
+described differently in earlier drafts, and the difference matters: a retained
+database is readable by whoever signs in next. So "keep a copy" writes the
+pending operations to a **JSON file the user downloads**, and the local
+database is **cleared** either way. The export is inert — it is a file, not
+state the app reads back. A user who wants their list back imports the file
+into a fresh household through the documented import path (§13, migration).
+
+**Local data belongs to the account that created it.** The `households` and
+`identity` records are keyed by **account** as well as by household, and the
+client-side auth gate (plan task 4.5) enforces it:
+
+- The local store holds a record of which **account** each household and each
+  cached session belongs to.
+- **Signing in as a different account clears the retained local data**, or
+  requires explicit confirmation before it renders. It never renders silently.
+- A cached session is used for **display only**; it is never trusted for
+  authorization (§12.1). That rule governs server calls, and it must govern
+  the local store too — otherwise a second account on the same browser reads
+  the first account's household list.
+
+Without this, one person signing out on a shared family tablet hands the next
+person the whole shopping list.
+
 ### 12.4 Household switching while offline (scenario 12)
 
 | Situation | Behaviour |
@@ -2759,6 +2918,15 @@ user-data risk of option C does not exist in option B.
   endpoint during the transition. The legacy endpoints are marked deprecated
   and removed only after the new client has shipped and the old client is no
   longer reachable.
+- **Every legacy write is a change-log write.** A legacy endpoint that
+  commits a write without appending to `sync_changes` leaves the change log
+  incomplete, and a client that pulls from the log never learns of that edit —
+  the log is the source of truth (INV-12). So the legacy write paths are
+  **routed through the same apply engine** the sync endpoint uses: they
+  increment the row's `version`, stamp its `field_meta` and `lamport`, and
+  append a `sync_changes` row **in the same transaction**. A legacy write that
+  does none of those leaves the compare-and-swap unable to detect it, and a
+  concurrent sync operation would overwrite the legacy edit from stale state.
 - The sync protocol carries an explicit `protocolVersion`. A server that receives
   an unknown higher version returns `409 PROTOCOL_VERSION_UNSUPPORTED` and the
   client offers a reload.
@@ -2787,7 +2955,7 @@ user-data risk of option C does not exist in option B.
 | SEC-04 | No endpoint may return data without a session check. `GET /api/invitation-email` must require a session or be removed. |
 | SEC-05 | The service worker MUST NOT cache any authenticated API response. Only the static shell and hashed static assets may be cached. |
 | SEC-06 | Cached shell responses MUST NOT contain user data. This is what makes a shared, cross-user cache safe. |
-| SEC-07 | The local database contains the household's shopping data. It MUST be cleared on sign-out unless the user explicitly chooses to keep a copy. |
+| SEC-07 | The local database contains the household's shopping data. It MUST be cleared on sign-out — always. "Keep a copy" exports the pending operations to a **JSON file** and does not retain the database, and retained local data is bound to the account that created it (§12.3). |
 | SEC-08 | The `deviceId` used for sync MUST be a random per-install identifier with no hardware fingerprinting. |
 | SEC-09 | The `ADMIN_EMAIL` mechanism MUST be replaced by a role on the `member` table (or a dedicated `platform_admin` table) before the admin endpoints are exposed further. |
 | SEC-10 | Rate limiting MUST be applied to sign-up, sign-in, invitation, and join-link endpoints. |
@@ -2837,6 +3005,11 @@ score must not drop below 90**. The existing Lighthouse harness
 the fallback is to server-render only the *first screenful* of items as a
 bootstrap payload that the client writes into IndexedDB before its first paint —
 which keeps IndexedDB the single source of truth while restoring SSR paint.
+**The bootstrap payload is user data, and it must never reach a cache.** Its
+response must send `Cache-Control: no-store`, and the service worker's
+navigation handler must not write it to any cache (SEC-05, SEC-06, AC-19).
+A cached navigation response would render the previous account's items to
+whoever signs in next on that browser.
 
 ### 15.3 Browser support
 
@@ -2954,17 +3127,22 @@ that:
 
 This is the acceptance demonstration for the whole project.
 
-**A second, lower-level fixture sits under it.** §10.8's two apply statements
-have already been executed against PostgreSQL 17 with this document's own DDL,
-across seventeen scenarios, and their outcomes verified. Those seventeen
+**A second, lower-level fixture sits under it.** §10.8's three statements have
+already been executed against PostgreSQL 17 with this document's own DDL,
+across **thirty scenarios**, and their outcomes verified. Those thirty
 scenarios are the **server-side fixture** for Phase 3: an implementation that
 reaches a different outcome for any of them fails the test rather than passing
 review. The list is: a normal update; a field lost to a concurrent write; a
 check that loses by check-wins; a write to a tombstoned row; an undelete whose
-lamport is older than the tombstone's; a lost compare-and-swap; and, for store
-tags, an addition, a sequential removal, a concurrent removal, a concurrent
-re-add refused by a tombstone, and a sequential removal that loses on lamport;
-plus a create that writes its tags and a create whose id is already taken.
+lamport is older than the tombstone's; a lost compare-and-swap; an archive
+skipped because the item is no longer checked; an archive that applies; **both
+arrival orders of an archive racing an uncheck, and the assertion that they
+converge on the same state**; and, for store tags, an addition, a sequential
+removal, a concurrent removal, a concurrent re-add refused by a tombstone, and
+a sequential removal that loses on lamport; plus a bulk operation sharing one
+`opId` across two items, a replay of an operation that won nothing, a replay
+of an applied operation, the outcome vocabulary, a create that writes its
+tags, and a create whose id is already taken.
 
 ### 16.5 CI gates
 
@@ -3069,7 +3247,7 @@ The recovery is complete when **all** of the following are demonstrably true.
 | # | Criterion |
 | --- | --- |
 | AC-15 | A plain household member receives **403** when minting a join link, when inviting by email, and when removing a member. |
-| AC-16 | Every unauthenticated request to any `/api/*` route returns 401. `GET /api/invitation-email` is either authenticated or removed. |
+| AC-16 | Every unauthenticated request to any `/api/*` route returns 401, **except the Better Auth endpoints under `/api/auth/*`** — sign-in, sign-up and session creation must work before a session exists, so a universal rule would make those flows unusable. The public surface is therefore an explicit list: `/api/auth/*` and nothing else. `GET /api/invitation-email` is either authenticated or removed. |
 | AC-17 | A user of household B receives 404 for household A's item on read, update, and delete — proven by a test against a real database. |
 | AC-18 | A household-scoped table cannot be queried without passing through the scope helper — enforced by a lint rule — and an integration test proves a mismatched household receives 404 on read, update, and delete. |
 | AC-19 | The service worker cache contains no API responses and no user data. |

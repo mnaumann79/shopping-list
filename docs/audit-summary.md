@@ -40,14 +40,26 @@ data loss. All findings have been applied.
 using the specification's own DDL. It **did not parse**, and where it parsed it
 reached the wrong outcome: sixteen blocking defects, every one of them in that
 statement. The statement was rewritten and re-verified; it now executes, and
-its outcomes were checked across **seventeen scenarios** — a normal update, a
+its outcomes were checked across **thirty scenarios** — a normal update, a
 field lost to a concurrent write, a check that loses by check-wins, a write to
-a tombstoned row, an undelete that is too old, a lost compare-and-swap, five
-store-tag outcomes, a create that writes its tags, and a create whose id is
-already taken. **86 assertions pass.** The same round produced one schema
-change: a **tombstone on the tag pairs** (`item_stores.deleted_at`), without
-which a removal's ordering key is destroyed and a long-offline device could
-resurrect a tag somebody had deliberately removed.
+a tombstoned row, an undelete that is too old, a lost compare-and-swap, **both
+arrival orders of an archive racing an uncheck**, five store-tag outcomes, a
+bulk operation, two replays, a create that writes its tags, and a create whose
+id is already taken. **125 assertions pass.** The same round produced one
+schema change: a **tombstone on the tag pairs** (`item_stores.deleted_at`),
+without which a removal's ordering key is destroyed and a long-offline device
+could resurrect a tag somebody had deliberately removed.
+
+**A ninth round then found one more blocking defect, in the ledger.** The
+ledger row was written by the apply statement, so a bulk operation — which
+expands into one statement per item under a single `opId` — would insert the
+same primary key twice, raise, and take the whole batch down with it. The same
+happened when an operation that won nothing was replayed. The ledger row is now
+written **once per operation, by the request, at the end of the batch**, so it
+cannot raise; the apply statements return the operation's outcome instead. A
+further round also found that "clear completed" was **order-dependent** — the
+outcome depended on which device reconnected first — so the archive is now
+conditional on the item still being checked, and an uncheck reverses it.
 
 ---
 
@@ -129,8 +141,12 @@ is how the current inconsistency arose.
 
 **Not a rewrite.** Roughly 60% of the codebase survives intact, and because the
 current application stores **no client-side data**, the existing data needs no
-migration. A rewrite would add 6–8 weeks and real data-loss risk for zero
-functional gain.
+**client-side** migration — there is nothing on a device to migrate. The
+**server** data does need a migration: the `is_active → deleted_at` backfill,
+the additive columns, the tag-pair de-duplication before its new primary key,
+and a rehearsal against a seeded legacy database (Phase 0, task 0.4 and Phase
+3, tasks 3.0–3.1). A rewrite would add 6–8 weeks and real data-loss risk for
+zero functional gain.
 
 | Option | Duration | Risk | Outcome |
 | --- | --- | --- | --- |
@@ -199,7 +215,7 @@ with the losing edit surfaced rather than discarded.
 | **Specification** | `docs/project.md` — ~3,180 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 15 ADRs, 38 acceptance criteria. |
 | **Roadmap** | `docs/plan.md` — ~770 lines. 8 phases, ownership matrix, merge order, 8 open decisions. |
 | **Review** | 8 rounds, by three specialists. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
-| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's two apply statements have been executed against PostgreSQL 17 with the specification's own DDL, and 86 assertions about their outcomes pass.** |
+| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 125 assertions about their outcomes pass.** |
 
 **Deliberate changes to the original plan, made on review:** RLS removed from
 the isolation strategy (unreliable on the Neon HTTP driver — fail-open returns
@@ -212,17 +228,19 @@ added so that a removal's ordering key survives.
 
 ## 8. Decisions needed from the product owner
 
-Seven are listed in `docs/plan.md` §6. Two gate Phase 3:
+Eight are listed in `docs/plan.md` §7. **Three gate Phase 3**, so they are
+the ones to answer first:
 
-| | Decision | Why it is yours |
-| --- | --- | --- |
-| **D-1** | **The conflict-resolution matrix** — in particular **check-wins** and **delete-wins** (`docs/project.md` §11) | A product judgement about how a household should behave, not a technical one. Every other rule is an implementation detail; this one is about people. |
-| **D-1a** | **Which side wins a *concurrent* store-tag contest** — the removal (as specified and verified) or the addition | A sub-decision inside D-1. Both surface the losing edit to the user; they differ only in which edit stands. The removal-wins rule is implemented and verified; flipping it is a change to one `CASE`. |
-| **D-7** | **A checked item stays in place**, dimmed, rather than moving to a "Completed" section | Today the row leaves the shopper's thumb the instant they tick it. This is the most important in-aisle change in the plan. |
+| | Decision | Gates | Why it is yours |
+| --- | --- | --- | --- |
+| **D-1** | **The conflict-resolution matrix** — in particular **check-wins** and **delete-wins** (`docs/project.md` §11) | Phase 3 | A product judgement about how a household should behave, not a technical one. Every other rule is an implementation detail; this one is about people. |
+| **D-1a** | **Which side wins a *concurrent* store-tag contest** — the removal (as specified and verified) or the addition | Phase 3 | A sub-decision inside D-1. Both surface the losing edit to the user; they differ only in which edit stands. The removal-wins rule is implemented and verified; flipping it is a change to one `CASE`. |
+| **D-2** | **The change-log retention window** (proposed: 90 days) — it defines the maximum device offline window | Phase 3.1, 3.5 | A product trade of storage against how long a device may be offline before it must re-bootstrap. Tombstoned rows are exempt from the window. |
+| **D-7** | **A checked item stays in place**, dimmed, rather than moving to a "Completed" section | Phase 6.11 | Today the row leaves the shopper's thumb the instant they tick it. This is the most important in-aisle change in the plan. |
 
-The other five — retention window, sync cadence, delete-recoverability,
-sign-out behaviour with unsynchronised changes, and device management — are
-listed in `docs/plan.md` §6, along with D-1a.
+The other four — sync cadence (D-3), delete-recoverability (D-4), sign-out
+behaviour with unsynchronised changes (D-5), and device management (D-6) —
+have later deadlines and are listed in `docs/plan.md` §7.
 
 ---
 
@@ -246,25 +264,40 @@ real production build, and a real browser. To reproduce the central finding:
 # a real database
 createdb shopping_test && psql shopping_test -f db/init.sql
 
-# the production build, with the DB configured
-DATABASE_URL=postgresql://…/shopping_test DB_DRIVER=node-postgres \
-  BETTER_AUTH_SECRET=… BETTER_AUTH_URL=http://127.0.0.1:3000 pnpm build
+# the production build AND the running server need the same environment:
+# src/db/index.ts reads DATABASE_URL at import time, so the build alone is
+# not enough — the server process needs it too.
+export DATABASE_URL=postgresql://…/shopping_test
+export DB_DRIVER=node-postgres          # the local pg driver, not Neon HTTP
+export BETTER_AUTH_SECRET=…
+export BETTER_AUTH_URL=http://127.0.0.1:3000
+export NEXT_PUBLIC_APP_URL=http://127.0.0.1:3000
 
-# then, with the app running:
-#   - disable the network
-#   - reload the dashboard  → ERR_INTERNET_DISCONNECTED
-#   - add an item            → "Failed to add item", and the item is lost
-#   - inspect the console    → indexedDB.databases() is []
+pnpm build && pnpm start
+
+# then, in the browser, with the app open on the dashboard:
+#   1. add an item while still ONLINE   → it appears
+#   2. disable the network
+#   3. add another item                 → "Failed to add item", and the
+#                                          item is rolled back and lost
+#   4. reload the dashboard             → ERR_INTERNET_DISCONNECTED
+#   5. inspect the console              → indexedDB.databases() is []
+#
+# (Step 3 before step 4: once the page has been reloaded into the browser's
+# error page there is no app left to add an item to.)
 ```
 
 The quality gates as they stand today:
 
 ```
-pnpm lint        # passes
-pnpm typecheck   # FAILS — 9 errors, all in route test files
-pnpm test        # FAILS — 6 failed / 123 passed / 1 skipped
-pnpm build       # passes with DATABASE_URL set; fails without it
+pnpm lint              # passes
+pnpm exec tsc --noEmit # FAILS — 9 errors, all in route test files
+pnpm test              # FAILS — 6 failed / 123 passed / 1 skipped
+pnpm build             # passes with DATABASE_URL set; fails without it
 ```
+
+There is no `pnpm typecheck` script yet — `package.json` has only `dev`,
+`build`, `start`, `lint` and `test`. Phase 0's task 0.1 adds one.
 
 Phase 0 exists to make the last three green before any architecture changes,
 so that every later increment can be verified rather than asserted.

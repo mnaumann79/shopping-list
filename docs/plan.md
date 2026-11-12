@@ -81,9 +81,13 @@ A phase is done when **all** of the following hold:
 
 1. Every task in the phase has an approved PR, and the PRs have been merged in
    the recommended order.
-2. `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:integration`,
-   `pnpm build`, and `pnpm test:e2e` all pass **on the merged result** — not
-   merely on individual branches.
+2. `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and
+   `pnpm test:e2e` all pass **on the merged result** — not merely on
+   individual branches.
+3. `pnpm test:integration` passes **from Phase 1 onward**. The integration
+   suite is introduced by task 1.9, so a Phase 0 gate that requires it would
+   demand a command that does not exist yet — and Phase 1 cannot start until
+   Phase 0 is done.
 3. The phase's **verification commands** have been executed and their output
    attached. An unrun check is reported as a gap, never as a pass.
 4. The phase's **demonstration** (a scripted, repeatable run) succeeds.
@@ -120,7 +124,8 @@ and CI runs neither.
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
 | 0.1 | Add `typecheck` script (`tsc --noEmit`) and a `ci.yml` workflow running lint, typecheck, unit, build on every PR | Lead | `package.json`, `.github/workflows/ci.yml` |
-| 0.2 | Fix the 6 failing `onboarding.test.tsx` tests (wrap in `ThemeProvider`) and the 9 `tsc` errors in route test files | Frontend | `src/app/(app)/__tests__/onboarding.test.tsx`, `src/app/api/households/join-links/route.test.ts`, `src/app/api/items/clear-completed/route.test.ts` |
+| 0.2 | Fix the 6 failing `onboarding.test.tsx` tests (wrap in `ThemeProvider`) | Frontend | `src/app/(app)/__tests__/onboarding.test.tsx` |
+| 0.2b | Fix the 9 `tsc` errors in the route test files — `src/app/api/**` is Backend's, so this task sits with Backend | Backend | `src/app/api/households/join-links/route.test.ts`, `src/app/api/items/clear-completed/route.test.ts` |
 | 0.3 | Make the DB client lazy so a missing `DATABASE_URL` fails at request time, not at import time | Database | `src/db/index.ts` |
 | 0.4 | Fix the `db/init.sql` drift (constraint-name mismatch vs. the Drizzle migration) and add a `db:migrate` script that runs the real migrations | Database | `db/init.sql`, `src/db/migrations/**`, `package.json` |
 | 0.5 | Load `.env.test` in Vitest and Playwright (the `dotenv` dependency is installed but unused) | Lead | `vitest.config.ts`, `playwright.config.ts` |
@@ -192,9 +197,10 @@ builds the authorization helper that Phase 3 reuses.
 | 1.1 | Add `requireHouseholdRole(orgId, userId, roles)` and enforce it on every household-scoped route: join links, invites, member removal (closes S-1, S-2, S-3) | Backend | `src/lib/request-auth.ts`, `src/server/services/households.ts`, `src/app/api/households/**` |
 | 1.2 | Make authorization failures return **403** with a stable error code, not 500 with a raw Better Auth message | Backend | `src/server/services/service-error.ts`, `src/server/services/households.ts` |
 | 1.3 | Remove or authenticate `GET /api/invitation-email` (closes S-4) | Backend | `src/app/api/invitation-email/route.ts` |
-| 1.4 | Introduce a shared household-scope helper that is the **only** sanctioned access path to the household-scoped tables, plus a lint rule forbidding direct `db.select().from(<household table>)` outside it (closes S-5). **The lint rule's protected-table list must be derived from the Drizzle schema, not hardcoded** — otherwise the four new household-scoped tables added in Phase 3 (§9.2) escape the rule silently. **RLS is deliberately not used** — see ADR-12 | Database | `src/db/schema/**`, `src/db/migrations/**`, `src/server/services/items.ts` (consumption) |
+| 1.4 | Introduce a shared household-scope helper that is the **only** sanctioned access path to the household-scoped tables, plus a lint rule forbidding direct access to those tables outside it — `db.select()`, `db.insert()`, `db.update()`, `db.delete()` and `db.execute()` alike. A rule that covered only `db.select()` would leave the write paths unguarded: a route taking an item id could change another household's row without a household predicate (closes S-5). **The lint rule's protected-table list must be derived from the Drizzle schema, not hardcoded** — otherwise the four new household-scoped tables added in Phase 3 (§9.2) escape the rule silently. **RLS is deliberately not used** — see ADR-12 | Database | `src/db/schema/**`, `src/db/migrations/**`, `src/server/services/items.ts` (consumption) |
 | 1.5 | Fix the quantity input: accept free-form text end to end (closes B-6) | Frontend | `src/lib/utils.ts`, `src/app/(app)/dashboard/_components/QuickAddBar.tsx`, `src/app/(app)/dashboard/_components/ItemDialogs.tsx` |
-| 1.6 | Separate *delete* (tombstone) from *clear completed* (archive); make deletion recoverable and consistent (closes B-11) | Database + Backend | `src/db/schema/items.ts`, `src/db/migrations/**`, `src/server/services/items.ts`, `src/app/api/items/**` |
+| 1.6 | Separate *delete* (tombstone) from *clear completed* (archive) in the **schema and migration**: add `deleted_at`, stop relying on `is_active`, backfill `is_active = false` rows as tombstones (closes B-11) | Database | `src/db/schema/items.ts`, `src/db/migrations/**` |
+| 1.6b | Carry the same separation through the **service and route layer**: `deleteItem` writes a tombstone, "clear completed" writes an archive mark, and both are recoverable from History (closes B-11) | Backend | `src/server/services/items.ts`, `src/app/api/items/**` |
 | 1.7 | Make the item-store replacement atomic using `db.batch()` (closes B-13); make the bulk "clear completed" skip items changed since the request began (closes B-12) | Backend | `src/server/services/items.ts` |
 | 1.8 | ~~Replace the optimistic-update rollback with a per-item update that cannot clobber a concurrent edit (closes B-14, B-15)~~ — **superseded by Phase 4, task 4.4**, which rewrites `ShoppingList.tsx` and `ItemRow.tsx` wholesale. Do not implement this here; Phase 4's replacement covers it | Frontend | — |
 | 1.9 | Add integration tests against a **real PostgreSQL** that assert the tenant-isolation predicates, the authorization matrix, and the idempotency of a repeated create | Backend | `src/server/services/__tests__/**`, `src/test/**` |
@@ -248,7 +254,11 @@ Plus explicit probes (the same ones used in the assessment):
 
 ### Definition of done
 
-- Every S-1 … S-7 and B-6, B-11 … B-15 finding is closed and covered by a test.
+- Every S-1 … S-7 and B-6, B-11 … B-13 finding is closed and covered by a test.
+- **B-14 and B-15 are closed in Phase 4, task 4.4**, not here — they are the
+  optimistic-update rollback and the premature toast, and Phase 4 replaces the
+  whole path rather than patching it. They are therefore *not* part of this
+  phase's gate.
 - The integration suite runs in CI against a real database and passes.
 - The quantity probe stores the string verbatim.
 - The Lead confirms the authorization matrix by direct probe.
@@ -336,13 +346,16 @@ proven against a real PostgreSQL.
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
+| 3.0 | **De-duplicate the `item_stores` rows before the primary key is added.** The table has no primary key today, so a legacy database may hold duplicate tag rows; adding `PRIMARY KEY (item_id, store_id)` over them **fails and blocks the migration**. The de-duplication must be deterministic — keep the lowest `ctid` per `(item_id, store_id)` — and the legacy migration test must seed duplicate tags and assert the migration applies and the surviving row is the expected one | Database | `src/db/migrations/**`, `src/db/__tests__/migrations.test.ts` |
 | 3.1 | Additive migrations: `items.deleted_at`, `items.version`, `items.field_meta`, `items.updated_by`, `items.lamport`, `items.last_op_id`; the same set plus `deleted_at` for `stores` and `categories`; version the `item_stores` rows — add `PRIMARY KEY (item_id, store_id)` (the table has **no primary key today**, so duplicate tag rows are possible), plus `version`, `lamport`, `device_id`, and **`deleted_at`** — the *pair tombstone*, without which a removal's ordering key is lost and a long-offline device can resurrect a removed tag (§9.1, §10.8.3); create `household_sync_state`; the `is_active → deleted_at` backfill as a separate migration | Database | `src/db/schema/**`, `src/db/migrations/**` |
 | 3.2 | Create the `sync_changes`, `sync_operations`, `devices`, and `entity_conflicts` tables with their indexes | Database | `src/db/migrations/**` |
-| 3.3 | Implement the apply engine (ADR-14): deduplicate on `opId`; resolve the conflict per §11; then apply the request in **one HTTP request and one transaction** — the advisory lock (`pg_advisory_xact_lock(hashtextextended(household_id, 0))`) followed by one statement per operation, each a data-modifying CTE that performs the compare-and-swap and inserts the change-log row **only if the update matched**, plus the idempotency record. No statement in the batch may raise: validation, authorization, and duplicate-name checks run before it, a failed compare-and-swap updates zero rows, and creates use `ON CONFLICT DO NOTHING` — so one duplicate name cannot abort its neighbours. **Implement §10.8's two statements as written** — they are the normative form and have been executed against PostgreSQL 17 (§10.8); they are not a sketch to be re-derived. Three details are load-bearing and easy to get wrong: the `$op_base_version` / `$cas_version` split (§10.8), the quoted `"storeId"` alias in `jsonb_to_recordset` (§10.8.3), and the `flags.row_changed` gate that lets an operation win nothing, write no change-log row, and **still** be acknowledged in the idempotency ledger | Backend | `src/server/sync/apply.ts` |
+| 3.3 | Implement the apply engine (ADR-14): deduplicate on `opId`; resolve the conflict per §11; then apply the request in **one HTTP request and one transaction** — the advisory lock (`pg_advisory_xact_lock(hashtextextended(household_id, 0))`) followed by one statement per operation, each a data-modifying CTE that performs the compare-and-swap and inserts the change-log row **only if the update matched**, plus the idempotency record. No statement in the batch may raise: validation, authorization, and duplicate-name checks run before it, a failed compare-and-swap updates zero rows, the ledger insert uses `ON CONFLICT (op_id) DO NOTHING` so it cannot raise on a replay or on a bulk operation's shared `opId`, and creates use `ON CONFLICT DO NOTHING` — so one duplicate name cannot abort its neighbours. **A zero-row compare-and-swap is not an abort and must not leave a partial record**: an `UPDATE` that matches zero rows does not fail the transaction, so the change-log insert and the ledger write are both gated on the update having matched — the change-log insert selects `FROM applied`, and the request writes no ledger row for an operation the compare-and-swap lost (§10.8.4). **Implement §10.8's two statements as written** — they are the normative form and have been executed against PostgreSQL 17 (§10.8); they are not a sketch to be re-derived. Three details are load-bearing and easy to get wrong: the `$op_base_version` / `$cas_version` split (§10.8), the quoted `"storeId"` alias in `jsonb_to_recordset` (§10.8.3), and the `flags.row_changed` gate that lets an operation win nothing, write no change-log row, and **still** be acknowledged in the idempotency ledger | Backend | `src/server/sync/apply.ts` |
+| 3.3b | **Route the legacy REST writes through the same apply engine.** The legacy item endpoints stay reachable during the transition (§13.2), and a write that commits without a `sync_changes` row leaves the change log incomplete — the log is the source of truth (INV-12), so a client that pulls from it never learns of that edit. The shared functions in `src/server/services/items.ts` that the legacy routes call must increment the row's `version`, stamp its `field_meta` and `lamport`, and append the `sync_changes` row **in the same transaction**. A legacy write that does none of those leaves the compare-and-swap unable to detect it, so a concurrent sync operation would overwrite it from stale state | Backend | `src/server/services/items.ts`, `src/app/api/items/**` |
+| 3.3c | Implement the **same-request dependency contract**: an operation that targets an entity created earlier in the same request resolves against it, because the batch's statements run in order on one connection in one transaction (§10.8.4). An operation whose target does not exist — because the create was rejected — is rejected with `ENTITY_NOT_FOUND` and surfaced, not silently dropped. The client must not reorder its outbox | Backend | `src/server/sync/apply.ts` |
 | 3.4 | Implement `POST /api/sync` per the frozen contract: push + pull in one round trip, batched, with `fullResyncRequired` detection | Backend | `src/app/api/sync/route.ts`, `src/server/sync/**` |
 | 3.5 | Implement the incremental pull query and the full-snapshot path; prune **only** the change log (90 days). Tombstoned item rows are never hard-deleted, and a full resync discards the client's local tombstones because the snapshot is authoritative (FR-31, §9.3) | Backend + Database | `src/server/sync/pull.ts`, `src/db/**` |
 | 3.6 | Enforce the authorization matrix on `/api/sync` and on every entity it touches | Backend | `src/app/api/sync/route.ts` |
-| 3.7 | Server-side integration tests: idempotency (repeat an op 10×), conflict resolution per §11, cross-household rejection, atomicity under induced failure, resync detection | Backend | `src/server/sync/__tests__/**`, `src/app/api/sync/route.test.ts` |
+| 3.7 | Server-side integration tests: idempotency (repeat an op 10×), conflict resolution per §11, cross-household rejection, atomicity under induced failure, resync detection; **the thirty verified scenarios of `docs/project.md` §16.4 replayed against the implementation**; **a bulk operation sharing one `opId` across two items** (two change-log rows, one ledger row, no abort); **a replay of an operation that won nothing** (no raise, no second conflict row); **a create-then-edit and a create-then-delete in one request**; and **a legacy REST write racing a sync operation on the same entity** | Backend | `src/server/sync/__tests__/**`, `src/app/api/sync/route.test.ts` |
 | 3.8 | Migration tests: apply to an empty DB; apply to a DB seeded with legacy rows; assert legacy content is unchanged and `is_active = false` rows became tombstones | Database | `src/db/__tests__/migrations.test.ts` |
 
 ### Deliverables
@@ -387,12 +400,15 @@ plus explicit probes:
   conflict record exists.
 - An induced failure between the entity write and the change-log write → the
   entity write is rolled back.
-- **The seventeen scenarios §10.8's statements were verified against, replayed
+- **The thirty scenarios §10.8's statements were verified against, replayed
   against the implementation.** They are the fixture, not a summary: a normal
   update, a field lost to a concurrent write, a check that loses by
   check-wins, a write to a tombstoned row, an undelete that is too old, a lost
-  compare-and-swap, five store-tag outcomes, and a create with tags. An
-  implementation that reaches a different outcome fails here.
+  compare-and-swap, **both arrival orders of an archive racing an uncheck and
+  the assertion that they converge**, five store-tag outcomes, a bulk
+  operation sharing one `opId`, a replay of an operation that won nothing, a
+  replay of an applied operation, the outcome vocabulary, and a create with
+  tags. An implementation that reaches a different outcome fails here.
 
 ### Definition of done
 
@@ -417,12 +433,12 @@ network for domain data** (INV-01, INV-05, INV-06).
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
-| 4.1 | Add the Dexie local database: schema, versioned migrations, a `meta` store (local schema version, app version, cached identity, device id), and a `households` store holding the signed-in user's household list (`id`, `name`). The household list is what makes offline household switching possible and must exist from Phase 4, not Phase 6. **Add `dexie` and `dexie-react-hooks` to `package.json`** — Frontend owns this task's `package.json` change | Frontend | `src/client/db/**`, `package.json` |
+| 4.1 | Add the Dexie local database: schema, versioned migrations, a `meta` store (local schema version, app version, cached identity, device id), and a `households` store holding the signed-in user's household list (`id`, `name`). The household list is what makes offline household switching possible and must exist from Phase 4, not Phase 6. **The `households` and `identity` records are keyed by *account* as well as by household** (§12.3): local data belongs to the account that created it, and a different account signing in on the same browser must not be able to read it. **Add `dexie` and `dexie-react-hooks` to `package.json`** — Frontend owns this task's `package.json` change | Frontend | `src/client/db/**`, `package.json` |
 | 4.2 | Implement the repository layer: local CRUD that writes the record **and** enqueues the operation in one IndexedDB transaction (INV-03). Catch and **propagate** `QuotaExceededError` at this boundary — Phase 4 must not swallow it, or Phase 6's banner has nothing to hook | Frontend | `src/client/db/repository.ts` |
 | 4.3 | Implement the outbox: operation creation, the Lamport clock, `baseVersion` capture, and the `pending / inflight / failed / blocked` state machine | Frontend | `src/client/db/outbox.ts`, `src/client/sync/clock.ts` |
 | 4.4 | Implement `useLiveQuery`-based reactive reads; convert `ShoppingList`, `ItemRow`, `ItemDialogs`, `QuickAddBar`, `HistoryList` to read from the local store. Implement the three distinct empty states — *empty* / *not downloaded on this device* / *couldn't load, retry* (§6.4 (empty states)). **Three carry-over defects must be fixed in this rewrite, not in Phase 1:** (a) the `ItemRow` memo comparator (`ItemRow.tsx:132-145`) compares a fixed prop list, so the new `pending`/`pendingFields`/`version` fields would never trigger a re-render and a pending badge would go stale — compare them, or drop the hand-rolled comparator; (b) `ItemDialogs.handleSave` (`ItemDialogs.tsx:83-103`) diffs against the props snapshot the dialog opened with, so a remote change made while it is open is written back on save — diff against the version the dialog opened with, or rebase on the live row; (c) the per-item optimistic rollback (B-14) and the premature `Item removed` toast (B-15) — the whole path is replaced by the local-first repository, so there is nothing to roll back | Frontend | `src/app/(app)/dashboard/_components/**`, `src/app/(app)/history/_components/**` |
-| 4.5 | Convert the dashboard and history routes to **static shells**: remove the server-side session fetch from the layout **and** from `dashboard/page.tsx` and `history/page.tsx` (each currently calls `getRequestSession()` and redirects), add a client-side auth gate, stop passing `userName` in from the server session (`AppHeader.tsx` takes it as a prop today), stop pre-formatting history labels on the server, and keep server-side authorization on every API | Frontend | `src/app/(app)/layout.tsx`, `src/app/(app)/dashboard/page.tsx`, `src/app/(app)/history/page.tsx`, `src/components/AppHeader.tsx` |
-| 4.6 | Implement the bootstrap path: on an empty local database, pull the full household snapshot and write it to IndexedDB before the first list render, distinguishing *not downloaded* from *bootstrap failed* (§6.4 (empty states)) | Frontend | `src/client/sync/bootstrap.ts` |
+| 4.5 | Convert the dashboard and history routes to **static shells**: remove the server-side session fetch from the layout **and** from `dashboard/page.tsx` and `history/page.tsx` (each currently calls `getRequestSession()` and redirects), add a client-side auth gate — which **blocks rendering a household's cached data to a different account** (§12.3): signing in as another account clears the retained local data, or requires explicit confirmation before it renders; never silently — stop passing `userName` in from the server session (`AppHeader.tsx` takes it as a prop today), stop pre-formatting history labels on the server, and keep server-side authorization on every API | Frontend | `src/app/(app)/layout.tsx`, `src/app/(app)/dashboard/page.tsx`, `src/app/(app)/history/page.tsx`, `src/components/AppHeader.tsx` |
+| 4.6 | Implement the bootstrap path: **when the device holds no cached data for the active household** — on first load, or after switching to a household that is not yet downloaded — pull that household's full snapshot and write it to IndexedDB before the first list render, distinguishing *not downloaded* from *bootstrap failed* (§6.4 (empty states), §12.4). The condition is per household, not "the database is empty": after one household is cached the database is not empty, and a switch to an uncached household must still bootstrap it | Frontend | `src/client/sync/bootstrap.ts` |
 | 4.7 | Add the static lint rules that enforce INV-01 / INV-05 / INV-06 (no `fetch` in components; domain reads only via the repository) | Frontend | `eslint.config.mjs` |
 | 4.8 | Component tests with `fake-indexeddb`: a write commits locally with the network blocked; the write and the outbox entry land together; a failed transaction leaves neither. **Add `fake-indexeddb` to Vitest's `setupFiles`** in `vitest.config.ts` — Frontend owns this task's `vitest.config.ts` change | Frontend | `src/client/**/__tests__/**`, `vitest.config.ts` |
 | 4.9 | Build the **basic** sync status chip — `Up to date`, `N changes pending`, `Offline`, `Offline · N changes pending`, `Sign in to sync · N pending` — reading from the local outbox, never from the network. It must not read `Up to date` before IndexedDB has been read (§6.4 (chip readiness)). The states that depend on the sync engine land in Phase 6 (task 6.3) | Frontend | `src/components/**`, `src/app/(app)/dashboard/_components/**` |
@@ -434,7 +450,10 @@ network for domain data** (INV-01, INV-05, INV-06).
   immediately.
 - The basic sync status chip is present and truthful (the states that need the
   sync engine arrive in Phase 6).
-- A reload with the network blocked shows the same list.
+- **An offline reload is verified in Phase 6**, after the navigation fallback
+  (task 6.2) is added. The service worker today serves only cached `GET`
+  requests under `/_next/static/`, and no Phase 4 task changes `public/sw.js`,
+  so an offline reload cannot work before the navigation handler exists.
 - The outbox holds every unacknowledged operation, durably.
 - The lint rules fail the build if a component reintroduces a network call for
   domain data.
@@ -444,6 +463,18 @@ network for domain data** (INV-01, INV-05, INV-06).
 Phase 2 (frozen contract types). Phase 3 is **not** a blocker — Phase 4 works
 against a **specified, versioned mock** of `/api/sync` provided by the contract
 types. The real integration dependency is recorded and wired in Phase 5.
+
+**Phase 4 must not be deployed on its own.** The moment domain writes move
+into IndexedDB, the device writes locally and the outbox is the only path to
+the server — so until Phase 5 wires the outbox to the real `/api/sync`, edits
+cannot reach other devices at all. Two things follow:
+
+1. The client cutover is **gated on Phase 5**. Phase 4's increment is merged
+   and developed behind the mock, but it is not deployed until the real sync
+   engine is in place.
+2. The **legacy server write path stays active** through Phase 4, so a write
+   still reaches the server through the old route if the outbox is not yet
+   draining. Phase 3's task 3.3b is what keeps that path on the change log.
 
 ### Files / architectural areas affected
 
@@ -493,9 +524,9 @@ two devices converge.
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
 | 5.1 | Implement the sync engine as a plain TypeScript class (not React state): debounced push, pull, retry with exponential backoff and jitter, and the `pending → inflight → acknowledged / failed / blocked` state machine | Frontend | `src/client/sync/engine.ts` |
-| 5.2 | Implement the triggers: after a local mutation (2 s debounce), on the `online` event, on a 30 s timer while pending, on `visibilitychange`, and on app start | Frontend | `src/client/sync/triggers.ts` |
+| 5.2 | Implement the triggers: after a local mutation (2 s debounce), on the `online` event, on `visibilitychange`, and on app start — **plus a 30 s timer that runs while the app is visible and the household is active, whether or not the outbox is empty**. The push is conditional on pending work; the **pull is not**. A timer that only runs while there is pending work leaves an idle open device permanently stale: another member's edit arrives only when some unrelated event fires | Frontend | `src/client/sync/triggers.ts` |
 | 5.3 | Implement the change-application rules: tombstones are applied as tombstones (INV-07); a pending local field is **not** overwritten by an incoming change to the same field; a change to a different field is applied immediately | Frontend | `src/client/sync/apply-changes.ts` |
-| 5.4 | Implement the conflict store and the "Needs attention" surface: the three card types defined in `docs/project.md` §11.2 — **field conflict** (both values, the winning device, and "Keep mine" / "Use theirs" / "Dismiss"), **deleted elsewhere** ("Undo my edit" / "Dismiss"), and **server rejection** (the reason, and "Choose another" / "Discard"). Only the field-conflict card has a "Keep mine", and it sends an override operation. The panel is opened from the status chip's `N need attention` state | Frontend | `src/client/db/conflicts.ts`, `src/app/(app)/**/_components/**` |
+| 5.4 | Implement the conflict store and the "Needs attention" surface: the three card types defined in `docs/project.md` §11.2 — **field conflict** (both values, the winning device, and "Keep mine" / "Use theirs" / "Dismiss"), **deleted elsewhere** ("Undo my edit" / "Dismiss"), and **server rejection** (the reason, and "Choose another" / "Discard"). Only the field-conflict card has a "Keep mine", and it sends an override operation. This task also owns the **`N need attention` chip state** that opens the panel (§6.1) — the panel's only entry point — so the panel is reachable as soon as it exists; Phase 6's task 6.3 completes the *other* chip states. The panel is opened from the status chip's `N need attention` state | Frontend | `src/client/db/conflicts.ts`, `src/app/(app)/**/_components/**` |
 | 5.5 | Wire the real `/api/sync` endpoint into the engine, replacing the Phase 4 mock | Frontend | `src/client/sync/**` |
 | 5.6 | Implement the full-resync path: detect `fullResyncRequired`, rebuild the local tables, and **replay the outbox afterwards** | Frontend | `src/client/sync/resync.ts` |
 | 5.7 | Implement the per-household partitioning of the outbox, the local cache, and the tombstones (INV-09) | Frontend | `src/client/db/**` |
@@ -561,14 +592,14 @@ situations without losing data.
 | --- | --- | --- | --- |
 | 6.1 | Write `public/manifest.webmanifest` with the required fields and icons (180 px, 512 px, maskable), add `apple-touch-icon`, and the iOS meta tags | Frontend | `public/**`, `src/app/layout.tsx` |
 | 6.2 | Rewrite the service worker: precache the static shell, cache hashed assets, **network-first with a cached fallback for navigations**, never cache API responses, and add an update flow (`skipWaiting` + a "new version available — reload" prompt rather than a silent reload that could interrupt an edit) | Frontend | `public/sw.js`, `src/app/providers.tsx` |
-| 6.3 | Complete the sync status chip with the states that only exist once the sync engine is running (`Syncing…`, `Sync failed — Retry`, `N need attention`, `Can't save changes`), and implement its collapsed icon-plus-count form below 400 px. The chip's basic states land in Phase 4 (task 4.9) | Frontend | `src/components/**`, `src/app/(app)/dashboard/_components/**` |
-| 6.4 | Implement the sign-out protection dialog (FR-29, scenario 11) with the three options: sync first / keep a local copy / discard | Frontend | `src/app/(app)/**`, `src/client/**` |
+| 6.3 | Complete the sync status chip with the states that only exist once the sync engine is running (`Syncing…`, `Sync failed — Retry`, `Can't save changes`), and implement its collapsed icon-plus-count form below 400 px. The chip's basic states land in Phase 4 (task 4.9) | Frontend | `src/components/**`, `src/app/(app)/dashboard/_components/**` |
+| 6.4 | Implement the sign-out protection dialog (FR-29, scenario 11) with the three options: **sync first / keep a copy / discard**. "Keep a copy" writes the pending operations to a **JSON file the user downloads** — the local database is **cleared** either way, because a retained database is readable by whoever signs in next (§12.3, SEC-07). The export is inert: the app never reads it back | Frontend | `src/app/(app)/**`, `src/client/**` |
 | 6.5 | Implement offline household switching (scenario 12): switch instantly to a cached household; show an explicit "not downloaded on this device" state for an uncached one | Frontend | `src/components/household-switcher.tsx`, `src/client/**` |
 | 6.6 | Handle session expiry while offline (scenario 13): keep the app fully usable, show `Sign in to sync`, never destroy local data | Frontend | `src/client/**`, `src/app/(app)/**` |
 | 6.7 | Handle storage unavailability and quota exhaustion (scenario 15): a clear blocking banner, an export path, and never a silent loss | Frontend | `src/client/db/**` |
 | 6.8 | Mobile pass: 44 px touch targets, safe-area insets, the quick-add bar reflowed for a 375 px viewport, `viewport-fit=cover` | Frontend | `src/app/(app)/dashboard/_components/**`, `src/app/globals.css` |
 | 6.9 | Add the offline Playwright scenarios: offline cold start, offline reload, offline mutations, offline restart, session expiry, sign-out with pending work, household switch offline | Frontend | `e2e/offline/**` |
-| 6.12 | Extend the offline Playwright suite to cover **all eighteen scenarios** in `docs/project.md` §5 — SC-01 to SC-18 — each mapped to a named test. The offline scenarios that need two devices (SC-03, SC-04, SC-05, SC-06, SC-18) are written here; the rest are single-device and may already exist | Frontend | `e2e/offline/**` |
+| 6.12 | Extend the offline Playwright suite to cover **all eighteen scenarios** in `docs/project.md` §5 — SC-01 to SC-18 — each mapped to a named test. This task **builds the two-device harness** (two browser contexts against one household) and writes the five scenarios that need it (SC-03, SC-04, SC-05, SC-06, SC-18); the other thirteen are single-device and may already exist. The harness lands **here**, in the phase that owns `e2e/offline/**`, so Phase 6's gate can close on it | Frontend | `e2e/offline/**` |
 | 6.10 | Add the "manage your devices" surface (household settings) listing known devices and their last-seen time | Frontend + Backend | `src/app/(app)/household/settings/**`, `src/app/api/households/**` |
 | 6.11 | Implement the in-aisle interaction model (`docs/project.md` §6.3): a checked item **stays in place**, dimmed, and never leaves its category group; the bottom "Completed (N)" becomes a collapsed **summary** with an "Archive checked items" action and a count confirmation; and the 5-second inline **undo** strip for add / check / uncheck / delete / archive — where undo is itself an outbox operation (`item.undelete`, `item.unarchive`, `item.bulkArchive`), never a UI-only trick | Frontend | `src/app/(app)/dashboard/_components/**`, `src/client/db/outbox.ts` |
 
@@ -578,9 +609,11 @@ situations without losing data.
 - With the network disabled **and the local database and service-worker cache
   already populated**, a cold start renders the household's list.
 - Every scenario in `docs/project.md` §5's scenario list (1–18) has a **defined
-  behaviour**, and the ones Phase 6 can express in a single browser context have
-  an automated test. The multi-device scenarios (SC-03, SC-04, SC-05, SC-06,
-  SC-18) are automated in Phase 7, task 7.2, where the two-device harness exists.
+  behaviour** and an **automated test**. The five multi-device scenarios
+  (SC-03, SC-04, SC-05, SC-06, SC-18) are automated here too: task 6.12
+  **builds the two-device harness** in the phase that owns `e2e/offline/**`.
+  Phase 7's task 7.2 *runs* the suite in CI — it does not write it, because two
+  tasks editing one path would break the ownership rule.
 - The status chip is always truthful.
 - A checked item stays in place, and undo works offline for every reversible
   action.
@@ -637,7 +670,7 @@ product owner can approve with confidence.
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
 | 7.1 | Write `scripts/verify-offline-sync.mjs` — the repeatable two-device, conflicting-offline-edits demonstration (`docs/project.md` §16.4) | Backend | `scripts/**` |
-| 7.2 | Write the offline Playwright suite covering scenarios 1–18 and run it in CI | Frontend | `e2e/offline/**`, `.github/workflows/ci.yml` |
+| 7.2 | **Run** the offline Playwright suite written in Phase 6 — scenarios 1–18, including the five two-device scenarios — in CI, and fix anything the full run exposes. This task does not *write* the suite: Phase 6's task 6.12 owns `e2e/offline/**`, and giving both phases the same files would mean two tasks editing one path | Frontend | `.github/workflows/ci.yml` |
 | 7.3 | Write the migration rehearsal: apply the migrations to a database seeded with a realistic legacy snapshot and prove that the first sync reproduces the user's list exactly | Database | `scripts/**`, `src/db/__tests__/**` |
 | 7.4 | Run the Lighthouse harness against the new client; confirm score ≥ 90 and LCP ≤ 2500 ms; if the SSR removal regressed it, implement the documented first-screenful fallback | Frontend | `scripts/verify-perf-07.mjs`, `src/app/(app)/dashboard/**` |
 | 7.5 | Add the observability the sync engine needs: structured sync logs (device, op count, duration, outcome — **never item content**, per SEC-12), a server-side sync error counter, and a simple household-level "sync health" view for the admin | Backend | `src/server/sync/**`, `src/app/(app)/household/settings/**` |
@@ -724,7 +757,7 @@ throughout. The plan preserves user value explicitly:
 | **No client data exists to migrate.** | The current application stores no domain data on the device, so the first load of the new version simply bootstraps from the server. Phase 4.6. |
 | **The existing feature set is preserved.** | Every capability in `docs/project.md` §2.1 is retained; Phase 4 converts the components rather than replacing them, and Phase 6 removes nothing. |
 | **The product is never in a broken state.** | Every phase is a working increment on `main`. The client and server versions interoperate throughout: the legacy REST endpoints remain available until the new client has shipped and the old client is unreachable. |
-| **Rollback is possible.** | The server is additive, so rolling the client back is a client-only deployment. The schema rollback is a migration down, not a data restore. |
+| **Rollback is possible.** | The server is additive, so rolling the client back is a client-only deployment. The schema rollback is a migration down, not a data restore. **A rollback must not strand unsynchronised edits.** The new client's pending operations live in its IndexedDB outbox; the legacy client does not use that outbox, so a rollback that discards the new client's database would strand them. The rollback procedure therefore: (1) **drains the outbox** — the client syncs before it is rolled back, and the release notes tell the user to open the app once on a connection before downgrading; (2) if the outbox cannot be drained, the client **exports it to a JSON file** and the release notes say so, and (3) the legacy client is left able to read the server, because every write it makes goes through the change-log path (task 3.3b). |
 
 ### Explicitly deferred beyond this roadmap
 
@@ -741,7 +774,7 @@ transport (the sync protocol is transport-agnostic).
 | # | Risk | Severity | Mitigation |
 | --- | --- | --- | --- |
 | R-1 | The team discovers mid-implementation that the conflict rules are wrong for a real household scenario | High | Phase 2 proves the rules as pure functions before they are wired. The matrix is also a product decision — **the product owner is asked to approve §11 of `docs/project.md` before Phase 3 starts.** |
-| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's two statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across seventeen scenarios. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
+| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's three statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across thirty scenarios. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
 | R-2 | The SSR → client-render switch causes a performance regression that damages the existing Lighthouse score | Medium | The budget is a Phase 7 gate with a documented fallback. The existing perf harness is reused, not rewritten. |
 | R-3 | iOS Safari behaves differently from the emulation (IndexedDB eviction, service worker lifecycle) | Medium | WebKit is in the Playwright matrix from Phase 0. The manual walkthrough on a real device is a Phase 7 gate. The design avoids Background Sync precisely because of iOS. |
 | R-4 | The Neon HTTP driver cannot provide the atomicity the apply path needs | Medium | Proved in Phase 2 (Task 2.4) with the WebSocket-driver fallback already chosen. |
