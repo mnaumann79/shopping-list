@@ -2337,9 +2337,9 @@ not for one it could not.** The two are different outcomes:
 
 | What happened | Ledger row? | Why |
 | --- | --- | --- |
-| The compare-and-swap matched and the operation changed something | **Yes** | `outcome = 'applied'` |
-| The compare-and-swap matched but every contested field was refused | **Yes** | `outcome = 'rejected'` — the client must be told, or it retries forever |
-| The compare-and-swap matched and the operation changed something *and* lost something | **Yes** | `outcome = 'partial'` |
+| The compare-and-swap matched, the operation changed something, and it **won everything it contested** | **Yes** | `outcome = 'applied'` |
+| The compare-and-swap matched, the operation changed something, and it **lost something it contested** | **Yes** | `outcome = 'partial'` |
+| The compare-and-swap matched but **every** contested field was refused | **Yes** | `outcome = 'rejected'` — the client must be told, or it retries forever |
 | The compare-and-swap was **lost** | **No** | The operation must stay retryable; a ledger row would make the retry look like a duplicate |
 
 **The outcome vocabulary is one vocabulary.** `sync_operations.outcome` takes
