@@ -40,15 +40,15 @@ data loss. All findings have been applied.
 using the specification's own DDL. It **did not parse**, and where it parsed it
 reached the wrong outcome: sixteen blocking defects, every one of them in that
 statement. The statement was rewritten and re-verified; it now executes, and
-its outcomes were checked across **twenty-nine scenarios** — a normal update,
+its outcomes were checked across **thirty-three scenarios** — a normal update,
 a field lost to a concurrent write, a check that loses by check-wins, a write
 to a tombstoned row, an undelete that is too old, a lost compare-and-swap,
 **both arrival orders of an archive racing an uncheck**, five store-tag
 outcomes, a mixed bulk operation, a bulk operation where every candidate was
-skipped, a row archived before the sync model, a create whose id was taken, a
-bulk operation, two replays, a create that writes its tags, and a create whose
-id is already taken. **149 assertions pass.** The same round produced one
-schema change: a **tombstone on the tag pairs** (`item_stores.deleted_at`),
+skipped, a row archived before the sync model, two replays, a create that
+writes its tags, and a create whose id is already taken. **165 assertions
+pass.** The same round produced one schema change: a **tombstone on the tag
+pairs** (`item_stores.deleted_at`),
 without which a removal's ordering key is destroyed and a long-offline device
 could resurrect a tag somebody had deliberately removed.
 
@@ -110,18 +110,21 @@ being reinstated or replaced by a backlog item.
 | High | Plain household members can mint join links (authorization bypass) | `api/households/join-links/route.ts` |
 | High | No idempotency, no conflict detection, no operation queue | `src/db/schema/items.ts` |
 | High | `clear-completed` archives items regardless of concurrent activity | `src/server/services/items.ts:270-303` |
-| High | Item-store replacement is not transactional (Neon HTTP throws on `db.transaction()`) | `src/server/services/items.ts:249-256` |
+| High | Item-store replacement is not transactional — the tag rows are deleted and re-inserted as two separate statements | `src/server/services/items.ts:249-256` |
 | High | Unit tests do not pass — 6 failed / 123 passed / 1 skipped | `pnpm test` |
 | High | No CI quality gate: no lint, typecheck, or unit-test job | `.github/workflows/` |
 | Medium | Quantity input silently corrupts data — `2.5 kg` is stored as `25` | `src/lib/utils.ts` |
 | Medium | Type-check fails — 9 errors, invisible to `next build` | `tsc --noEmit` |
 | Medium | A check makes the row leave the shopper's thumb | `ShoppingList.tsx:169-173` |
 
-**What works, and is retained:** authentication and household onboarding,
-invitations and join links, household switching, item CRUD with categories and
-store tags, check-off, the History and re-add flow, the store filter and the
-Category / Alphabetical / Store grouping, the dark-mode design system, and the
-Playwright harness with its iPhone 13 and WebKit profiles.
+**What works, and is retained:** household onboarding, household switching,
+item CRUD with categories and store tags, check-off, the History and re-add
+flow, the store filter and the Category / Alphabetical / Store grouping, the
+dark-mode design system, and the Playwright harness with its iPhone 13 and
+WebKit profiles. **Authentication and the invitation flows keep their
+capability and change their mechanism** — Supabase Auth replaces Better Auth,
+and `household_invitations` replaces the plugin's own tables (ADR-17). The
+shareable join link is retained, with authorization added.
 
 **Tenant isolation was verified working** — a user of household B receives 404
 for household A's item on read, update, and delete. But **no test asserts it**,
@@ -132,9 +135,9 @@ regression dropping the household filter would pass the whole suite.
 
 ## 4. The verdict: partial rebuild
 
-**Option B** — retain the domain model, schema shape, auth, validation and UI;
-replace the client data layer, the mutation path, the sync protocol and the
-PWA layer.
+**Option B** — retain the domain model, schema shape, validation and UI;
+replace the client data layer, the mutation path, the sync protocol, the PWA
+layer and the authentication mechanism.
 
 **Not an incremental refactor.** The server owns the data and the client is a
 thin view; offline-first *inverts that ownership*. That is architectural, not a
@@ -144,17 +147,19 @@ is how the current inconsistency arose.
 **Not a rewrite.** Roughly 60% of the codebase survives intact, and because the
 current application stores **no client-side data**, the existing data needs no
 **client-side** migration — there is nothing on a device to migrate. The
-**server** data does need a migration: the `is_active → deleted_at` backfill,
-the additive columns, the tag-pair de-duplication before its new primary key,
-and a rehearsal against a seeded legacy database (Phase 0, task 0.4 and Phase
-3, tasks 3.0–3.1). A rewrite would add 6–8 weeks and real data-loss risk for
-zero functional gain.
+**server** data does need a migration: the cutover from the hosted database to
+the self-hosted Supabase instance and from Better Auth to Supabase Auth, the
+`is_active → deleted_at` backfill, the additive columns, the tag-pair
+de-duplication before its new primary key, and a rehearsal against a seeded
+legacy database (Phase 0b, task 0b.12, Phase 0, task 0.4, and Phase 3, tasks
+3.0–3.1). A rewrite would add 6–8 weeks and real data-loss risk for zero
+functional gain.
 
 | Option | Duration | Risk | Outcome |
 | --- | --- | --- | --- |
 | Incremental refactor | 9–12 wks | High | A hybrid with inconsistent semantics |
-| **Partial rebuild** | **≈ 12 wks** | **Low–Medium** | **Coherent offline-first system, ~60% retained** |
-| Full rebuild | 14–20 wks | High | Same destination, later, with real migration risk |
+| **Partial rebuild** | **≈ 14 wks** | **Low–Medium** | **Coherent offline-first system, ~60% retained** |
+| Full rebuild | 20–22 wks | High | Same destination, later, with real migration risk |
 
 ---
 
@@ -183,9 +188,10 @@ Full detail in `docs/project.md`. In brief:
   identity. This is the product owner's decision, and it is recorded as
   ADR-16 and ADR-17. It buys three things: the instance is the platform the
   owner wants to run; the apply path becomes an ordinary interactive
-  transaction instead of Neon's HTTP batch (ADR-14); and the identity id is a
-  `uuid` owned by the platform, which is what makes `auth.uid()` — and
-  therefore **real** row-level security — possible.
+  transaction on the standard `pg` driver instead of a batch of independent
+  requests (ADR-14, ADR-16); and the identity id is a `uuid` owned by the
+  platform, which is what makes `auth.uid()` — and therefore **real**
+  row-level security — possible.
 
 Seventeen architectural decisions with their rationale and rejected
 alternatives are recorded in `docs/project.md` §18.
@@ -228,8 +234,8 @@ with the losing edit surfaced rather than discarded.
 
 | | |
 | --- | --- |
-| **Specification** | `docs/project.md` — ~3,860 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 17 ADRs, 38 acceptance criteria. |
-| **Roadmap** | `docs/plan.md` — ~880 lines. 9 phases, ownership matrix, merge order, 8 open decisions plus 3 in Phase 0b. |
+| **Specification** | `docs/project.md` — ~3,900 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 17 ADRs, 38 acceptance criteria. |
+| **Roadmap** | `docs/plan.md` — ~900 lines. 9 phases, ownership matrix, merge order, 8 open decisions plus 3 in Phase 0b. |
 | **Review** | 8 rounds, by three specialists, plus 4 further verification rounds. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
 | **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 165 assertions about their outcomes pass** — extracted from the document by content, so the text that is verified is the text that is specified. **All three have also been executed against the self-hosted Supabase instance**, which is PostgreSQL 17.11 — the same version — and `auth.uid()` resolves there from a transaction-local claim, which is what the row-level security policies depend on. |
 
@@ -240,11 +246,11 @@ contract; and a **pair tombstone** added so that a removal's ordering key
 survives.
 
 **One change was reversed by the stack move.** The original plan **excluded**
-PostgreSQL row-level security, because on the Neon HTTP driver every statement
-was its own request with no session state: a policy could not be keyed
-reliably to the caller, and a policy written fail-open returns every row
-while one written fail-closed returns none — the *appearance* of defence in
-depth, behaving unpredictably. That reasoning was correct, and it is
+PostgreSQL row-level security, because every statement reached the database as
+its own request with no session state: a policy could not be keyed reliably to
+the caller, and a policy written fail-open returns every row while one written
+fail-closed returns none — the *appearance* of defence in depth, behaving
+unpredictably. That reasoning was correct, and it is
 **answered rather than ignored**: the hosting moves to a self-hosted Supabase
 instance, where Supabase Auth issues a signed JWT and the claims are set
 **inside the transaction that runs the query**, so there is no window in which
@@ -294,19 +300,21 @@ audit's findings.
   a production host, and a test configuration that works from a clean
   checkout.
 - **Phase 0b is planned, not started.** The Supabase migration has a written
-  procedure, a rehearsal, and eleven tasks with owners — but **the cutover
-  has not happened and no production data has moved.** The instance has been
-  verified, not switched to.
+  procedure, a rehearsal, and twelve tasks with owners — but **the cutover
+  has not happened and no production data has moved.** The instance is
+  verified — PostgreSQL 17.11, and the fixture's three statements run against
+  it — and task 0b.2 re-runs both and records the outcome. It has not been
+  switched to.
 - **No feature work has started.** The offline-first rebuild — IndexedDB, the
   sync engine, the conflict resolution, the offline UX — is untouched.
 - **Nothing has been deployed**, and no production system or credential has
   been accessed.
-- **Both pull requests are open and unmerged** — merging is the product
-  owner's decision, and so is the cutover.
+- **PR #1 is merged; PR #2 is open.** Merging the documentation pull request
+  is the product owner's decision, and so is the cutover.
 
 **One thing has been done that deserves to be called out:** the §10.8 SQL was
 executed against a real PostgreSQL with the specification's own DDL, and its
-outcomes verified — 161 assertions across 33 scenario groups. That is
+outcomes verified — 165 assertions across 33 scenarios in 8 groups. That is
 **verification, not implementation**: no production code contains that SQL
 yet, and it will not until Phase 3.
 
@@ -329,9 +337,8 @@ export BETTER_AUTH_SECRET=…
 export BETTER_AUTH_URL=http://127.0.0.1:3000
 export NEXT_PUBLIC_APP_URL=http://127.0.0.1:3000
 
-# DB_DRIVER was in this list when the audit ran - the Neon HTTP driver had to
-# be switched off for a local Postgres. It is removed by Phase 0b (ADR-16):
-# there is one driver now.
+# the driver is chosen by an environment variable; after Phase 0b (ADR-16) the
+# standard `pg` driver is the only one.
 
 pnpm build && pnpm start
 
