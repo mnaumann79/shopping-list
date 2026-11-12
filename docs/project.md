@@ -1671,7 +1671,9 @@ WITH applied AS (
    WHERE id = $entity_id
      AND organization_id = $household_id
      AND version = $base_version          -- the compare-and-swap
-  RETURNING id, version, name, quantity, note, category_id, is_checked, ...
+  RETURNING id, organization_id, name, quantity, note, category_id,
+            is_checked, archived_at, deleted_at, field_meta, version,
+            lamport, last_op_id, updated_by, updated_at, created_at
 ),
 logged AS (
   INSERT INTO sync_changes (household_id, entity_type, entity_id, op_id,
@@ -1715,12 +1717,33 @@ rather than letting a unique violation abort the transaction (§10.1).
    `last_op_id = $op_id`. Without it, the losing operation's change-log insert
    matches the *winner's* row and appends a second entry for one logical
    change (§11, ADR-14).
-4. **If the compare-and-swap matched zero rows**, `applied` is empty, both
-   inserts select from an empty set, and nothing is written — not even an
-   idempotency record. The server detects this and re-reads the row to
-   classify the outcome as a conflict (§11), then re-applies with a fresh
-   `baseVersion` if the operation is still valid.
-5. **`db.batch()` accepts `SQL` objects**, not Drizzle query builders, for
+4. **Zero rows is a success, not an error.** The batch statement has three
+   outcomes, and they must be kept distinct:
+
+   | Outcome | Meaning | Action |
+   | --- | --- | --- |
+   | **One row** | The compare-and-swap won. | Applied. |
+   | **Zero rows** | The compare-and-swap was **lost** — another writer got there first. | Re-read the row **in a fresh round trip**, re-run §11's per-field decision against the fresh state, and re-apply with the new `baseVersion`. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
+   | **The statement raised** | A genuine database error. | Retry the whole batch. |
+
+   An empty result set must **not** be treated as a transport failure. The
+   batch may well have committed, and a blind retry would re-send operations
+   that were already applied.
+5. **All the CTEs in one statement share one snapshot.** `WHERE version =
+   $base_version` is evaluated against the snapshot taken at statement start,
+   so a transaction that committed after that snapshot is invisible to it.
+   That is exactly why the losing operation must re-read in a **separate round
+   trip** rather than inside the batch — and it is why the outer statements
+   may read **only** from `applied`. Never re-read `items` inside the same
+   statement to "confirm" the compare-and-swap: that read sees the same stale
+   snapshot and cannot see the competing write either.
+6. **Build the change-log payload from the CTE's `RETURNING`, and return every
+   column.** The change-log snapshot must be complete, because §10.6 and
+   §10.7 promise the client a *full* snapshot — without `archived_at` the
+   client could not rebuild History, and without `deleted_at` it could not
+   rebuild a tombstone. The `RETURNING` list above is therefore exhaustive;
+   an abbreviated list silently drops fields from every logged snapshot.
+7. **`db.batch()` accepts `SQL` objects**, not Drizzle query builders, for
    raw statements. The advisory lock and the CTE above are both `sql`
    templates.
 
