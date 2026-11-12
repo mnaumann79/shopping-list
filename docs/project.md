@@ -253,8 +253,10 @@ connectivity, and sets the status chip to `Offline — N changes pending`. No
 component issues a domain-data network request (INV-01, INV-05, INV-06).
 
 **Acceptance criteria.**
-- With the network disabled, a cold browser context renders the list with the
-  item names present.
+- With the network disabled **and the local database and service-worker cache
+  already populated** (the same browser profile), a reload renders the list
+  with the item names present. A *cold* context with no local data cannot
+  render a list, and the criterion must not be written as though it could.
 - No browser error page is shown; no unhandled request failure reaches the user.
 - The status chip reads `Offline`.
 - For a household never downloaded on this device, the text *"This household
@@ -289,8 +291,16 @@ client's `lamport`. A delete writes a **tombstone**; it does not remove the row
 ### SC-03 — Two household members edit the same item while disconnected
 
 **Expected behaviour.** When the two devices reconnect, the two edits are
-reconciled deterministically. The later edit wins for the contested field, and
-**the losing edit is shown to the user** rather than disappearing.
+reconciled deterministically. **The edit with the higher `(lamport, deviceId)`
+wins for the contested field.** A Lamport counter is a *logical* clock, not a
+wall clock, so this is usually — but not always — the later edit: a device that
+has been offline all morning ticks fifteen items (lamport 1–15) and will
+outrank an online device that changed one quantity (lamport 3). The tiebreak is
+the device id, not a timestamp.
+
+**The losing edit is shown to the user** rather than disappearing, and the
+"Needs attention" card names the winning device — it must never imply
+recency.
 
 **Technical handling.** Each operation carries the `baseVersion` the editor saw.
 The server compares it against the row's current `version` and `field_meta`. A
@@ -418,16 +428,23 @@ already-acknowledged members are duplicates, the remainder is applied.
 
 ### SC-09 — The same mutation is submitted multiple times
 
-**Expected behaviour.** The user sees no duplication. A double-tap on "Add"
-creates one item, not two.
+**Expected behaviour.** The user sees no duplication. **A double-tap on "Add"
+creates one item, not two.**
 
 **Technical handling.** `opId` is the idempotency key. The server inserts into
 `sync_operations`, whose **primary key is `op_id`**; a duplicate insert fails
 and the server returns the cached `result` with `duplicate: true`. The client
 generates a fresh `opId` per user action, so two genuine "Add" taps are two
 genuine operations — the protection is against *retransmission*, not against
-the user pressing the button twice. The client's button is additionally disabled
-while the action is in flight.
+the user pressing the button twice.
+
+**The Add control is disabled for the duration of the local commit.** Offline
+there is no network round trip to be "in flight of", but the local commit is
+still asynchronous (an IndexedDB transaction), so a double-tap can otherwise
+enqueue two creates before the first commits — and SC-06's rule that duplicates
+are never merged means both would survive forever. Disabling the control for
+the duration of the local commit is what makes the promise true offline as well
+as online.
 
 **Acceptance criteria.**
 - The same `opId` submitted 10 times applies exactly one change.
@@ -619,14 +636,30 @@ the count is returned in the sync response.
 
 1. The shopper opens the app. The list appears **immediately** from local storage
    — no spinner, no network wait, even with no signal.
-2. A persistent status chip in the header shows one of:
+2. A persistent status chip in the header shows exactly one of these states:
    - `Up to date` (neutral) — nothing pending.
    - `Syncing…` (neutral) — a sync is in flight.
-   - `N changes pending` (warning) — queued edits are waiting for a connection.
-   - `Offline — N changes pending` (warning) — no connection.
-   - `Sign in to sync` (danger) — the session expired; local data is still safe.
+   - `N changes pending` (neutral) — queued edits are waiting for a connection.
+   - `Offline` (neutral) — no connection and nothing queued.
+   - `Offline · N changes pending` (neutral) — no connection, with queued edits.
+   - `Sign in to sync · N pending` (neutral) — the session expired; local data is still safe.
+   - `N need attention` (warning) — conflicts or rejected changes need a decision.
+   - `Sync failed — Retry` (danger) — the last sync attempt failed.
+   - `Can't save changes` (danger) — local storage is unavailable or full.
+
+   Only the last three are styled as warnings or danger. `N changes pending`
+   and `Offline` are **neutral**: having unsynchronised work is the normal
+   state of an offline-first app, not an error, and styling it as a warning
+   would train the shopper to ignore the chip.
+
+   The chip is a **button**: it opens "Needs attention" when there are
+   conflicts, and otherwise triggers a sync. Below 400 px it collapses to an
+   icon plus the count. It MUST NOT read `Up to date` before IndexedDB has
+   been read — that would claim a state the app has not yet established.
 3. The shopper adds items. Each appears instantly and stays on screen.
-4. The shopper ticks items off. Ticks appear instantly.
+4. The shopper ticks items off. Ticks appear instantly and **the item stays in
+   place, dimmed and struck through**. A checked item is never moved out of its
+   group (§6.3).
 5. The shopper closes the app. Nothing is lost.
 6. Later, on a connection, the app syncs silently in the background.
 
@@ -642,8 +675,98 @@ the count is returned in the sync response.
 | Two devices edited the same field | **Yes** — a conflict entry showing both values with the winner, and a one-tap choice to keep yours. |
 | Storage is unavailable or full | **Yes** — a blocking banner explaining that changes cannot be saved, with an explicit export option. |
 | The session expired while offline | **Yes** — a banner: `Sign in to sync. Your list is safe on this device.` |
+| An item is checked | **No** toast — the row shows a brief inline undo strip, because the row does not disappear from its position. |
+| The user taps **Undo** after a local edit | **Yes** — a 5-second inline undo strip on the affected row, for add / check / uncheck / delete / archive-checked. Undo is itself a local operation in the outbox, never a second network call. |
+| An item is unchecked | **No** toast. The row returns to full contrast in place. |
+| A destructive action is confirmed | **Yes** — an accessible confirmation dialog, never `window.confirm`. |
 
-### 6.3 Explicitly forbidden UX
+### 6.3 Where a checked item goes — and undo
+
+**Checked items stay in place.** This is a change from the current behaviour,
+and it is the single most important in-aisle fix in this document.
+
+Today a checked item **leaves its position**: `ShoppingList.tsx:169-173`
+partitions the list on `isChecked`, and `ShoppingList.tsx:636` renders the
+completed items in a separate section at the bottom. The shopper taps the item
+they just put in the trolley and the row vanishes from under their thumb,
+reappearing in a different place further down the screen. In a grocery aisle,
+with one hand and a trolley, that is a mis-tap generator.
+
+📋 **SPEC**: during a trip, **a checked item stays in its position in the list,
+dimmed and struck through** — the style already exists at `ItemRow.tsx:67-69`,
+but today it is only ever seen in the bottom section. **No item leaves its
+category group.**
+
+The bottom "Completed (N)" section becomes a **summary, not a second copy**: it
+reports how many items have been collected and provides the action to clear
+them, but it does not re-list the items. The active list grows as the shopper
+works, so the summary is collapsed by default.
+
+The reason is spatial: in an aisle the list is a physical checklist and the
+shopper navigates by position ("the 4th thing"). Moving a row destroys that
+memory. It is also a correctness problem under `useLiveQuery` — when *another
+device* checks an item, the current design reflows the list under the
+shopper's finger.
+
+Consequently "Clear completed" is renamed **"Archive checked items"**, is
+triggered from the summary, and shows a confirmation with the count. Archiving
+sets `archivedAt` — it is **never** a delete.
+
+> **Product decision D-7.** This is a behaviour change, not a pure refactor,
+> and it is flagged for the product owner. The alternative — keeping today's
+> behaviour but not collapsing the section, so the item stays visible in a
+> pinned "Completed" tray — preserves the current mental model at the cost of
+> the extra screen furniture.
+
+**Undo.** The two most common in-aisle errors are ticking the wrong row and
+double-tapping, and both must be recoverable without navigating away.
+
+| Action | Undo window | Behaviour |
+| --- | --- | --- |
+| Check or uncheck an item | 5 seconds | An inline "Undone" affordance appears on the row itself, with a text alternative for screen readers. |
+| Add an item | 5 seconds | The new row offers an inline undo before the outbox entry is created. |
+| Delete an item | Until the row is dismissed | The row is removed and replaced by an inline "Item deleted · Undo" strip. The undo **re-queues the delete as a restore operation** (a tombstone is cleared), so it works identically offline. |
+| Clear completed (bulk) | Until the confirmation is dismissed | The same inline strip, undoing the whole bulk action as a bulk restore. |
+
+**Undo is an operation, not a UI trick.** An undo of a delete is an
+`item.restore` operation, and an undo of a bulk clear is an `item.bulkRestore`.
+That means undo works offline, syncs correctly, and conflicts with a
+concurrent delete under the normal §11 rules. A purely client-side undo would
+diverge from the server the moment the shopper went offline.
+
+### 6.4 Client-render regressions that must be designed for
+
+Moving the shopping surface to a client render from IndexedDB (§7.4) is the
+right trade — losing the SSR fast path is worth it for a shopper in a basement
+store — but it introduces three regressions that must be designed for, not
+discovered later:
+
+**(a) Incoming changes must not reflow the list under the finger.** When a
+remote device checks an item, the reactive query re-renders the list. If the
+row is removed or moved, the shopper's next tap lands on the wrong item. Rows
+therefore keep their position (§6.3) and the list is never re-partitioned by a
+remote change. Where a remote change *would* move a row, the change is applied
+at the next boundary — a filter change or a reload — not immediately.
+
+**(b) The chip must not render "Up to date" before IndexedDB has been read.**
+Before the local database is opened, the app knows nothing about pending work.
+The chip shows a neutral loading state until the first read completes, then
+renders one of the nine states in §6.1.
+
+**(c) The empty state must distinguish three cases.** Today's single message —
+"Your list is empty. Add your first item below." (`ShoppingList.tsx:550`) — is
+wrong in two of the three:
+
+| Case | Message |
+| --- | --- |
+| The household has no items | `Your list is empty. Add your first item below.` |
+| The household has never been downloaded on this device | `This household hasn't been downloaded on this device yet. Connect to download it.` (§10.6) |
+| The local read or the bootstrap failed | `Couldn't load your list.` with a **Retry** action. |
+
+Showing "your list is empty" when the truth is "we have not loaded your list"
+is the worst of the three: the shopper concludes they have nothing to buy.
+
+### 6.5 Explicitly forbidden UX
 
 - ❌ A toast that says `Failed to add item` when the item was actually added locally.
 - ❌ A spinner that blocks the list because the network is slow.
@@ -652,7 +775,7 @@ the count is returned in the sync response.
   existing `AlertDialog` component — `window.confirm` is used at
   `ShoppingList.tsx:489` and must be replaced.
 
-### 6.4 Mobile requirements (mobile Safari and Chrome)
+### 6.6 Mobile requirements (mobile Safari and Chrome)
 
 - Minimum touch target **44 × 44 px** — the project's own research flags sub-44px
   targets as a documented grocery-aisle hazard (`.planning/research/PITFALLS.md:82-100`).
@@ -812,9 +935,15 @@ db.version(1).stores({
   stores:     "id, householdId, name",
   outbox:     "opId, householdId, state, createdAt",
   conflicts:  "id, householdId, entityId, createdAt",
+  households: "id",
   meta:       "key",
 });
 ```
+
+`households` holds the signed-in user's household list (`id`, `name`). It is the
+**only store not partitioned by `householdId`** — it is the index of partitions,
+not a partition. It is what makes offline household switching (§12.4) and the
+"not downloaded on this device" state (§10.6) possible at all.
 
 ### 8.2 Record shapes
 
@@ -835,6 +964,7 @@ type LocalItem = {
   updatedBy: string | null;   // userId of last editor
   lamport: number;            // ordering clock last applied to this row
   pending: boolean;           // has unsynchronised local changes
+  pendingFields: string[];    // fields touched by the pending local op(s)
 };
 
 type OutboxOp = {
@@ -842,16 +972,59 @@ type OutboxOp = {
   householdId: string;
   entityType: "item" | "category" | "store";
   entityId: string;
-  type: "create" | "update" | "delete" | "restore" | "archive" | "bulkArchive";
+  type:
+    | "create"
+    | "update"
+    | "delete"
+    | "undelete"
+    | "check"
+    | "setStoreTags"
+    | "archive"
+    | "unarchive"
+    | "bulkArchive";
   baseVersion: number;       // server version the client believed it was editing
   lamport: number;           // client's Lamport counter for this household
-  payload: Record<string, unknown>;
+  payload: OutboxPayload;    // typed per operation type — see below
   state: "pending" | "inflight" | "failed" | "blocked";
   attempts: number;
   lastError: string | null;
   createdAt: number;
 };
 ```
+
+**The operation type is not a free-form string.** §11 resolves `check` and
+`setStoreTags` by different rules from a plain `update`, so the type must be
+distinguishable — a single `update` cannot carry that.
+
+**`undelete` and `unarchive` are different operations.** `undelete` clears a
+*delete* tombstone; `unarchive` restores an *archived* item from History (the
+existing "re-add from History" flow). They have the same visible effect but
+different semantics, and an implementer who conflates them will resurrect a
+deleted item.
+
+**The payload is a discriminated union, not `Record<string, unknown>`.** An
+untyped payload is how an implementer ends up sending `storeIds` on an
+operation that ignores them:
+
+```ts
+type OutboxPayload =
+  | { name: string; quantity?: string | null; note?: string | null;
+      categoryId?: string | null; storeIds?: string[] }              // create
+  | { name?: string; quantity?: string | null; note?: string | null;
+      categoryId?: string | null }                                   // update
+  | { isChecked: boolean }                                          // check
+  | { storeIds: string[] }                                          // setStoreTags
+  | { fields: string[] }                                            // delete / undelete
+  | { baseVersion: number }                                         // archive / bulkArchive
+  | { field: string; value: unknown; serverValue: unknown }         // override (Keep mine)
+  ;
+```
+
+**`pendingFields` is what makes §10.7 implementable.** A single `pending`
+boolean cannot tell the client *which* fields a pending operation touched, so
+the rule "the server's change does not overwrite the local pending value for
+the fields the local op touched" could not be applied. `pendingFields` is the
+union of the fields touched by the row's outstanding operations.
 
 ### 8.3 Why UUIDv7 for client-generated ids
 
@@ -891,6 +1064,7 @@ type OutboxOp = {
 | `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata: `{"name": {"v": 4, "lamport": 12, "device": "d-…"}}`. Enables per-field conflict resolution without a separate table. |
 | `updated_by` | `text` nullable → `user.id` | Who last changed the row. |
 | `lamport` | `bigint` not null default 0 | Highest Lamport value applied to this row. |
+| `last_op_id` | `uuid` nullable | The `opId` of the operation that last wrote this row. Set by the compare-and-swap in the same batch. The change-log append and the idempotency record are guarded on `last_op_id = $opId`, which is what proves that *this* operation is the one whose write landed — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
 
 `is_active` is **retained but deprecated**; it is kept in step with `deleted_at`
 for one release and removed in a later migration. This avoids a risky
@@ -902,7 +1076,7 @@ The current code conflates the two (defect B-11); 📋 **SPEC** separates them.
 
 **`stores`, `categories`** — additive only:
 `version integer not null default 1`, `field_meta jsonb not null default '{}'`,
-`updated_by text nullable`.
+`updated_by text nullable`, `last_op_id uuid nullable`.
 
 ### 9.2 New tables
 
@@ -1038,6 +1212,7 @@ about, and the pull that follows includes the outcome of that operation.
       "entityType": "item",
       "entityId": "uuid-v7",
       "type": "item.update",    // one of the operation types in §10.1a
+      "override": false,        // true = explicit user decision, bypasses LWW for the field
       "baseVersion": 12,        // server version the client edited from
       "lamport": 88,
       "payload": { "quantity": "2 kg", "name": "Milk" },
@@ -1103,6 +1278,7 @@ exactly one of these strings, and §11's conflict rules are keyed to them.
 | --- | --- | --- | --- |
 | `item.create` | item | `name`, `quantity`, `note`, `categoryId`, `storeIds` | Server accepts the client id; idempotent on `opId`. |
 | `item.update` | item | any of `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`; the losing value is reported as a conflict. |
+| `item.override` | item | `field`, `value`, `serverValue` | **Bypasses LWW** for the named field and applies unconditionally. This is the "Keep mine" action (§11.2) — a user decision, not a race. |
 | `item.check` | item | `isChecked` (boolean) | **Check-wins** (§11). |
 | `item.storeTags` | item | `storeIds` (array) | **Add-wins** for concurrent additions; a removal applies only against a base that contained the tag. |
 | `item.delete` | item | — | **Delete-wins**, terminal tombstone. |
@@ -1192,6 +1368,14 @@ pulled changes second, subject to the pending-field rule in §10.7.
 4. The client crashes mid-request → on restart the outbox still holds every
    un-acknowledged op → they are re-sent → duplicates → resolved.
 
+**Clock merge.** The client sets `lamport = max(localLamport, serverClock) + 1`
+for every operation it creates after a sync, and the server sets
+`row.lamport = max(row.lamport, op.lamport)` when applying. A Lamport counter
+never goes backwards, so an operation created after the client has seen the
+server's clock always outranks operations the client has not yet seen. Without
+this rule a "fresh" lamport is only fresh relative to the *local* counter, so
+"Keep mine" could re-queue a value that still loses.
+
 ### 10.4 Retry and backoff
 
 - Exponential backoff with jitter: 1 s, 2 s, 4 s, 8 s, 16 s, 30 s (cap).
@@ -1239,11 +1423,16 @@ local rows marked no longer pending; rejected operations move to
 2. Else → upsert the snapshot.
 3. If the local row has `pending = true` (a local edit not yet acknowledged),
    **the server's change does not overwrite the local pending value for the
-   fields the local op touched**. The local edit stays queued; the server value
-   is stored as the op's `baseVersion` context for conflict detection. If the
-   server's change touches a *different* field, it is applied immediately —
-   this is what lets "one device checks an item while another edits its
-   quantity" merge cleanly.
+   fields named in `pendingFields`**. The local edit stays queued; the server
+   value is retained as the op's conflict context. If the server's change
+   touches a *different* field, it is applied immediately — this is what lets
+   "one device checks an item while another edits its quantity" merge cleanly.
+4. **The local row's `version` advances to the server's version even when the
+   server's *value* is withheld.** The server has already bumped the row's
+   `version`; if the client does not advance its own `version` to match, every
+   subsequent operation the client creates carries a stale `baseVersion` and
+   will spuriously conflict. `version` tracks *what the client has seen*, not
+   *which values it has accepted*.
 
 **The phases must not be interleaved.** Resolving the outbox first is what
 makes rule 3 correct: by the time the pulled changes are applied, the client's
@@ -1307,8 +1496,27 @@ Milk — quantity differs
   [Keep mine]  [Use theirs]  [Dismiss]
 ```
 
-"Keep mine" re-queues the local value with a fresh `lamport` so it wins.
-"Dismiss" accepts the server value. Both are recorded.
+**"Keep mine" is a user decision, not a race.** It does **not** re-queue the
+losing value as an ordinary operation, because that would re-enter the same
+comparison that just lost and could lose again — the shopper would click
+"Keep mine" and see no effect. Instead it sends an explicit **override**
+operation carrying `override: true`, which bypasses the last-write-wins
+comparison for the contested field and is applied unconditionally. It is
+recorded like any other operation, so it syncs and can itself be overridden by
+a later explicit user decision.
+
+**"Use theirs"** accepts the server value and discards the local one.
+**"Dismiss"** leaves the conflict unresolved but removes it from the panel;
+the local value is not applied.
+
+**Undo and "Keep mine" are different things and must not be conflated.**
+Undo reverses *your own last action* and is a local operation in the outbox
+(§6.3). "Keep mine" wins a field that *another device* contested (§11). A
+conflict card offers "Keep mine"; a row offers Undo. Neither implies the
+other.
+
+The card MUST name the **winning device**, never imply recency — the winner
+is decided by a logical clock, not by wall-clock time (§5, SC-03).
 
 ---
 
@@ -1318,9 +1526,11 @@ Milk — quantity differs
 
 - **Better Auth is retained** for credential handling, session cookies, and the
   organization plugin.
-- Sessions are 30-day sliding (existing behaviour). 📋 **SPEC**: the session
-  token is additionally cached locally (`meta` store) so the client can display
-  the signed-in identity and household name while offline.
+- Sessions are 30-day sliding (existing behaviour). 📋 **SPEC**: the signed-in
+  **identity** (user id, name, email) and the household list are cached locally
+  so the client can display them while offline. **The session token is never
+  written to local storage** — it is not needed to render the header, and
+  writing it would widen the impact of any script-injection flaw in the page.
 - **The client never trusts the cached session for authorization.** Every API
   call is authorized server-side. The cached session exists only so the UI can
   render a correct header offline.
@@ -1583,7 +1793,8 @@ degrade to a clear, blocking message rather than a silent failure.
 - Legacy rows' ids and content are unchanged by the migration.
 
 **Browser E2E (Playwright)**
-- **Offline cold start**: with the network off, open the app → the list renders
+- **Offline cold start**: with the network off **and the local database and
+  service-worker cache already populated**, open the app → the list renders
   from IndexedDB with no error page.
 - **Offline add / edit / check / delete**: all four are applied locally, survive a
   reload, and survive a browser restart.
@@ -1679,7 +1890,7 @@ The existing `perf-audit.yml` schedule is kept.
 | **ADR-11** | **Keep Next.js, Better Auth, Drizzle, and PostgreSQL.** | They are used well and are not the problem. The problem is the data-ownership model, not the tools. | A different framework — large, risky, and buys nothing for this problem. |
 | **ADR-12** | **Server-side authorization is authoritative and role-checked. Tenant isolation is enforced by a single application-layer scope helper, NOT by PostgreSQL row-level security.** | The current join-link gap (S-1) is a UI-only check, so isolation must be enforced on the server. **RLS is deliberately excluded.** On the Neon HTTP driver, each statement is an independent request with no session state: a policy would need `current_setting('app.current_household')`, which can only be set inside a transaction and cannot be relied upon to persist across the separate queries a request makes. A policy written fail-open silently returns every row; one written fail-closed silently returns none. Either way RLS would give the *appearance* of defence in depth while behaving unpredictably — worse than not having it, because it suppresses the care the application-layer check actually needs. A single scope helper that every query must pass through, plus an integration test that asserts a cross-household read returns 404, is honest and testable. | *RLS as a second layer* — unreliable on the retained driver (see rationale); it would create false confidence rather than real isolation. *UI-only checks* — already proven insufficient. |
 | **ADR-13** | **Integration tests run against a real PostgreSQL, not a mocked `db`.** | The current fake `db` ignores `where()` clauses, so the codebase's tenant-isolation predicates are entirely untested. The `DB_DRIVER` switch already exists (`src/db/index.ts:16-19`). | Continuing to mock the database — it cannot verify isolation, constraints, or migrations. |
-| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap.** The batch's first statement takes a per-household transaction-scoped advisory lock; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`), and inserts the change-log row **only if that update matched**; the third records the idempotency key. | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Three constraints force this shape. (1) The Neon HTTP driver throws on `db.transaction()`, so the apply must use `db.batch()`, which maps to Neon's atomic HTTP batch transaction. (2) A batch executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. The CTE makes the change-log insert conditional on the compare-and-swap having matched, so a failed compare-and-swap leaves no orphan log entry. | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. The Neon WebSocket driver (interactive transactions) remains the fallback if the batch approach proves insufficient in Phase 2. |
+| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap that also stamps the row with the id of the operation that wrote it.** The batch's first statement takes a per-household transaction-scoped advisory lock; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`) **and sets `last_op_id = $opId`**; the change-log append and the idempotency record are then guarded on `last_op_id = $opId`. | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Four constraints force this shape. (1) The Neon HTTP driver throws on `db.transaction()`, so the apply must use `db.batch()`, which maps to Neon's atomic HTTP batch transaction. (2) A batch executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. (4) **The change-log append must be guarded on the operation, not on the version.** Two different operations can both read `version = 12`; the winner writes `version = 13`, and the loser's compare-and-swap updates zero rows — but a change-log insert written as `INSERT … SELECT … FROM items WHERE id = $1 AND version = 13` matches the **winner's** row and appends a second entry for one logical change, so the change log stops being a faithful total order and the pulled `changes[]` contains the same entity twice. There is no shortcut via a unique constraint: `UNIQUE (op_id, entity_id)` does not help, because the two racing operations have *different* `opId`s. The row itself must carry the id of the operation that wrote it — hence `last_op_id` (§9.1). | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. Guarding the change-log insert on `version` alone — a losing operation appends a duplicate entry for the winner's write. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. The Neon WebSocket driver (interactive transactions) remains the fallback if the batch approach proves insufficient in Phase 2. |
 | **ADR-15** | **Service worker caches the static shell and hashed assets only — never an API response.** | The shell is identical for all users (no user data), so it caches safely and enables offline boot. API responses are per-user and per-household; caching them risks cross-account data leakage on a shared device. | Caching API responses — data-leak risk on shared devices and stale-data bugs. |
 
 ---
@@ -1692,7 +1903,7 @@ The recovery is complete when **all** of the following are demonstrably true.
 
 | # | Criterion | How it is proven |
 | --- | --- | --- |
-| AC-01 | With the network disabled, the dashboard renders the household's list with no error page and no spinner longer than 300 ms. | Playwright offline test + timing assertion |
+| AC-01 | With the network disabled **and the local database and service-worker cache already populated**, the dashboard renders the household's list with no error page and no spinner longer than 300 ms. | Playwright offline test + timing assertion |
 | AC-02 | With the network disabled, adding, editing, checking, and deleting items all work and are visible immediately. | Playwright offline test |
 | AC-03 | Edits made offline survive a page reload and a full browser restart. | Playwright: offline → edit → reload → restart → assert |
 | AC-04 | The service worker is installed and the app is installable (a valid `manifest.webmanifest` is served with the required fields and icons). | Manifest assertion + Lighthouse PWA category |
@@ -1745,6 +1956,10 @@ The recovery is complete when **all** of the following are demonstrably true.
 | AC-28 | All interactive targets are ≥ 44 × 44 px, verified by an automated audit of the rendered dashboard. |
 | AC-29 | The quick-add flow is usable on a 375 × 667 viewport without horizontal scrolling or a sub-100 px name field. |
 | AC-30 | `window.confirm` is gone; destructive actions use an accessible confirmation dialog. |
+| AC-31 | A checked item stays in its position in the list, dimmed, and never leaves its category group. A remote device checking an item does not reflow the list under the shopper's finger. |
+| AC-32 | Undo works **offline** for add, check, uncheck, delete, and archive-checked, and is itself an outbox operation — an undone delete is an `item.undelete` that syncs, not a client-only reversal. |
+| AC-33 | The empty state distinguishes *empty* / *not downloaded on this device* / *couldn't load, retry*. A household that has never been downloaded is never told its list is empty. |
+| AC-34 | The status chip renders exactly one of the nine states in §6.1, never reads `Up to date` before IndexedDB has been read, and "Keep mine" always wins the contested field (it is an override, not a race). |
 
 ---
 

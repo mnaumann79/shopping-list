@@ -66,7 +66,7 @@ it at the end of Phase 2** — after that it is read-only for everyone.
 | Owned exclusively by | Paths |
 | --- | --- |
 | **Lead** | `docs/**`, `src/shared/**` (contract types), `ARCHITECTURE/**` (ADRs) |
-| **Backend** | `src/server/**`, `src/app/api/**`, `src/lib/auth.ts`, `src/lib/request-auth.ts`, `src/lib/auth-client.ts` |
+| **Backend** | `src/server/**`, `src/app/api/**`, `src/lib/auth.ts`, `src/lib/request-auth.ts`, `src/lib/auth-client.ts`, `src/lib/categories.ts` |
 | **Database** | `src/db/**`, `db/**` |
 | **Frontend** | `src/client/**`, `src/app/**` (non-`api`), `src/components/**`, `src/lib/toast.ts`, `src/lib/utils.ts`, `public/**` |
 | **Shared CI / scripts** | `.github/workflows/**`, `scripts/**`, `playwright.config.ts`, `vitest.config.ts`, `package.json`, `e2e/**` — **one owner per task**, named explicitly in each phase |
@@ -411,20 +411,23 @@ network for domain data** (INV-01, INV-05, INV-06).
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
-| 4.1 | Add the Dexie local database: schema, versioned migrations, and a `meta` store (local schema version, app version, cached session, device id) | Frontend | `src/client/db/**` |
-| 4.2 | Implement the repository layer: local CRUD that writes the record **and** enqueues the operation in one IndexedDB transaction (INV-03) | Frontend | `src/client/db/repository.ts` |
+| 4.1 | Add the Dexie local database: schema, versioned migrations, a `meta` store (local schema version, app version, cached identity, device id), and a `households` store holding the signed-in user's household list (`id`, `name`). The household list is what makes offline household switching possible and must exist from Phase 4, not Phase 6 | Frontend | `src/client/db/**` |
+| 4.2 | Implement the repository layer: local CRUD that writes the record **and** enqueues the operation in one IndexedDB transaction (INV-03). Catch and **propagate** `QuotaExceededError` at this boundary — Phase 4 must not swallow it, or Phase 6's banner has nothing to hook | Frontend | `src/client/db/repository.ts` |
 | 4.3 | Implement the outbox: operation creation, the Lamport clock, `baseVersion` capture, and the `pending / inflight / failed / blocked` state machine | Frontend | `src/client/db/outbox.ts`, `src/client/sync/clock.ts` |
-| 4.4 | Implement `useLiveQuery`-based reactive reads; convert `ShoppingList`, `ItemRow`, `ItemDialogs`, `QuickAddBar`, `HistoryList` to read from the local store | Frontend | `src/app/(app)/dashboard/_components/**`, `src/app/(app)/history/_components/**` |
-| 4.5 | Convert the dashboard and history routes to **static shells**: remove the server-side session fetch from the layout, add a client-side auth gate, and keep server-side authorization on every API | Frontend | `src/app/(app)/layout.tsx`, `src/app/(app)/dashboard/page.tsx`, `src/app/(app)/history/page.tsx` |
-| 4.6 | Implement the bootstrap path: on an empty local database, pull the full household snapshot and write it to IndexedDB before the first list render | Frontend | `src/client/sync/bootstrap.ts` |
+| 4.4 | Implement `useLiveQuery`-based reactive reads; convert `ShoppingList`, `ItemRow`, `ItemDialogs`, `QuickAddBar`, `HistoryList` to read from the local store. Implement the three distinct empty states — *empty* / *not downloaded on this device* / *couldn't load, retry* (§6.4 (empty states)) | Frontend | `src/app/(app)/dashboard/_components/**`, `src/app/(app)/history/_components/**` |
+| 4.5 | Convert the dashboard and history routes to **static shells**: remove the server-side session fetch from the layout **and** from `dashboard/page.tsx` and `history/page.tsx` (each currently calls `getRequestSession()` and redirects), add a client-side auth gate, stop passing `userName` in from the server session (`AppHeader.tsx` takes it as a prop today), stop pre-formatting history labels on the server, and keep server-side authorization on every API | Frontend | `src/app/(app)/layout.tsx`, `src/app/(app)/dashboard/page.tsx`, `src/app/(app)/history/page.tsx`, `src/components/AppHeader.tsx` |
+| 4.6 | Implement the bootstrap path: on an empty local database, pull the full household snapshot and write it to IndexedDB before the first list render, distinguishing *not downloaded* from *bootstrap failed* (§6.4 (empty states)) | Frontend | `src/client/sync/bootstrap.ts` |
 | 4.7 | Add the static lint rules that enforce INV-01 / INV-05 / INV-06 (no `fetch` in components; domain reads only via the repository) | Frontend | `eslint.config.mjs` |
 | 4.8 | Component tests with `fake-indexeddb`: a write commits locally with the network blocked; the write and the outbox entry land together; a failed transaction leaves neither | Frontend | `src/client/**/__tests__/**` |
+| 4.9 | Build the **basic** sync status chip — `Up to date`, `N changes pending`, `Offline`, `Offline · N changes pending`, `Sign in to sync · N pending` — reading from the local outbox, never from the network. It must not read `Up to date` before IndexedDB has been read (§6.4 (chip readiness)). The states that depend on the sync engine land in Phase 6 (task 6.3) | Frontend | `src/components/**`, `src/app/(app)/dashboard/_components/**` |
 
 ### Deliverables
 
 - The dashboard renders from IndexedDB.
 - Add / edit / check / delete work with the network blocked and are visible
   immediately.
+- The basic sync status chip is present and truthful (the states that need the
+  sync engine arrive in Phase 6).
 - A reload with the network blocked shows the same list.
 - The outbox holds every unacknowledged operation, durably.
 - The lint rules fail the build if a component reintroduces a network call for
@@ -552,7 +555,7 @@ situations without losing data.
 | --- | --- | --- | --- |
 | 6.1 | Write `public/manifest.webmanifest` with the required fields and icons (180 px, 512 px, maskable), add `apple-touch-icon`, and the iOS meta tags | Frontend | `public/**`, `src/app/layout.tsx` |
 | 6.2 | Rewrite the service worker: precache the static shell, cache hashed assets, **network-first with a cached fallback for navigations**, never cache API responses, and add an update flow (`skipWaiting` + a "new version available — reload" prompt rather than a silent reload that could interrupt an edit) | Frontend | `public/sw.js`, `src/app/providers.tsx` |
-| 6.3 | Build the sync status chip: `Up to date` / `Syncing…` / `N changes pending` / `Offline — N changes pending` / `Sign in to sync` | Frontend | `src/components/**`, `src/app/(app)/dashboard/_components/**` |
+| 6.3 | Complete the sync status chip with the states that only exist once the sync engine is running (`Syncing…`, `Sync failed — Retry`, `N need attention`, `Can't save changes`), and implement its collapsed icon-plus-count form below 400 px. The chip's basic states land in Phase 4 (task 4.9) | Frontend | `src/components/**`, `src/app/(app)/dashboard/_components/**` |
 | 6.4 | Implement the sign-out protection dialog (FR-29, scenario 11) with the three options: sync first / keep a local copy / discard | Frontend | `src/app/(app)/**`, `src/client/**` |
 | 6.5 | Implement offline household switching (scenario 12): switch instantly to a cached household; show an explicit "not downloaded on this device" state for an uncached one | Frontend | `src/components/household-switcher.tsx`, `src/client/**` |
 | 6.6 | Handle session expiry while offline (scenario 13): keep the app fully usable, show `Sign in to sync`, never destroy local data | Frontend | `src/client/**`, `src/app/(app)/**` |
@@ -560,14 +563,18 @@ situations without losing data.
 | 6.8 | Mobile pass: 44 px touch targets, safe-area insets, the quick-add bar reflowed for a 375 px viewport, `viewport-fit=cover` | Frontend | `src/app/(app)/dashboard/_components/**`, `src/app/globals.css` |
 | 6.9 | Add the offline Playwright scenarios: offline cold start, offline reload, offline mutations, offline restart, session expiry, sign-out with pending work, household switch offline | Frontend | `e2e/offline/**` |
 | 6.10 | Add the "manage your devices" surface (household settings) listing known devices and their last-seen time | Frontend + Backend | `src/app/(app)/household/settings/**`, `src/app/api/households/**` |
+| 6.11 | Implement the in-aisle interaction model (`docs/project.md` §6.3): a checked item **stays in place**, dimmed, and never leaves its category group; the bottom "Completed (N)" becomes a collapsed **summary** with an "Archive checked items" action and a count confirmation; and the 5-second inline **undo** strip for add / check / uncheck / delete / archive — where undo is itself an outbox operation (`item.undelete`, `item.unarchive`, `item.bulkArchive`), never a UI-only trick | Frontend | `src/app/(app)/dashboard/_components/**`, `src/client/db/outbox.ts` |
 
 ### Deliverables
 
 - The app is installable on iOS and Android.
-- With the network disabled, a cold start renders the household's list.
+- With the network disabled **and the local database and service-worker cache
+  already populated**, a cold start renders the household's list.
 - Every scenario in `docs/project.md` §5's scenario list (1–18) has a defined
   behaviour and an automated test.
 - The status chip is always truthful.
+- A checked item stays in place, and undo works offline for every reversible
+  action.
 - Touch targets and layout pass an automated audit.
 
 ### Dependencies
@@ -747,3 +754,4 @@ assessment; the ones that block work are here.
 | D-4 | Confirm that deleting an item makes it recoverable from History (today it does not) and that "clear completed" remains separately recoverable. | Phase 1.6 |
 | D-5 | Confirm the sign-out behaviour when unsynchronised changes exist: block, or allow with an explicit choice? | Phase 6.4 |
 | D-6 | Confirm whether a household admin may see other members' devices, and whether that list is in scope for the first release. | Phase 6.10 |
+| D-7 | **Confirm that a checked item stays in place** (dimmed, struck through) rather than moving to a "Completed" section at the bottom of the list. This is the single most important in-aisle change in the plan: today a tick makes the row **leave its position**, so the shopper taps an item and it disappears from under their thumb. Recommendation: keep it in place, and turn the bottom section into a collapsed summary with an "Archive checked items" action. The alternative — today's behaviour, with the section not collapsed — preserves the current mental model at the cost of the extra screen furniture | Phase 6.11 |
