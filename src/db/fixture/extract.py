@@ -18,7 +18,7 @@ DOC = REPO / "docs" / "project.md"
 
 def extract(doc_path=None):
     """Return {name: sql} for the three §10.8 statements."""
-    doc = pathlib.Path(doc_path or DOC).read_text()
+    doc = pathlib.Path(doc_path or DOC).read_text(encoding="utf-8")
     blocks = [m.group(1) for m in re.finditer(r"```sql\n(.*?)```", doc, re.S)]
 
     def find(pred, what):
@@ -52,7 +52,7 @@ def check_against_references():
     """
     out = {}
     for name, sql in extract().items():
-        reference = (HERE / name).read_text()
+        reference = (HERE / name).read_text(encoding="utf-8")
         out[name] = (sql.strip() == reference.strip(), sql)
     return out
 

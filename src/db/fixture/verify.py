@@ -14,8 +14,9 @@ statements against the platform they will actually run on:
     DATABASE_URL=postgresql://... python3 src/db/fixture/verify.py
 
 The schema is created by schema.sql, which reproduces the specification's own
-§9 DDL - including an `auth` schema, because the target environment is a
-Supabase instance and the statements reference `auth.users`.
+§9 DDL in the fixture's own schema (`fixture`), so the fixture cannot touch
+another schema's objects. `--reset-schema` drops that schema and rebuilds
+it; the default path only creates what is missing.
 """
 import pathlib, subprocess, sys, os, json, tempfile
 
@@ -29,6 +30,15 @@ DATABASE_URL = os.environ.get(
 )
 DB = "auditsync"
 
+# The fixture owns ONE schema - `fixture` - and every statement reaches it
+# through the search path. Nothing else is visible to a statement, so it
+# cannot touch another schema's tables by accident.
+os.environ["PGOPTIONS"] = "-c search_path=fixture"
+
+# The destructive path: drop the fixture's schema and rebuild it from
+# schema.sql. It is opt-in, because dropping a schema is destructive.
+RESET_SCHEMA = "--reset-schema" in sys.argv[1:]
+
 def psql_args(extra):
     """psql arguments for the target database."""
     return ["psql", DATABASE_URL, "-t", "-A", "-F", "|"] + extra
@@ -39,7 +49,7 @@ def psql_args(extra):
 _WORK = pathlib.Path(tempfile.mkdtemp(prefix="sync-fixture-"))
 _EXTRACTED = fixture_extract.extract()
 for _name, _sql in _EXTRACTED.items():
-    (_WORK / _name).write_text(_sql)
+    (_WORK / _name).write_text(_sql, encoding="utf-8")
 ITEM_STMT = os.environ.get("ITEM_STMT", str(_WORK / "apply-item.sql"))
 CREATE_STMT = os.environ.get("CREATE_STMT", str(_WORK / "apply-create.sql"))
 LEDGER_STMT = os.environ.get("LEDGER_STMT", str(_WORK / "apply-ledger.sql"))
@@ -65,7 +75,7 @@ def reset():
     q("DELETE FROM items;")
     q("DELETE FROM categories;")
     q("DELETE FROM stores;")
-    q("""INSERT INTO auth.users (id, email, raw_user_meta_data)
+    q("""INSERT INTO users (id, email, raw_user_meta_data)
            VALUES ('%s','t@example.com','{"name":"Tester"}'::jsonb)
            ON CONFLICT DO NOTHING;""" % ACTOR)
     q("""INSERT INTO households (id, name, created_by) VALUES ('%s','Household','%s')
@@ -107,10 +117,10 @@ def run(overrides=None, stmt=ITEM_STMT, ledger=True):
     The ledger statement DERIVES its own envelope from the rows the batch
     wrote; nothing is assembled in the request layer and passed in.
     """
-    sql = pathlib.Path(stmt).read_text()
+    sql = pathlib.Path(stmt).read_text(encoding="utf-8")
     subs = dict(SUBS); subs.update(overrides or {})
     for k,v in subs.items(): sql = sql.replace(k,v)
-    path = pathlib.Path(_WORK / "run-item.sql"); path.write_text(sql)
+    path = pathlib.Path(_WORK / "run-item.sql"); path.write_text(sql, encoding="utf-8")
     r = subprocess.run(PG_OUT+["-v","ON_ERROR_STOP=1","-f",str(_WORK / "run-item.sql")], capture_output=True, text=True)
     out = (r.stdout+r.stderr).strip()
     if r.returncode != 0:
@@ -132,15 +142,19 @@ def run(overrides=None, stmt=ITEM_STMT, ledger=True):
     return r.returncode, out
 
 def write_ledger(overrides=None, entity_id=None):
-    ls = pathlib.Path(LEDGER_STMT).read_text()
+    ls = pathlib.Path(LEDGER_STMT).read_text(encoding="utf-8")
     lsubs = dict(SUBS); lsubs.update(overrides or {})
-    for k,v in lsubs.items(): ls = ls.replace(k,v)
     if entity_id is None:
         payload = lsubs.get("$payload", SUBS["$payload"])
         entity_id = "NULL" if '"versions"' in payload else None
     if entity_id is not None:
-        ls = ls.replace("$entity_id", "'%s'" % entity_id)
-    path = pathlib.Path(_WORK / "run-ledger.sql"); path.write_text(ls)
+        # A multi-entity operation has no single entity: the ledger stores
+        # SQL NULL, not the default id (schema.sql). The value is resolved
+        # BEFORE the substitution, because the substitution replaces
+        # $entity_id itself.
+        lsubs["$entity_id"] = entity_id if entity_id == "NULL" else "'%s'" % entity_id
+    for k,v in lsubs.items(): ls = ls.replace(k,v)
+    path = pathlib.Path(_WORK / "run-ledger.sql"); path.write_text(ls, encoding="utf-8")
     rl = subprocess.run(PG_OUT+["-v","ON_ERROR_STOP=1","-f",str(_WORK / "run-ledger.sql")], capture_output=True, text=True)
     if rl.returncode != 0:
         return 99, "LEDGER INSERT FAILED: " + (rl.stdout+rl.stderr).strip()
@@ -154,17 +168,21 @@ def check(label, cond, detail=""):
 def load_schema():
     """Create the schema this fixture runs against.
 
-    schema.sql is the specification's own §9 DDL, including an `auth` schema
-    - the target environment is a Supabase instance, and the statements
-    reference `auth.users`.
+    schema.sql is the specification's own §9 DDL, in the fixture's own
+    schema (`fixture`). The safe path only creates what is missing; the
+    destructive path - dropping the fixture's schema and rebuilding it - is
+    opt-in, because it is the one thing here that destroys rows.
     """
-    r = subprocess.run(
-        ["psql", DATABASE_URL, "-v", "ON_ERROR_STOP=1", "-f", str(HERE / "schema.sql")],
-        capture_output=True, text=True)
+    args = ["psql", DATABASE_URL, "-v", "ON_ERROR_STOP=1"]
+    if RESET_SCHEMA:
+        args += ["-v", "fixture_reset=1"]
+    args += ["-f", str(HERE / "schema.sql")]
+    r = subprocess.run(args, capture_output=True, text=True)
     if r.returncode:
-        raise RuntimeError("schema.sql failed:\n" + (r.stdout + r.stderr).strip())
+        raise RuntimeError("schema.sql failed:\n" + (r.stdout + r.stderr).strip()
+                           + "\n(if the fixture's DDL changed, re-run with --reset-schema)")
 
-print("SCHEMA - the specification's own DDL, including the auth schema")
+print("SCHEMA - the specification's own DDL, in the fixture's own schema")
 load_schema()
 check("schema.sql applied", True)
 
@@ -218,6 +236,75 @@ check("the ledger row WAS written (the client is acknowledged)", q("SELECT count
 c = q("SELECT field||'|'||resolution FROM entity_conflicts")
 check("a conflict row was written", c.startswith("isChecked|"), c)
 check("the resolution is check_wins", c.endswith("check_wins"), c)
+
+print("\nFIELD 3b - a STALE uncheck does not reverse an archive")
+# The item is archived and checked; B unchecks from an older base, so the
+# uncheck loses to check-wins. The archive's premise (the item is checked)
+# still holds, so the archive must stand.
+reset(); seed_item(version=4, is_checked="true", archived_at="now()",
+                   field_meta='{"isChecked":{"v":4,"lamport":9,"device":"%s"},'
+                              '"archivedAt":{"v":4,"lamport":20,"device":"%s"}}' % (DEV_B, DEV_A))
+rc,out = run({"$op_type":"'item.check'","$fields":"'{isChecked}'::text[]",
+              "$payload":"'{\"isChecked\":false}'::jsonb","$cas_version":"4",
+              "$op_base_version":"3","$op_lamport":"10","$device_id":"'%s'" % DEV_B})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+check("the item is STILL checked", "ck=true" in row, row)
+check("the archive was NOT reversed", "arch=-" not in row, row)
+check("the version did NOT advance", "/ v4 " in row, row)
+check("no change-log row", q("SELECT count(*) FROM sync_changes")=="0")
+check("the archiver is NOT told its archive was reversed",
+      "archivedAt" not in q("SELECT field FROM entity_conflicts"),
+      q("SELECT field FROM entity_conflicts"))
+
+print("\nOVERRIDE 1 - an explicit override of isChecked beats check-wins")
+# §11: overriding isChecked is allowed and beats check-wins, because an
+# explicit user decision outranks a rule another user happened to trigger.
+reset(); seed_item(version=4, is_checked="true",
+                   field_meta='{"isChecked":{"v":4,"lamport":9,"device":"%s"}}' % DEV_B)
+rc,out = run({"$op_type":"'item.override'","$fields":"'{isChecked}'::text[]",
+              "$payload":"'{\"isChecked\":false}'::jsonb","$cas_version":"4",
+              "$op_base_version":"3","$op_lamport":"10","$device_id":"'%s'" % DEV_A})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+check("the item is now UNCHECKED", "ck=false" in row, row)
+check("the version advanced to 5", "/ v5 " in row, row)
+check("one change-log row", q("SELECT count(*) FROM sync_changes")=="1")
+check("the operation was NOT recorded as rejected",
+      q("SELECT outcome FROM sync_operations")=="applied",
+      q("SELECT outcome FROM sync_operations"))
+c = q("SELECT field||'|'||resolution||'|'||device_id||'|'||winner_device_id"
+      "||'|'||local_value::text||'|'||server_value::text FROM entity_conflicts")
+check("the device whose check was replaced is told", c.startswith("isChecked|override|"), c)
+check("the conflict is addressed to that device", "|"+DEV_B+"|" in c, c)
+check("the winner is the overriding device", "|"+DEV_A+"|" in c, c)
+check("the discarded value is recorded", "|true|" in c, c)
+check("the value that replaced it is recorded", c.endswith("|false"), c)
+
+print("\nOVERRIDE 2 - an override tells the device whose value it replaced")
+reset(); seed_item(version=2, name="'Their name'",
+                   field_meta='{"name":{"v":2,"lamport":20,"device":"%s"}}' % DEV_B)
+rc,out = run({"$op_type":"'item.override'","$fields":"'{name}'::text[]",
+              "$payload":"'{\"name\":\"My name\"}'::jsonb","$cas_version":"2",
+              "$op_base_version":"1","$op_lamport":"30","$device_id":"'%s'" % DEV_A})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+check("the override applied", "My name" in row, row)
+check("the version advanced to 3", "/ v3 " in row, row)
+check("one change-log row", q("SELECT count(*) FROM sync_changes")=="1")
+check("exactly one conflict row", q("SELECT count(*) FROM entity_conflicts")=="1",
+      q("SELECT count(*) FROM entity_conflicts"))
+c = q("SELECT field||'|'||resolution||'|'||device_id||'|'||winner_device_id"
+      "||'|'||local_value::text||'|'||server_value::text FROM entity_conflicts")
+check("the conflict names the field", c.startswith("name|"), c)
+check("the resolution is override", "|override|" in c, c)
+check("the conflict is addressed to the other device", "|"+DEV_B+"|" in c, c)
+check("the winner is the overriding device", "|"+DEV_A+"|" in c, c)
+check("the discarded value is recorded", '"Their name"' in c, c)
+check("the value that replaced it is recorded", '"My name"' in c, c)
+check("the overriding device has no conflict of its own",
+      q("SELECT count(*) FROM entity_conflicts WHERE device_id='%s'" % DEV_A)=="0",
+      q("SELECT count(*) FROM entity_conflicts WHERE device_id='%s'" % DEV_A))
 
 print("\nFIELD 4 - a tombstoned row rejects every write (delete-wins, terminal)")
 reset(); seed_item(version=4, deleted_at="now()")
@@ -370,6 +457,19 @@ check("statement executes", rc==0, out[:200])
 check("no pair rows", pairs()=="", pairs())
 check("no conflict", q("SELECT count(*) FROM entity_conflicts")=="0")
 
+print("\nPAIR 9 - the snapshot carries a REMOVED tag, so the client can send its version back")
+reset(); seed_item()
+q("""INSERT INTO item_stores (item_id, store_id, version, lamport, device_id)
+       VALUES ('%s','%s',3,20,'%s')""" % (ITEM, STORE, DEV_B))
+rc,out = run({"$op_type":"'item.storeTags'","$fields":"'{}'::text[]",
+              "$payload":"""'{"storeIds":[{"storeId":"%s","version":3,"present":false}]}'::jsonb""" % STORE,
+              "$op_lamport":"25","$cas_version":"1"})
+check("statement executes", rc==0, out[:200])
+snap = q("SELECT payload::text FROM sync_changes")
+check("the snapshot carries the removed tag", STORE in snap, snap)
+check("the snapshot marks it absent", '"present": false' in snap, snap)
+check("the snapshot carries the removal's version", '"version": 4' in snap, snap)
+
 # ---------------------------------------------------------------- archive ordering
 print("\nARCHIVE 1 - the archive is skipped when the item is no longer checked")
 reset(); seed_item(version=6, is_checked="false")
@@ -448,18 +548,24 @@ check("the converged state is unchecked and not archived", a == "false|-", a)
 # ---------------------------------------------------------------- ledger safety
 print("\nLEDGER 1 - a BULK operation: two items sharing one opId")
 reset()
+BULK1_PAYLOAD = """'{"versions":{"11111111-1111-4111-8111-111111111111":3,"22222222-2222-4222-8222-222222222222":3}}'::jsonb"""
 seed_item(version=3, is_checked="true")
 q("""INSERT INTO items (id, household_id, name, quantity, note, version, field_meta, is_checked)
        VALUES ('22222222-2222-4222-8222-222222222222','%s','Bread',NULL,NULL,3,'{}'::jsonb,true)""" % HH)
 rc,out = run({"$op_type":"'item.bulkArchive'","$fields":"'{archivedAt}'::text[]",
-              "$payload":"'{}'::jsonb","$cas_version":"3","$op_base_version":"3",
-              "$op_id":"'55555555-5555-4555-8555-555555555555'"})
+              "$payload":BULK1_PAYLOAD,"$cas_version":"3","$op_base_version":"3",
+              "$op_id":"'55555555-5555-4555-8555-555555555555'"}, ledger=False)
 check("the first item's statement executes", rc==0, out[:200])
 rc2,out2 = run({"$op_type":"'item.bulkArchive'","$fields":"'{archivedAt}'::text[]",
-                "$payload":"'{}'::jsonb","$cas_version":"3","$op_base_version":"3",
+                "$payload":BULK1_PAYLOAD,"$cas_version":"3","$op_base_version":"3",
                 "$entity_id":"'22222222-2222-4222-8222-222222222222'",
-                "$op_id":"'55555555-5555-4555-8555-555555555555'"})
+                "$op_id":"'55555555-5555-4555-8555-555555555555'"}, ledger=False)
 check("the second item's statement does NOT abort the batch", rc2!=99, out2[:300])
+# The ledger row is written ONCE, after both candidates: the envelope is
+# derived from the rows the batch wrote, so it has to be derived after them.
+rc3,out3 = write_ledger({"$op_type":"'item.bulkArchive'","$fields":"'{archivedAt}'::text[]",
+                          "$payload":BULK1_PAYLOAD,"$op_id":"'55555555-5555-4555-8555-555555555555'"})
+check("the ledger insert does not raise", rc3==0, out3[:300])
 check("both items are archived",
       q("SELECT count(*) FROM items WHERE archived_at IS NOT NULL")=="2",
       q("SELECT count(*) FROM items WHERE archived_at IS NOT NULL"))
@@ -468,6 +574,13 @@ check("two change-log rows", q("SELECT count(*) FROM sync_changes")=="2",
 check("ONE ledger row for the one operation",
       q("SELECT count(*) FROM sync_operations")=="1",
       q("SELECT count(*) FROM sync_operations"))
+check("the ledger row has NO entity id - a bulk operation spans several entities",
+      q("SELECT entity_id FROM sync_operations")=="",
+      q("SELECT entity_id FROM sync_operations"))
+res = q("SELECT result::text FROM sync_operations")
+check("the envelope carries BOTH items",
+      '"entityId": "11111111-1111-4111-8111-111111111111"' in res and
+      '"entityId": "22222222-2222-4222-8222-222222222222"' in res, res[:400])
 
 print("\nLEDGER 2 - a REPLAY of an operation that won nothing")
 reset(); seed_item(version=4, is_checked="true",
@@ -540,6 +653,8 @@ check("conflicts: 1 (the contested item)", '"field": "archivedAt"' in res, res[:
 check("outcome: 'partial'", q("SELECT outcome FROM sync_operations")=="partial", q("SELECT outcome FROM sync_operations"))
 check("one change-log row", q("SELECT count(*) FROM sync_changes")=="1", q("SELECT count(*) FROM sync_changes"))
 check("one conflict row", q("SELECT count(*) FROM entity_conflicts")=="1", q("SELECT count(*) FROM entity_conflicts"))
+check("the ledger row has NO entity id - a bulk operation spans several entities",
+      q("SELECT entity_id FROM sync_operations")=="", q("SELECT entity_id FROM sync_operations"))
 
 print("\nBULK 2 - a bulk operation where EVERY candidate was skipped")
 reset()
@@ -558,6 +673,8 @@ rc,out = write_ledger({"$op_type":"'item.bulkArchive'","$fields":"'{archivedAt}'
 check("the ledger insert does not raise", rc==0, out[:300])
 check("a ledger row IS written (the op was decided)", q("SELECT count(*) FROM sync_operations")=="1",
       q("SELECT count(*) FROM sync_operations"))
+check("the ledger row has NO entity id - a bulk operation spans several entities",
+      q("SELECT entity_id FROM sync_operations")=="", q("SELECT entity_id FROM sync_operations"))
 res = q("SELECT result::text FROM sync_operations")
 check("skipped: 2", '"skipped": 2' in res, res[:300])
 check("outcome: 'rejected'", q("SELECT outcome FROM sync_operations")=="rejected", q("SELECT outcome FROM sync_operations"))
@@ -609,7 +726,7 @@ check("its entity_type is 'category'", q("SELECT entity_type FROM sync_operation
 print("\nENTITY 2 - a STORE operation is recorded in the ledger")
 reset()
 q("""INSERT INTO stores (id, household_id, name, version, field_meta, last_op_id, lamport)
-       VALUES ('eeeeeeee-1111-4111-8111-111111111111','%s','Costco',1,'{}'::jsonb,
+       VALUES ('eeeeeeee-1111-4111-8111-111111111111','%s','Costco Express',1,'{}'::jsonb,
                '88888888-8888-4888-8888-888888888888',10)""" % HH)
 rc,out = write_ledger({"$op_type":"'store.rename'","$entity_type":"'store'",
                         "$entity_id":"'eeeeeeee-1111-4111-8111-111111111111'",

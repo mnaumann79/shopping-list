@@ -10,6 +10,13 @@ Everything below was run against the instance. The scratch schema
 were **dropped afterwards**; the instance's seven pre-existing `public` tables
 were not touched.
 
+> **Update (P0S-T01).** The fixture no longer creates or writes to the
+> `auth` schema: it runs in a schema of its own (`fixture`), with
+> `fixture.users` standing in for `auth.users`, so it cannot touch GoTrue's
+> objects — see `README.md`. The run recorded below was made before that
+> change and did use a throwaway `auth.users` row. The statements it
+> verified are unchanged.
+
 ---
 
 ## 1. What the instance is
@@ -143,12 +150,14 @@ identifiable loser to notify. Exactly as §10.8.3 specifies.
 
 ## 7. What is **not** verified
 
-- **The full 165-assertion fixture.** The MCP cannot bind parameters or
+- **The full 201-assertion fixture** (165 assertions when this run was
+  made). The MCP cannot bind parameters or
   target another database, so the harness — which drives `psql` — cannot run
   against the instance from here. The statements above were run by hand
   through the MCP instead: the item statement's update path, the create
   statement, the ledger statement and both archive-conflict branches. The
-  other 30 scenario groups remain verified on PostgreSQL 17.11 locally.
+  other 33 scenario groups (37 now) remain verified on PostgreSQL 17.11
+  locally.
 - **A backup, and a restore of that backup.** `pg_dump` and `pg_restore` need
   a direct connection, which the sandbox cannot make.
 - **The connection pooling.** The `pg` driver's named prepared statements

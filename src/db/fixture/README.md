@@ -38,9 +38,12 @@ python3 src/db/fixture/verify.py
 DATABASE_URL=postgresql://... python3 src/db/fixture/verify.py
 ```
 
-`schema.sql` is applied first — it is the specification's own §9 DDL,
-including an `auth` schema, because the target environment is a Supabase
-instance and the statements reference `auth.users`.
+`schema.sql` is applied first — it is the specification's own §9 DDL, in the
+fixture's **own schema**, `fixture`. The fixture creates nothing else and
+drops nothing else: it never touches `auth` (GoTrue owns that on a Supabase
+instance) and never touches the application's `public` schema. `users` is the
+fixture's stand-in for `auth.users` — the statements never read it, but the
+foreign keys that carry an actor id do.
 
 **The fixture creates and drops rows.** It writes to the database in
 `DATABASE_URL`. Point it at a scratch database, never at production.
@@ -48,14 +51,31 @@ instance and the statements reference `auth.users`.
 `psql` and `python3` must be on the path. Nothing else is needed — the
 harness is deliberately dependency-free.
 
+### The one destructive thing, and how to ask for it
+
+The default path only **creates** what is missing, so a run against a database
+that already holds a `fixture` schema is safe and idempotent. To start from
+scratch — after the DDL changed, say — ask for the reset on purpose:
+
+```bash
+python3 src/db/fixture/verify.py --reset-schema
+# or, by hand:
+psql -v fixture_reset=1 -f src/db/fixture/schema.sql
+```
+
+Both drop **the fixture's own schema** and rebuild it. Nothing else. The
+reset is opt-in because dropping a schema is the one destructive thing here;
+without the flag, no object is ever dropped.
+
 ## What it covers
 
-**33 scenario groups, 165 assertions.**
+**37 scenarios in 9 groups, 201 assertions.**
 
 | Group | Scenarios | What it proves |
 | --- | --- | --- |
-| FIELD | 6 | per-field resolution; a lost CAS leaves the row untouched |
-| PAIR | 8 | the per-tag rule of §11, in both directions |
+| FIELD | 7 | per-field resolution; a lost CAS leaves the row untouched; a stale uncheck does not reverse an archive |
+| OVERRIDE | 2 | an override beats check-wins, and the device whose value it replaced is told |
+| PAIR | 9 | the per-tag rule of §11, in both directions; the snapshot carries a removed tag |
 | ARCHIVE | 5 | archive-wins-with-reversal, and its order-independence |
 | LEDGER | 4 | the idempotency ledger and its four outcomes |
 | BULK | 4 | the bulk envelope, and the case with no identifiable loser |

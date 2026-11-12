@@ -32,6 +32,14 @@ decide AS (
     CROSS JOIN before AS b
     LEFT JOIN cur AS c ON c.store_id = p.store_id
 ),
+check_wins AS (
+  -- Check-wins, stated once (§11): the uncheck applies iff the operation's
+  -- base version already included the check. Every gate that depends on the
+  -- uncheck actually winning reads this one comparison.
+  SELECT b.*,
+         ($op_base_version >= COALESCE((b.field_meta->'isChecked')->>'v','0')::int) AS uncheck_applies
+    FROM before AS b
+),
 wins AS (
   SELECT
     (b.deleted_at IS NULL)                                                         AS row_writable,
@@ -59,9 +67,9 @@ wins AS (
             AND ($op_lamport, $device_id::text) >
                 (COALESCE((b.field_meta->'categoryId')->>'lamport','0')::bigint,
                  COALESCE((b.field_meta->'categoryId')->>'device','')))))          AS w_category,
-    ($op_type = 'item.check' AND b.deleted_at IS NULL
-      AND $op_base_version >=
-          COALESCE((b.field_meta->'isChecked')->>'v','0')::int)                    AS w_is_checked,
+    (('isChecked' = ANY($fields) AND $op_type = 'item.override' AND b.deleted_at IS NULL)
+      OR ($op_type = 'item.check' AND b.deleted_at IS NULL
+          AND b.uncheck_applies))                                                  AS w_is_checked,
     ($op_type IN ('item.archive','item.bulkArchive') AND b.deleted_at IS NULL
       AND b.is_checked)                                                            AS w_archived,
     ($op_type IN ('item.unarchive','item.bulkUnarchive') AND b.deleted_at IS NULL) AS w_unarchived,
@@ -71,10 +79,14 @@ wins AS (
                                                                                   AS w_undeleted,
     ($op_type = 'item.storeTags' AND b.deleted_at IS NULL
       AND EXISTS (SELECT 1 FROM decide AS d WHERE d.client_wins))                AS w_store_ids,
+    -- The archive is reversed only by an uncheck that WINS. A stale uncheck
+    -- loses to check-wins, and then the item is still checked: the archive's
+    -- premise still holds, so reversing it would be wrong (§11).
     ($op_type = 'item.check' AND b.deleted_at IS NULL
+      AND b.uncheck_applies
       AND NOT ($payload->>'isChecked')::boolean
       AND b.archived_at IS NOT NULL)                                              AS w_reverses_archive
-  FROM before AS b
+  FROM check_wins AS b
 ),
 flags AS (
   SELECT w.*,
@@ -124,9 +136,10 @@ applied AS (
             t.lamport, t.last_op_id, t.updated_by_id, t.updated_at, t.created_at,
             w.row_changed AS changed
 ),
-lost AS (
+fields_now AS (
+  -- The row's current value per field, and the device that wrote it. Every
+  -- conflict record is written from this pre-image (§10.8.4).
   SELECT f.field,
-         to_jsonb($payload -> f.field) AS local_value,
          CASE f.field WHEN 'name'       THEN to_jsonb(b.name)
                       WHEN 'quantity'   THEN to_jsonb(b.quantity)
                       WHEN 'note'       THEN to_jsonb(b.note)
@@ -134,11 +147,19 @@ lost AS (
                       WHEN 'isChecked'  THEN to_jsonb(b.is_checked)
                       WHEN 'deletedAt'  THEN to_jsonb(b.deleted_at)
                       WHEN 'archivedAt' THEN to_jsonb(b.archived_at)
-                      END AS server_value,
-         NULLIF((b.field_meta -> f.field) ->> 'device', '')::uuid AS winner_device_id,
-         COALESCE((b.field_meta -> f.field) ->> 'lamport', '0')::bigint AS winner_lamport
-    FROM before AS b, wins AS w, unnest($fields) AS f(field)
-   WHERE CASE f.field
+                      END AS value,
+         NULLIF((b.field_meta -> f.field) ->> 'device', '')::uuid AS device_id,
+         COALESCE((b.field_meta -> f.field) ->> 'lamport', '0')::bigint AS lamport
+    FROM before AS b, unnest($fields) AS f(field)
+),
+lost AS (
+  SELECT fv.field,
+         to_jsonb($payload -> fv.field) AS local_value,
+         fv.value AS server_value,
+         fv.device_id AS winner_device_id,
+         fv.lamport AS winner_lamport
+    FROM fields_now AS fv, wins AS w
+   WHERE CASE fv.field
            WHEN 'name'       THEN NOT w.w_name
            WHEN 'quantity'   THEN NOT w.w_quantity
            WHEN 'note'       THEN NOT w.w_note
@@ -190,6 +211,33 @@ archive_conflicts AS (
   RETURNING id, field, store_id, local_value, server_value, resolution,
             winner_device_id, winner_lamport, device_id
 ),
+override_conflicts AS (
+  -- An override discards the value it replaced, and the device that wrote
+  -- that value has to be told (§11, §11.2) - otherwise its edit vanishes
+  -- with no record on its side. The row is addressed to that device, so it
+  -- reaches it through the conflict cursor and not through this response.
+  INSERT INTO entity_conflicts (household_id, entity_type, entity_id, field,
+                                local_value, server_value, store_id, resolution,
+                                winner_device_id, winner_lamport, op_id, device_id)
+  SELECT $household_id, $entity_type, $entity_id, fv.field,
+         fv.value, to_jsonb($payload -> fv.field),
+         NULL, 'override',
+         $device_id, $op_lamport, $op_id, fv.device_id
+    FROM fields_now AS fv, wins AS w
+   WHERE $op_type = 'item.override'
+     AND fv.device_id IS NOT NULL
+     AND fv.device_id <> $device_id
+     AND CASE fv.field
+           WHEN 'name'       THEN w.w_name
+           WHEN 'quantity'   THEN w.w_quantity
+           WHEN 'note'       THEN w.w_note
+           WHEN 'categoryId' THEN w.w_category
+           WHEN 'isChecked'  THEN w.w_is_checked
+           ELSE FALSE END
+     AND NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
+  RETURNING id, field, store_id, local_value, server_value, resolution,
+            winner_device_id, winner_lamport, device_id
+),
 tagged AS (
   INSERT INTO item_stores (item_id, store_id, version, lamport, device_id, deleted_at)
   SELECT $entity_id, d.store_id, COALESCE(d.base_version, 0) + 1, $op_lamport, $device_id, NULL
@@ -213,29 +261,29 @@ untagged AS (
    WHERE s.item_id = $entity_id
      AND s.store_id = d.store_id
      AND d.client_wins AND NOT d.present
-  RETURNING s.item_id, s.store_id
+  RETURNING s.item_id, s.store_id, s.version
 ),
 store_ids AS (
   SELECT COALESCE(
            jsonb_agg(jsonb_build_object('storeId', u.store_id,
                                         'version', u.version,
-                                        'present', true)
+                                        'present', u.present)
                      ORDER BY u.store_id),
            '[]'::jsonb) AS ids
     FROM (
-      SELECT ids.store_id,
-             COALESCE(t.version, s.version) AS version
-        FROM (
-          SELECT store_id FROM tagged
-          UNION
-          SELECT store_id FROM item_stores
-           WHERE item_id = $entity_id
-             AND deleted_at IS NULL
-             AND store_id NOT IN (SELECT store_id FROM untagged)
-        ) AS ids
-        LEFT JOIN tagged AS t ON t.store_id = ids.store_id
-        LEFT JOIN item_stores AS s
-               ON s.item_id = $entity_id AND s.store_id = ids.store_id
+      -- The pairs this statement wrote, then every other pair of the item -
+      -- the tombstoned ones included, with present: false. A client that
+      -- never learns that a tag was removed sends the pre-removal version
+      -- back, and the pair then looks concurrent (§11).
+      SELECT t.store_id, t.version, true AS present FROM tagged AS t
+      UNION
+      SELECT n.store_id, n.version, false AS present FROM untagged AS n
+      UNION
+      SELECT s.store_id, s.version, (s.deleted_at IS NULL) AS present
+        FROM item_stores AS s
+       WHERE s.item_id = $entity_id
+         AND s.store_id NOT IN (SELECT store_id FROM tagged
+                                UNION SELECT store_id FROM untagged)
     ) AS u
 ),
 tag_conflicts AS (
@@ -299,6 +347,8 @@ SELECT e.id AS entity_id,
              SELECT * FROM tag_conflicts
              UNION ALL
              SELECT * FROM archive_conflicts
+             UNION ALL
+             SELECT * FROM override_conflicts
            ) AS x
           WHERE x.device_id = $device_id
        ), '[]'::jsonb) AS conflicts

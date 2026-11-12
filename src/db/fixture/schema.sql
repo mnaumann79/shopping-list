@@ -1,54 +1,64 @@
--- Existing tables (db/init.sql, trimmed to what the sync path touches)
-DROP TABLE IF EXISTS item_stores, items, stores, categories, sync_changes,
-  sync_operations, devices, household_sync_state, entity_conflicts,
-  households, household_members, household_invitations,
-  organization, "user", member, session, account, verification, invitation
-  CASCADE;
-DROP SCHEMA IF EXISTS auth CASCADE;
+-- The fixture owns exactly ONE schema: `fixture`.
+--
+-- It never creates, drops or reads `auth` (GoTrue owns that on a Supabase
+-- instance) and it never touches the application's `public` schema. The
+-- statements are verified against the schema they will actually run against:
+-- the same tables, the same columns, the same constraints - in a schema of
+-- their own, so that pointing the fixture at a real database can destroy
+-- nothing but the fixture's own rows.
+--
+-- `users` is the fixture's stand-in for `auth.users`: the statements never
+-- read it, but the foreign keys that carry an actor id do, and `auth.users`
+-- on a real instance has columns this fixture must not try to reproduce.
+--
+-- The safe path only CREATES what is missing. To start from scratch after the
+-- DDL changed, ask for the reset on purpose:
+--
+--     psql -v fixture_reset=1 -f schema.sql
+--
+\if :{?fixture_reset}
+DROP SCHEMA IF EXISTS fixture CASCADE;
+\endif
+CREATE SCHEMA IF NOT EXISTS fixture;
+SET search_path TO fixture;
 
--- The target environment is a self-hosted Supabase instance: GoTrue owns the
--- `auth` schema. The fixture reproduces it faithfully, so the statements are
--- verified against the schema they will actually run against.
-CREATE SCHEMA IF NOT EXISTS auth;
-CREATE TABLE IF NOT EXISTS auth.users (
+CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   email text NOT NULL UNIQUE,
   raw_user_meta_data jsonb NOT NULL DEFAULT '{}'::jsonb
 );
-CREATE TABLE IF NOT EXISTS auth.identities (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  provider_id text NOT NULL,
-  provider_user_id text NOT NULL
-);
 
-CREATE TABLE households (
+CREATE TABLE IF NOT EXISTS households (
   id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name       text NOT NULL,
-  created_by uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_by uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE TABLE household_members (
+
+CREATE TABLE IF NOT EXISTS household_members (
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
-  user_id      uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  role         text NOT NULL DEFAULT 'member',
+  user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role         text NOT NULL DEFAULT 'member'
+                 CHECK (role IN ('owner','admin','member')),
   created_at   timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (household_id, user_id)
 );
-CREATE TABLE household_invitations (
+
+CREATE TABLE IF NOT EXISTS household_invitations (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   email       text NOT NULL,
-  role        text NOT NULL DEFAULT 'member',
+  role        text NOT NULL DEFAULT 'member'
+                CHECK (role IN ('owner','admin','member')),
   token       text NOT NULL UNIQUE,
-  invited_by  uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  invited_by  uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at  timestamptz NOT NULL,
   accepted_at timestamptz,
   revoked_at  timestamptz,
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE items (
+CREATE TABLE IF NOT EXISTS items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   name text NOT NULL,
@@ -57,36 +67,77 @@ CREATE TABLE items (
   category_id uuid,
   is_active boolean NOT NULL DEFAULT true,
   is_checked boolean NOT NULL DEFAULT false,
-  archived_at timestamp,
-  created_at timestamp NOT NULL DEFAULT now(),
-  updated_at timestamp NOT NULL DEFAULT now(),
-  created_by_id uuid REFERENCES auth.users(id) ON DELETE SET NULL
+  archived_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  created_by_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  -- Section 9.1's alterations to the existing table
+  deleted_at timestamptz,
+  version integer NOT NULL DEFAULT 1,
+  field_meta jsonb NOT NULL DEFAULT '{}',
+  updated_by_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  lamport bigint NOT NULL DEFAULT 0,
+  last_op_id uuid
 );
+CREATE INDEX IF NOT EXISTS items_active_household ON items (household_id) WHERE deleted_at IS NULL;
 
-CREATE TABLE stores (
+CREATE TABLE IF NOT EXISTS stores (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   name text NOT NULL,
   is_active boolean NOT NULL DEFAULT true,
-  created_at timestamp NOT NULL DEFAULT now(),
-  updated_at timestamp NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  deleted_at timestamptz,
+  version integer NOT NULL DEFAULT 1,
+  field_meta jsonb NOT NULL DEFAULT '{}',
+  updated_by_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  lamport bigint NOT NULL DEFAULT 0,
+  last_op_id uuid
 );
+CREATE INDEX IF NOT EXISTS stores_household ON stores (household_id);
+-- A partial unique index, not a table constraint: soft-deleted rows are
+-- outside it, so a deleted name is free to be reused (§9.2a).
+CREATE UNIQUE INDEX IF NOT EXISTS stores_org_name_live ON stores (household_id, name)
+  WHERE deleted_at IS NULL;
 
-CREATE TABLE categories (
+CREATE TABLE IF NOT EXISTS categories (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   name text NOT NULL,
   is_default boolean NOT NULL DEFAULT false,
   is_active boolean NOT NULL DEFAULT true,
-  created_at timestamp NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  deleted_at timestamptz,
+  version integer NOT NULL DEFAULT 1,
+  field_meta jsonb NOT NULL DEFAULT '{}',
+  updated_by_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  lamport bigint NOT NULL DEFAULT 0,
+  last_op_id uuid
 );
+CREATE INDEX IF NOT EXISTS categories_household ON categories (household_id);
+-- A partial unique index, not a table constraint: soft-deleted rows are
+-- outside it, so a deleted name is free to be reused (§9.2a).
+CREATE UNIQUE INDEX IF NOT EXISTS categories_org_name_live ON categories (household_id, name)
+  WHERE deleted_at IS NULL;
 
-CREATE TABLE item_stores (
+-- Each pair is an independent entity with its own version, lamport and
+-- device (§9.1), and a removal TOMBSTONES it rather than deleting the row.
+CREATE TABLE IF NOT EXISTS item_stores (
   item_id uuid NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-  store_id uuid NOT NULL REFERENCES stores(id) ON DELETE CASCADE
+  store_id uuid NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  version integer NOT NULL DEFAULT 1,
+  lamport bigint NOT NULL DEFAULT 0,
+  device_id uuid NOT NULL,
+  deleted_at timestamptz,
+  PRIMARY KEY (item_id, store_id)
 );
+CREATE INDEX IF NOT EXISTS item_stores_item ON item_stores (item_id);
+CREATE INDEX IF NOT EXISTS item_stores_live ON item_stores (item_id) WHERE deleted_at IS NULL;
+
 -- Append-only log of every applied change, per household.
-CREATE TABLE sync_changes (
+CREATE TABLE IF NOT EXISTS sync_changes (
   seq          bigserial PRIMARY KEY,     -- global, monotonic; filter by household
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   entity_type  text NOT NULL,             -- CHECK: 'item' | 'category' | 'store'
@@ -96,23 +147,25 @@ CREATE TABLE sync_changes (
   version      integer NOT NULL,
   lamport      bigint NOT NULL,
   device_id    uuid NOT NULL,
-  actor_id     uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT,
+  actor_id     uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   payload      jsonb NOT NULL,            -- full entity snapshot after the change
   deleted      boolean NOT NULL DEFAULT false,
   created_at   timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX sync_changes_household_seq ON sync_changes (household_id, seq);
+CREATE INDEX IF NOT EXISTS sync_changes_household_seq ON sync_changes (household_id, seq);
+-- Pruning by age, per household (§9.2a).
+CREATE INDEX IF NOT EXISTS sync_changes_household_created ON sync_changes (household_id, created_at);
 
 -- Idempotency ledger. The primary key IS the idempotency guarantee.
 -- NEVER PRUNED: it must outlive the change log, because a replayed operation
 -- whose change-log row has been pruned must still be recognised as a
 -- duplicate and replayed with its cached result. Pruning this table would
 -- silently re-apply an operation that had already been applied.
-CREATE TABLE sync_operations (
+CREATE TABLE IF NOT EXISTS sync_operations (
   op_id        uuid PRIMARY KEY,
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   device_id    uuid NOT NULL,
-  actor_id     uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT,
+  actor_id     uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   entity_type  text NOT NULL,
   entity_id    uuid,                      -- NULL for a multi-entity operation (item.bulkArchive):
                                          -- the operation's identity is its op_id, and a bulk
@@ -124,10 +177,10 @@ CREATE TABLE sync_operations (
   outcome      text NOT NULL,             -- 'applied' | 'partial' | 'rejected' | 'duplicate'
   applied_at   timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX sync_operations_household ON sync_operations (household_id, applied_at);
+CREATE INDEX IF NOT EXISTS sync_operations_household ON sync_operations (household_id, applied_at);
 
 -- Known devices per household (device id, name, last seen).
-CREATE TABLE devices (
+CREATE TABLE IF NOT EXISTS devices (
   id           uuid NOT NULL,
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   name         text NOT NULL,
@@ -139,7 +192,7 @@ CREATE TABLE devices (
 
 -- Per-household sync state: the Lamport clock, the change-log retention
 -- floor, and the sync epoch. None of these fit on any other table.
-CREATE TABLE household_sync_state (
+CREATE TABLE IF NOT EXISTS household_sync_state (
   household_id      uuid PRIMARY KEY REFERENCES households(id) ON DELETE CASCADE,
   epoch             uuid NOT NULL,          -- regenerated when a full resync occurs
   min_retained_seq  bigint NOT NULL DEFAULT 0,  -- the change-log floor for this household
@@ -148,7 +201,7 @@ CREATE TABLE household_sync_state (
 );
 
 -- Conflicts the server resolved, surfaced to the losing device.
-CREATE TABLE entity_conflicts (
+CREATE TABLE IF NOT EXISTS entity_conflicts (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   entity_type  text NOT NULL,
@@ -167,44 +220,5 @@ CREATE TABLE entity_conflicts (
   resolved_at  timestamptz,
   created_at   timestamptz NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX entity_conflicts_seq ON entity_conflicts (seq);
-CREATE INDEX entity_conflicts_household_seq ON entity_conflicts (household_id, seq);
--- Section 9.1's alterations to the existing tables
-ALTER TABLE items
-  ADD COLUMN deleted_at timestamptz,
-  ADD COLUMN version integer NOT NULL DEFAULT 1,
-  ADD COLUMN field_meta jsonb NOT NULL DEFAULT '{}',
-  ADD COLUMN updated_by_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
-  ADD COLUMN lamport bigint NOT NULL DEFAULT 0,
-  ADD COLUMN last_op_id uuid,
-  ALTER COLUMN created_at TYPE timestamptz USING created_at AT TIME ZONE 'UTC',
-  ALTER COLUMN updated_at TYPE timestamptz USING updated_at AT TIME ZONE 'UTC',
-  ALTER COLUMN archived_at TYPE timestamptz USING archived_at AT TIME ZONE 'UTC';
-
-ALTER TABLE stores
-  ADD COLUMN deleted_at timestamptz,
-  ADD COLUMN version integer NOT NULL DEFAULT 1,
-  ADD COLUMN field_meta jsonb NOT NULL DEFAULT '{}',
-  ADD COLUMN updated_by_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
-  ADD COLUMN lamport bigint NOT NULL DEFAULT 0,
-  ADD COLUMN last_op_id uuid;
-
-ALTER TABLE categories
-  ADD COLUMN deleted_at timestamptz,
-  ADD COLUMN version integer NOT NULL DEFAULT 1,
-  ADD COLUMN field_meta jsonb NOT NULL DEFAULT '{}',
-  ADD COLUMN updated_by_id uuid REFERENCES auth.users(id) ON DELETE SET NULL,
-  ADD COLUMN lamport bigint NOT NULL DEFAULT 0,
-  ADD COLUMN last_op_id uuid,
-  ADD COLUMN updated_at timestamptz NOT NULL DEFAULT now();
-
--- Pruning by age, per household (§9.2a).
-CREATE INDEX sync_changes_household_created ON sync_changes (household_id, created_at);
-
-ALTER TABLE item_stores
-  ADD COLUMN version integer NOT NULL DEFAULT 1,
-  ADD COLUMN lamport bigint NOT NULL DEFAULT 0,
-  ADD COLUMN device_id uuid NOT NULL,
-  ADD COLUMN deleted_at timestamptz,
-  ADD PRIMARY KEY (item_id, store_id);
-CREATE INDEX item_stores_household_live ON item_stores (item_id) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS entity_conflicts_seq ON entity_conflicts (seq);
+CREATE INDEX IF NOT EXISTS entity_conflicts_household_seq ON entity_conflicts (household_id, seq);
