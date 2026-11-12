@@ -236,7 +236,7 @@ with the losing edit surfaced rather than discarded.
 | | |
 | --- | --- |
 | **Specification** | `docs/project.md` — ~3,900 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 17 ADRs, 38 acceptance criteria. |
-| **Roadmap** | `docs/plan.md` — ~900 lines. 9 phases, ownership matrix, merge order, 8 open decisions plus 3 in Phase 0b. |
+| **Roadmap** | `docs/plan.md` — ~900 lines. 9 phases, ownership matrix, merge order, 8 open decisions plus 4 in Phase 0b. |
 | **Review** | 8 rounds, by three specialists, plus 4 further verification rounds. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
 | **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 201 assertions about their outcomes pass** — extracted from the document by content, so the text that is verified is the text that is specified. **All three have also been executed against the self-hosted Supabase instance**, which is PostgreSQL 17.11 — the same version — and `auth.uid()` resolves there from a transaction-local claim, which is what the row-level security policies depend on. |
 
@@ -277,7 +277,7 @@ The other four — sync cadence (D-3), delete-recoverability (D-4), sign-out
 behaviour with unsynchronised changes (D-5), and device management (D-6) —
 have later deadlines and are listed in `docs/plan.md` §7.
 
-**Three more gate Phase 0b**, and they are listed in `docs/plan.md`'s Phase
+**Four more gate Phase 0b**, and they are listed in `docs/plan.md`'s Phase
 0b section:
 
 | | Decision | Recommendation | Why it is yours |
@@ -285,6 +285,7 @@ have later deadlines and are listed in `docs/plan.md` §7.
 | **D-8** | Does Supabase require email confirmation on sign-up? | **No**, initially | An unconfirmed account can reach no data: every household-scoped table is behind row-level security and a membership row is required. Turning it on later is one setting. |
 | **D-9** | How long is the rollback window after the cutover? | **14 days** | It has to cover "the user did not notice until next week". A longer window means the old authentication library stays a dependency longer. |
 | **D-10** | Are the legacy authentication tables dropped, or left in place? | **Dropped** | A table named `user` sitting next to `auth.users` is a trap for the next developer. Dropping is irreversible, but the data is redundant once every account has been migrated. |
+| **D-11** | What happens to the repository's root `middleware.ts` — does it move to `src/middleware.ts`, get replaced, or get deleted? | **Decided with the cutover** | The file does not run today: the app lives under `src/` and there is no `src/middleware.ts`, so the guard that runs is the server-side one in `src/app/(app)/layout.tsx`. It looks authoritative and is dead code, so the cutover has to say what it is for (`docs/project.md` §12.1b). |
 
 ---
 
