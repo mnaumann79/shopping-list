@@ -2,10 +2,10 @@ import { test, expect } from "@playwright/test";
 
 // AUTH-04: User can log out from any page
 //
-// These tests cover the AppHeader logout flow that was previously marked
-// test.fixme because JSDOM + Base UI PointerEvents + React.lazy() are
-// incompatible (vi.mock can't intercept React.lazy calls). Playwright handles
-// all three correctly, so the actual click-through is verifiable here.
+// These tests cover the AppHeader logout flow that a JSDOM test could not
+// reach: JSDOM + Base UI PointerEvents + React.lazy() are incompatible
+// (vi.mock can't intercept React.lazy calls). Playwright handles all three
+// correctly, so the actual click-through is verifiable here.
 test.describe("Logout", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/dashboard");
@@ -21,6 +21,18 @@ test.describe("Logout", () => {
     await expect(logoutItem).toBeVisible();
 
     await logoutItem.click();
+
+    await expect(page).toHaveURL(/\/sign-in$/);
+  });
+
+  test("logout from another page redirects to /sign-in", async ({ page }) => {
+    // The account menu is on every page, so the logout works from any of
+    // them - not just from /dashboard.
+    await page.goto("/history");
+    await expect(page).toHaveURL(/\/history$/);
+
+    await page.getByRole("button", { name: "Account menu" }).click();
+    await page.getByRole("menuitem", { name: /log out/i }).click();
 
     await expect(page).toHaveURL(/\/sign-in$/);
   });
