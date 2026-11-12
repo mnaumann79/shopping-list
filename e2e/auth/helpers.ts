@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect as baseExpect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 /**
  * Helpers for the AUTH-01…04 specs.
@@ -8,6 +8,11 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
  */
 
 export const PASSWORD = "TestPassword123!";
+
+// The specs run against a dev server that compiles a page the first time it
+// is asked for it, so the default 5s expectation timeout is too tight on a
+// cold page.
+export const expect = baseExpect.configure({ timeout: 15_000 });
 
 // An address can only be registered once, so every user gets its own.
 export function uniqueEmail(prefix: string): string {
@@ -49,6 +54,25 @@ export async function registerUser(
   });
   const createdBody = await created.text();
   expect(created.ok(), `Could not create the household: ${createdBody}`).toBeTruthy();
+}
+
+/**
+ * Gives the browser a session of its own, apart from the shared one.
+ *
+ * The shared storage state holds one session for every browser project.
+ * Signing out revokes the session on the server, so a spec that signs out of
+ * the shared session would take it away from every other spec. A spec that
+ * needs to sign out registers its own user and copies that session into the
+ * browser.
+ */
+export async function startOwnSession(
+  page: Page,
+  request: APIRequestContext,
+  options: { email: string; householdName?: string },
+): Promise<void> {
+  await registerUser(request, options);
+  const state = await request.storageState();
+  await page.context().addCookies(state.cookies);
 }
 
 // A click before React hydrates is swallowed, so wait for the request the

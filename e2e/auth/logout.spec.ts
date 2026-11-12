@@ -1,5 +1,5 @@
-import { test, expect } from "@playwright/test";
-import { openAccountMenu } from "./helpers";
+import { test } from "@playwright/test";
+import { expect, openAccountMenu, startOwnSession, uniqueEmail } from "./helpers";
 
 // AUTH-04: User can log out from any page
 //
@@ -8,7 +8,16 @@ import { openAccountMenu } from "./helpers";
 // (vi.mock can't intercept React.lazy calls). Playwright handles all three
 // correctly, so the actual click-through is verifiable here.
 test.describe("Logout", () => {
-  test.beforeEach(async ({ page }) => {
+  // These specs sign out, and signing out revokes the session on the server.
+  // The shared storage state holds one session for every browser project, so
+  // a logout spec that used it would take that session away from the
+  // persistence specs. Each logout spec gets a session of its own.
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test.beforeEach(async ({ page, request }) => {
+    const email = uniqueEmail("logout");
+    await startOwnSession(page, request, { email, householdName: `Logout Household ${email}` });
+
     await page.goto("/dashboard");
     await expect(page).toHaveURL(/\/dashboard$/);
   });

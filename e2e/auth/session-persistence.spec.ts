@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { test } from "@playwright/test";
+import { expect } from "./helpers";
 
 // AUTH-03: Session persists across browser refresh
 //
