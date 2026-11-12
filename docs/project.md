@@ -519,6 +519,13 @@ partitioned by `household_id` (INV-09). The local switch is a change of the
 active partition. The server-side `activeOrganizationId` is updated on the next
 successful sync.
 
+**One install may belong to several households.** The `deviceId` is a
+per-install identifier, not a per-household one: the same browser may hold
+several households' data, and each is a separate partition. That is why
+`devices` is keyed on `(household_id, id)` rather than on `id` alone — a device
+row records one household's view of one install, and the same `id` may appear
+under several households (§9.2).
+
 **Acceptance criteria.**
 - Switching offline to a cached household renders that household's list.
 - The other household's pending operations are still in the outbox afterwards.
@@ -1121,7 +1128,7 @@ union of the fields touched by the row's outstanding operations.
 | `deleted_at` | `timestamptz` nullable | **Tombstone.** `NULL` = live. Set on delete; cleared only by an explicit restore. |
 | `version` | `integer` not null default 1 | Incremented on every server-applied change. The client's `baseVersion` is checked against it. |
 | `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata: `{"name": {"v": 4, "lamport": 12, "device": "d-…"}}`. Enables per-field conflict resolution without a separate table. **It also carries the ordering key for the tombstone:** `field_meta["deletedAt"].lamport` records the effective lamport of the delete that set `deleted_at`, so `item.undelete` can tell whether a *newer* delete exists (§11). |
-| `updated_by` | `text` nullable → `user.id` | Who last changed the row. |
+| `updated_by_id` | `text` nullable → `user(id)` `ON DELETE SET NULL` | Who last changed the row. Named to match the existing `created_by_id` convention, and carries the same foreign key so the column cannot hold a user id that does not exist. |
 | `lamport` | `bigint` not null default 0 | Highest Lamport value applied to this row. |
 | `last_op_id` | `uuid` nullable | The `opId` of the operation that last wrote this row. Set by the compare-and-swap in the same batch. The change-log append and the idempotency record are guarded on `last_op_id = $opId`, which is what proves that *this* operation is the one whose write landed — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
 
@@ -1164,18 +1171,20 @@ at all**, so duplicate tag rows are possible today — plus
 CREATE TABLE sync_changes (
   seq          bigserial PRIMARY KEY,     -- global, monotonic; filter by household
   household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
-  entity_type  text NOT NULL,             -- 'item' | 'category' | 'store'
+  entity_type  text NOT NULL,             -- CHECK: 'item' | 'category' | 'store'
   entity_id    uuid NOT NULL,
-  op_id        uuid NOT NULL,             -- the operation that caused it
+  op_id        uuid,                      -- NULL when there is no originating operation
+                                         -- (e.g. the seeded default categories)
   version      integer NOT NULL,
   lamport      bigint NOT NULL,
-  device_id    text NOT NULL,
+  device_id    uuid NOT NULL,
   actor_id     text NOT NULL,
   payload      jsonb NOT NULL,            -- full entity snapshot after the change
   deleted      boolean NOT NULL DEFAULT false,
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX sync_changes_household_seq ON sync_changes (household_id, seq);
+CREATE INDEX sync_changes_household_created ON sync_changes (household_id, created_at);  -- for pruning
 
 -- Idempotency ledger. The primary key IS the idempotency guarantee.
 -- NEVER PRUNED: it must outlive the change log, because a replayed operation
@@ -1185,7 +1194,7 @@ CREATE INDEX sync_changes_household_seq ON sync_changes (household_id, seq);
 CREATE TABLE sync_operations (
   op_id        uuid PRIMARY KEY,
   household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
-  device_id    text NOT NULL,
+  device_id    uuid NOT NULL,
   actor_id     text NOT NULL,
   entity_type  text NOT NULL,
   entity_id    uuid NOT NULL,
@@ -1200,11 +1209,12 @@ CREATE INDEX sync_operations_household ON sync_operations (household_id, applied
 
 -- Known devices per household (device id, name, last seen).
 CREATE TABLE devices (
-  id           uuid PRIMARY KEY,
+  id           uuid NOT NULL,
   household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
   name         text NOT NULL,
   last_seen_at timestamptz NOT NULL DEFAULT now(),
-  created_at   timestamptz NOT NULL DEFAULT now()
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (household_id, id)
 );
 
 -- Per-household sync state: the Lamport clock, the change-log retention
@@ -1231,11 +1241,17 @@ CREATE TABLE entity_conflicts (
   winner_device_id uuid,                  -- the device whose value won (NULL for a server-side rejection)
   winner_lamport  bigint,                 -- the Lamport value of the winning write
   op_id        uuid NOT NULL,
-  device_id    text NOT NULL,
+  device_id    uuid NOT NULL,
   resolved_at  timestamptz,
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 ```
+
+**Retention.** `entity_conflicts` rows are retained **at least as long as the
+change log** — they are the only place a *losing* value survives, so pruning
+them before the log they explain would discard the only record of what a
+user's edit lost. They are pruned only once the corresponding change-log
+window has passed.
 
 `winner` as a `'server' | 'client'` pair is not expressive enough: a conflict
 can be resolved by last-write-wins, by check-wins, by delete-wins, by
@@ -1244,6 +1260,44 @@ winner is a **device**, not a side. The `resolution` enum names the rule that
 was applied, and `winner_device_id` plus `winner_lamport` identify whose value
 won and at what ordering value. The conflict's `id` is returned to the client
 so the two sides can refer to the same conflict.
+
+### 9.2a Indexes and constraints
+
+Beyond the primary keys, these indexes are required. The pruner in particular
+needs age access, not just sequence access.
+
+```sql
+-- The hot path: the active list for a household.
+CREATE INDEX items_active_household ON items (organization_id) WHERE deleted_at IS NULL;
+CREATE INDEX stores_household        ON stores (organization_id);
+CREATE INDEX categories_household    ON categories (organization_id);
+CREATE INDEX item_stores_item        ON item_stores (item_id);
+
+-- Pruning by age, per household.
+CREATE INDEX sync_changes_household_created ON sync_changes (household_id, created_at);
+```
+
+**The name-uniqueness constraint must be partial.** The existing
+`categories` constraint spans soft-deleted rows, so a category name that was
+deleted still blocks re-creating a category with that name — and `category.create`
+must be able to re-create it (§11). The constraint therefore becomes:
+
+```sql
+-- A partial unique index, not a table constraint: soft-deleted rows are
+-- outside it, so a deleted name is free to be reused.
+CREATE UNIQUE INDEX categories_org_name_live ON categories (organization_id, name)
+  WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX stores_org_name_live ON stores (organization_id, name)
+  WHERE deleted_at IS NULL;
+```
+
+**This is the one piece of non-additive DDL in the whole migration plan** —
+it replaces an existing table constraint rather than adding alongside it, so
+§9.4 must sequence it carefully: it requires the `deleted_at` column to exist
+first, and the backfill must run before the partial index is created, or the
+constraint build will fail on rows that are soft-deleted but not yet marked.
+
+---
 
 ### 9.3 Rationale for a server-side change log
 
@@ -1288,6 +1342,14 @@ All migrations are **additive**: new nullable columns with defaults, new tables,
 new indexes. No column is dropped and no row is rewritten in the same release
 that introduces the sync model. `is_active` → `deleted_at` backfill is a single
 separate migration that sets `deleted_at = now()` where `is_active = false`.
+
+**The one exception is the partial unique index** on `categories` and `stores`
+(§9.2a). It *replaces* the existing table constraint rather than sitting
+alongside it, because the old constraint spans soft-deleted rows and would
+block re-creating a deleted name. It is sequenced last: after the `deleted_at`
+column exists and after the backfill has run, so the index build cannot fail
+on rows that are soft-deleted but not yet marked. Everything else in this plan
+can be applied in any order and rolled back by dropping what was added.
 
 ---
 
@@ -1335,6 +1397,7 @@ outcome, so all of the request's operations can share one transaction safely.
 {
   "householdId": "org_abc",
   "deviceId": "uuid-v7-of-this-browser-install",
+  "deviceName": "Sara's iPhone",          // upserted into devices on first sight
   "lastSeq": 1042,              // highest seq this client has applied
   "clientClock": 87,            // client's current Lamport counter
   "operations": [
