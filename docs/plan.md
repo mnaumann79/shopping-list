@@ -34,6 +34,9 @@ writable path. The product owner merges; the lead recommends the merge order.
 Phase 0  Reliable Baseline
    │
    ▼
+Phase 0b Supabase Migration (hosting, database, auth)
+   │
+   ▼
 Phase 1  Security & Data-Integrity Repairs
    │
    ▼
@@ -100,14 +103,15 @@ A phase is done when **all** of the following hold:
 | Phase | Duration (4-person team) | Primary risk |
 | --- | --- | --- |
 | 0 — Reliable Baseline | 1 week | Low |
+| 0b — Supabase Migration | 2 weeks | High (a cutover touches live data) |
 | 1 — Security & Data-Integrity Repairs | 1 week | Low |
 | 2 — Architecture Contracts | 1 week | Low (spike; resolves uncertainty) |
-| 3 — Server Sync Core | 2 weeks | Medium (atomicity on Neon HTTP) |
+| 3 — Server Sync Core | 2 weeks | Medium (atomicity of the apply transaction) |
 | 4 — Client Local-First Core | 2 weeks | Medium (hydration/rendering regressions) |
 | 5 — Sync Engine & Convergence | 2 weeks | Medium (conflict-rule correctness) |
 | 6 — Offline UX, PWA & Household Scenarios | 2 weeks | Medium (iOS Safari specifics) |
 | 7 — Hardening & Release Readiness | 1 week | Low |
-| **Total** | **≈ 12 weeks** | |
+| **Total** | **≈ 14 weeks** | |
 
 ---
 
@@ -181,6 +185,83 @@ works).
 
 ---
 
+## Phase 0b — Supabase Migration (hosting, database, authentication)
+
+### Objective
+
+Move the **hosting** from Neon to the self-hosted Supabase instance, move
+**authentication** from Better Auth to Supabase Auth, and turn tenant
+isolation into a database-enforced second layer — **before any feature work
+begins**. The offline-first rebuild is the product's defining risk; it should
+not be built on a platform the product owner has already decided to leave, and
+the authentication rewrite is cheaper now than after Phase 4 has built a client
+on top of it.
+
+This phase changes the **stack**, not the product. No feature is added, and
+nothing the user sees changes — except that their passwords keep working
+(§13.2c), which is the whole point of doing the auth change before the
+cutover rather than after.
+
+### Scope
+
+| # | Task | Owner | Files |
+| --- | --- | --- | --- |
+| 0b.1 | Amend the specification for the new stack: §9.1a (identity types), §9.2 (household tables), §9.2b (RLS), §10.1/§10.8 (`household_id` rename, the interactive transaction), §12 (Supabase Auth), §13.2a–c (the cutover), §16.5 (CI), ADR-11/12/14 (amended), ADR-16/17 (new) | Lead | `docs/project.md` |
+| 0b.2 | **Verify the target instance.** Record its PostgreSQL major version; re-run §10.8's three statements against it with the §9 DDL — the fixture is the server-side test (§16.4); confirm `pg_advisory_xact_lock`, `hashtextextended`, `jsonb_to_recordset` and the data-modifying CTEs behave as expected; confirm the `auth` schema is present and `auth.uid()` resolves; take and **restore-test** a backup | Database | `src/db/**` (scratch), `docs/project.md` (evidence) |
+| 0b.3 | Replace the Neon driver with the standard `pg` driver. Delete `DB_DRIVER` and the `neon-http` branch — there is one driver now, so there is nothing to switch (ADR-16). Decide the pooling: direct connection to the instance, or the Supavisor pooler with `?pgbouncer=true` (the `pg` driver's named prepared statements are not compatible with transaction-mode pooling). **The advisory lock is transaction-scoped, so it is safe under a transaction-mode pooler** | Database | `src/db/index.ts`, `package.json`, `.env.local.example` |
+| 0b.4 | Create `households`, `household_members`, `household_invitations`; rename `organization_id` → `household_id` on `items`, `categories`, `stores` and `household_join_links` and retype it to `uuid`; retype `created_by_id`, `updated_by_id` and `actor_id` to `uuid` referencing `auth.users(id)`. **71 occurrences across 25 files** — and the wire contract's `organizationId` → `householdId`, which is free now because Phase 4 rewrites the client anyway | Database | `src/db/schema/**`, `src/db/migrations/**` |
+| 0b.5 | Enable RLS on every household-scoped table with policies keyed on `auth.uid()` (§9.2b), create the non-owner `app` role the application connects as, and add the `household_members` policy that stops the recursion | Database | `src/db/migrations/**`, `src/db/schema/**` |
+| 0b.6 | Add the household scope helper: one `db.transaction()` that sets `request.jwt.claims` **locally** and runs the caller's query on the transaction's client. Every household-scoped query goes through it, and it is the only sanctioned path (it **is** Phase 1's task 1.4, now with RLS behind it) | Backend | `src/server/**`, `src/db/scope.ts` |
+| 0b.7 | Replace Better Auth with Supabase Auth: `@supabase/ssr` server and browser clients, sign-up/sign-in/sign-out, the `sb-household` cookie, and the session helpers in `request-auth.ts` (9 API routes call them) | Backend | `src/lib/auth.ts`, `src/lib/request-auth.ts`, `src/lib/auth-client.ts`, `src/app/api/auth/**` |
+| 0b.8 | Replace the household membership and invitation flows with the new tables: `requireHouseholdRole`, invite by email, list and cancel invitations, add and remove members. This also closes **S-1** (a plain member can mint a join link), **S-2** (a plain member invalidates the admin's link), **S-3** (403 returned as 500) and **S-4** (the unauthenticated invitation-email endpoint) | Backend | `src/server/services/households.ts`, `src/app/api/households/**`, `src/app/api/invitation-email/route.ts` |
+| 0b.9 | Update the client components that used `authClient.organization.*`: the household switcher, the app header, onboarding, and the sign-in/sign-up/join/accept-invite pages | Frontend | `src/components/household-switcher.tsx`, `src/components/AppHeader.tsx`, `src/app/onboarding/page.tsx`, `src/app/(auth)/**` |
+| 0b.10 | The **transitional sign-in** that carries existing passwords across (§13.2c). Better Auth's scrypt hashes cannot be converted to GoTrue's bcrypt, so the old password is verified once and re-provisioned. Better Auth stays a dependency until the rollback window closes, and this task records its removal date | Backend | `src/app/api/auth/legacy-signin/route.ts`, `src/lib/auth.ts` |
+| 0b.11 | CI runs the **Supabase local stack**, not a bare PostgreSQL container — the RLS policies need `auth.uid()`, which only GoTrue provides. The local stack's PostgreSQL major version must match the production instance's, and the integration job asserts it | Lead | `.github/workflows/**`, `package.json`, `supabase/config.toml` |
+| 0b.12 | Write the cutover runbook and rehearse it: the dump, the restore, the identity mapping, the verification queries, and the rollback. **The rehearsal is a full dry run against a scratch database on the instance**, and its output is attached to the runbook | Lead + Database | `docs/plan.md` (§8), `scripts/**` |
+
+### Deliverables
+
+- The instance is verified: PostgreSQL version recorded, the thirty-three-scenario
+  fixture passes against it, and a backup has been restored and read back.
+- The application runs on the standard `pg` driver with one connection path.
+- The schema carries `households`, `household_members`, `household_invitations`,
+  and every identity and household id is a `uuid`.
+- Every household-scoped table is protected by RLS, and the application connects
+  as a non-owner role so the policies apply.
+- Supabase Auth issues the session; the household model is three application
+  tables; the active household is a cookie validated against membership.
+- **No user has to reset their password** (§13.2c).
+- The cutover runbook is written **and rehearsed**.
+
+### Dependencies
+
+Phase 0 (the baseline must be green before a platform change is measured
+against it). Nothing in this phase depends on Phase 1 — but **Phase 1's task
+1.4 is absorbed into task 0b.6**, and Phase 1's tasks 1.1–1.3 are closed by
+task 0b.8, so those three are dropped from Phase 1 rather than repeated.
+
+### Risks
+
+| # | Risk | Severity | Mitigation |
+| --- | --- | --- | --- |
+| 0b-R1 | **The cutover loses data.** | High | The rollback is a configuration change for fourteen days (§13.2a step 7), because Neon is not modified during the window. The dry run (task 0b.12) compares row counts table by table before anything is switched. |
+| 0b-R2 | **Existing users cannot sign in** — the scrypt/bcrypt wall (§13.2c). | High | The transitional sign-in (task 0b.10) carries the password across at first sign-in. The rehearsal must include a real migrated account, not a synthetic one. |
+| 0b-R3 | **RLS silently does not apply** — the application connects as the table owner, or the claims are not set, and the policies are bypassed. | High | The application connects as the non-owner `app` role, and the integration test asserts a cross-household read returns **zero rows** with the application predicate deliberately removed (§9.2b). A policy that is bypassed fails that test. |
+| 0b-R4 | The instance's PostgreSQL version differs from the one the fixture was verified against (17). | Medium | Task 0b.2 records the version and re-runs the fixture against it; CI pins the local stack's version to match (§16.5). |
+| 0b-R5 | The `pg` driver's prepared statements break under a transaction-mode pooler. | Medium | Task 0b.3 decides the connection path explicitly and records it; `?pgbouncer=true` is the documented fix. |
+| 0b-R6 | The 71-occurrence rename touches more than the count suggests, and a missed call site becomes a silent tenant-isolation bug. | Medium | The rename is mechanical and the lint rule from task 0b.6 forbids direct access to household-scoped tables; RLS is the backstop behind it, so a missed predicate yields zero rows rather than another household's data. |
+| 0b-R7 | The identity mapping loses a household or a membership. | Medium | The mapping is done with `UPDATE … FROM map` inside the migration transaction, and the verification queries assert that every `household_id` resolves to a `households` row and every `created_by_id` to an `auth.users` row. |
+
+### Decisions needed before this phase starts
+
+| # | Decision | Note |
+| --- | --- | --- |
+| D-8 | **Does Supabase require email confirmation?** Recommendation: **no**, initially — an unconfirmed account can reach no data, because every household-scoped table is protected by RLS and a membership row is required. Turning it on later costs one click in the instance's configuration. | The instance's current setting wins if it is already configured; this decision only matters if it is not. |
+| D-9 | **The rollback window's length.** Recommendation: **14 days**, which covers a realistic "the user did not notice until next week". | Longer means Better Auth stays a dependency longer. |
+| D-10 | **Whether the legacy Better Auth tables are dropped, or left in place.** Recommendation: **dropped** at the end of the window — a table named `user` next to `auth.users` is a trap for the next developer. | Dropping is irreversible; the data is redundant once every account has been migrated. |
+
+---
+
 ## Phase 1 — Security & Data-Integrity Repairs
 
 ### Objective
@@ -194,10 +275,10 @@ builds the authorization helper that Phase 3 reuses.
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
-| 1.1 | Add `requireHouseholdRole(orgId, userId, roles)` and enforce it on every household-scoped route: join links, invites, member removal (closes S-1, S-2, S-3) | Backend | `src/lib/request-auth.ts`, `src/server/services/households.ts`, `src/app/api/households/**` |
-| 1.2 | Make authorization failures return **403** with a stable error code, not 500 with a raw Better Auth message | Backend | `src/server/services/service-error.ts`, `src/server/services/households.ts` |
-| 1.3 | Remove or authenticate `GET /api/invitation-email` (closes S-4) | Backend | `src/app/api/invitation-email/route.ts` |
-| 1.4 | Introduce a shared household-scope helper that is the **only** sanctioned access path to the household-scoped tables, plus a lint rule forbidding direct access to those tables outside it — `db.select()`, `db.insert()`, `db.update()`, `db.delete()` and `db.execute()` alike. A rule that covered only `db.select()` would leave the write paths unguarded: a route taking an item id could change another household's row without a household predicate (closes S-5). **The lint rule's protected-table list must be derived from the Drizzle schema, not hardcoded** — otherwise the four new household-scoped tables added in Phase 3 (§9.2) escape the rule silently. **RLS is deliberately not used** — see ADR-12 | Database | `src/db/schema/**`, `src/db/migrations/**`, `src/server/services/items.ts` (consumption) |
+| 1.1 | ~~Add `requireHouseholdRole(orgId, userId, roles)` and enforce it on every household-scoped route~~ — **absorbed into Phase 0b, task 0b.8**, which builds it against the new household tables and closes S-1, S-2, S-3 and S-4 in the same pass | Backend | — |
+| 1.2 | ~~Make authorization failures return **403** with a stable error code~~ — **absorbed into Phase 0b, task 0b.8**: the raw Better Auth message no longer exists once Better Auth does | Backend | — |
+| 1.3 | ~~Remove or authenticate `GET /api/invitation-email`~~ — **absorbed into Phase 0b, task 0b.8** (closes S-4) | Backend | — |
+| 1.4 | ~~Introduce a shared household-scope helper that is the **only** sanctioned access path to the household-scoped tables, plus a lint rule forbidding direct access to those tables outside it — `db.select()`, `db.insert()`, `db.update()`, `db.delete()` and `db.execute()` alike. A rule that covered only `db.select()` would leave the write paths unguarded~~ — **absorbed into Phase 0b, task 0b.6**, which builds the same helper with row-level security behind it (closes S-5 at the database as well as the application). The lint rule's protected-table list must still be derived from the Drizzle schema, not hardcoded, or the new tables escape it silently | Backend | — |
 | 1.5 | Fix the quantity input: accept free-form text end to end (closes B-6) | Frontend | `src/lib/utils.ts`, `src/app/(app)/dashboard/_components/QuickAddBar.tsx`, `src/app/(app)/dashboard/_components/ItemDialogs.tsx` |
 | 1.6 | Separate *delete* (tombstone) from *clear completed* (archive) in the **schema and migration**: add `deleted_at`, stop relying on `is_active`, backfill `is_active = false` rows as tombstones (closes B-11) | Database | `src/db/schema/items.ts`, `src/db/migrations/**` |
 | 1.6b | Carry the same separation through the **service and route layer**: `deleteItem` writes a tombstone, "clear completed" writes an archive mark, and both are recoverable from History (closes B-11) | Backend | `src/server/services/items.ts`, `src/app/api/items/**` |
@@ -231,7 +312,7 @@ new integration test suite.
 
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
-| The scope helper is bypassed by a direct query, leaking across households | Medium | The helper is the only sanctioned path; a lint rule fails the build on a direct household-table query; an integration test against a real database asserts a cross-household read, update, and delete all return 404. RLS was considered and **rejected** as unreliable on the Neon HTTP driver (ADR-12) — it would create false confidence rather than real isolation. |
+| The scope helper is bypassed by a direct query, leaking across households | Medium | The helper is the only sanctioned path; a lint rule fails the build on a direct household-table query; an integration test against a real database asserts a cross-household read, update, and delete all return 404. **RLS was rejected as unreliable on the Neon HTTP driver (ADR-12) — that blocker no longer exists**, and Phase 0b puts RLS behind the helper as a second layer, so a bypassed predicate yields zero rows rather than another household's data (§9.2b). |
 | The tombstone change affects the History page, which currently relies on `archived_at` semantics | Medium | Task 1.6 updates the History query in the same PR and adds an explicit test for both behaviours. |
 | The real-database integration suite is slow in CI | Low | Use a PostgreSQL service container and run the suite against a schema applied once per job, not per test. |
 | The quantity change lets arbitrary text through, weakening the schema | Low | The column is already `text`; validation is length-bounded (≤ 50 chars), not format-bounded. |
@@ -281,13 +362,13 @@ beyond the contract types themselves.
 | 2.1 | Write the ADR set from `docs/project.md` §18 into the repository, recording the decisions, the rejected alternatives, and the consequences | Lead | `ARCHITECTURE/0001…0015-*.md` |
 | 2.2 | Define the shared contract types: `SyncOperation`, `SyncRequest`, `SyncResponse`, `SyncChange`, `Conflict`, `LocalItem`, `OutboxOp`, error codes, and **`SyncOperationType` — the single authoritative operation-type union** (§10.1a). The local outbox must use these same namespaced values; a second, shorter local union is what let the vocabulary drift apart in the first place | Lead | `src/shared/sync.ts` |
 | 2.3 | Define the local IndexedDB schema and the Dexie version/migration plan | Frontend | `src/client/db/schema.ts` (design only) |
-| 2.4 | Prototype and **verify the apply design on Neon HTTP** (ADR-14): (a) `db.batch()` gives an all-or-nothing multi-statement write; (b) the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a batch executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it; (c) the **data-modifying CTE** form makes the change-log insert conditional on the compare-and-swap having matched; (d) a per-household `pg_advisory_xact_lock` as the first statement of the batch makes `seq` allocation order equal commit order (ADR-05), proven by two concurrent applies whose commits would otherwise invert | Database | `src/db/**` (scratch), ADR-14 |
+| 2.4 | Verify the apply design on the **production driver** (ADR-14). By this phase the driver is the standard `pg` driver, so the questions are: (a) `db.transaction()` gives an all-or-nothing multi-statement write; (b) the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a transaction callback executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it; (c) the **data-modifying CTE** form makes the change-log insert conditional on the compare-and-swap having matched; (d) a per-household `pg_advisory_xact_lock` as the first statement makes `seq` allocation order equal commit order (ADR-05), proven by two concurrent applies whose commits would otherwise invert. **Much of this is already proven** — §10.8's thirty-three scenarios are executed against the §9 DDL and their outcomes verified — so this task confirms the same behaviour on the *production* instance rather than rediscovering it | Database | `src/db/**` (scratch), ADR-14 |
 | 2.5 | Verify the conflict-resolution matrix as a **pure function** before it is wired to the server, with a table-driven test covering every row of `docs/project.md` §11 | Backend | `src/server/sync/conflict-resolution.ts`, `src/server/sync/__tests__/conflict-resolution.test.ts` |
 | 2.6 | Prove the client-side generation of UUIDv7 ids and the Lamport clock implementation | Frontend | `src/client/db/ids.ts` (design only) |
 
 ### Deliverables
 
-- 15 ADRs plus an ADR for the Neon atomicity decision.
+- The ADR set from `docs/project.md` §18, including ADR-16 (hosting) and ADR-17 (authentication).
 - `src/shared/sync.ts` — the frozen contract types.
 - A table-driven test proving the conflict-resolution matrix behaves as specified.
 - A working proof that the server can apply an operation atomically on the
@@ -309,7 +390,7 @@ dangling.
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
 | The contract types are too rigid and Phases 3–5 need to change them, causing churn | Medium | The spike deliberately exercises the *awkward* cases — conflict records, bulk archive, tombstones, resync — before freezing. |
-| `db.batch()` is not sufficient for the apply path | Medium | Task 2.4 proves it on the real driver. Fallback: the Neon WebSocket driver, which supports interactive transactions. The decision is made here, not during Phase 3. |
+| The apply transaction is not sufficient for the apply path | Low | Task 2.4 proves it on the production driver. The interactive-transaction fallback that ADR-14 used to reserve for Neon is no longer a contingency — the standard `pg` driver *is* the interactive path (ADR-16). |
 | The conflict matrix proves wrong when implemented | Medium | That is the purpose of the spike. A wrong rule found in Phase 2 costs days; the same rule found in Phase 5 costs weeks. |
 
 ### Verification approach
@@ -777,7 +858,7 @@ transport (the sync protocol is transport-agnostic).
 | R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's three statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across twenty-nine scenarios. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
 | R-2 | The SSR → client-render switch causes a performance regression that damages the existing Lighthouse score | Medium | The budget is a Phase 7 gate with a documented fallback. The existing perf harness is reused, not rewritten. |
 | R-3 | iOS Safari behaves differently from the emulation (IndexedDB eviction, service worker lifecycle) | Medium | WebKit is in the Playwright matrix from Phase 0. The manual walkthrough on a real device is a Phase 7 gate. The design avoids Background Sync precisely because of iOS. |
-| R-4 | The Neon HTTP driver cannot provide the atomicity the apply path needs | Medium | Proved in Phase 2 (Task 2.4) with the WebSocket-driver fallback already chosen. |
+| R-4 | ~~The Neon HTTP driver cannot provide the atomicity the apply path needs~~ — **closed**: the driver is now the standard `pg` driver over the self-hosted instance, and interactive transactions are the primary path rather than a fallback (ADR-14, ADR-16). Confirmed on the production instance in Phase 2 (Task 2.4) | — | Closed |
 | R-5 | Scope creep toward the deferred v2 features | Medium | §17 is explicit. Anything not in the phase list is out of scope for this roadmap. |
 | R-6 | The recovery takes longer than 12 weeks | Medium | Phases 0–2 are the highest-value, lowest-risk work and are valuable on their own. If the timeline slips, the team ships Phase 6's PWA and offline cold start (the user's headline requirement) before the full conflict-resolution polish. |
 | R-7 | The database grows in a way that degrades the sync pull | Low | The `(household_id, seq)` index, pruning, and a household-scale pull limit of 500 changes per page. |

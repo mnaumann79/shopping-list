@@ -75,9 +75,9 @@ That contradiction is the root of the problem this document resolves.
 
 | Capability | Evidence | Disposition |
 | --- | --- | --- |
-| Email/password signup, sign-in, sign-out | ✅ VERIFIED — drove the real signup → onboarding → dashboard flow in Chromium | **Retain** (Better Auth) |
+| Email/password signup, sign-in, sign-out | ✅ VERIFIED — drove the real signup → onboarding → dashboard flow in Chromium | **Replace** with Supabase Auth (ADR-17) |
 | Household creation, onboarding | ✅ VERIFIED | **Retain** |
-| Household invite by email | ✅ VERIFIED — Better Auth enforces admin-only (returns "not allowed" for plain members) | **Retain**, fix status code |
+| Household invite by email | ✅ VERIFIED — Better Auth enforces admin-only (returns "not allowed" for plain members) | **Replace** with `household_invitations`, fix status code |
 | Shareable join link | ✅ VERIFIED — works, but see §2.3 | **Retain**, add authorization |
 | Household switching | ✅ VERIFIED — `authClient.organization.setActive` | **Retain** |
 | Item CRUD with name / quantity / note | ✅ VERIFIED | **Retain**, fix quantity input |
@@ -106,7 +106,7 @@ That contradiction is the root of the problem this document resolves.
 | B-10 | **No CI quality gate.** The single workflow (`.github/workflows/perf-audit.yml`) is bi-monthly + manual, runs no unit tests, no lint, and there is no `typecheck` script. | ✅ VERIFIED by full-file search |
 | B-11 | **Deleting an item makes it unrecoverable, but clearing a completed item makes it recoverable.** `DELETE` sets `is_active = false`; history filters on `archived_at IS NOT NULL`. Two different delete mechanisms, one invisible to the user. | ✅ VERIFIED in source |
 | B-12 | **`clear-completed` archives items regardless of concurrent activity**, and the SELECT/UPDATE race was flagged HIGH by review and never fixed. | ✅ VERIFIED — `.planning/phases/10-performance-optimizations/10-REVIEWS.md:22,132,142`; implementation at `src/server/services/items.ts:270-303` |
-| B-13 | **Item-store replacement is not transactional.** `updateItem` deletes then re-inserts `item_stores` without a transaction, because the Neon HTTP driver throws on `db.transaction()`. A failure between the two leaves an item with no store tags. | ✅ VERIFIED — `drizzle-orm/neon-http/session.js:151-152` throws `"No transactions support in neon-http driver"` |
+| B-13 | **Item-store replacement is not transactional.** `updateItem` deletes then re-inserts `item_stores` without a transaction, because the Neon HTTP driver throws on `db.transaction()`. A failure between the two leaves an item with no store tags. | ✅ VERIFIED — `drizzle-orm/neon-http/session.js:151-152` throws `"No transactions support in neon-http driver"` — **the cause is removed by the move to the standard `pg` driver** (ADR-16): `db.transaction()` becomes available, so this is fixed by the driver change rather than by a separate repair |
 | B-14 | **Optimistic-update rollback can silently discard a concurrent edit.** `ShoppingList.tsx:380-392` captures the rollback snapshot by side effect inside a `setItems` updater; two in-flight edits on different items clobber each other. | ✅ VERIFIED in source |
 | B-15 | **Deleting an item claims success before the request resolves.** `ItemRow.tsx:767-769` shows `Item removed` optimistically, then the failure path shows `Failed to delete item` — contradictory double feedback. | ✅ VERIFIED in source |
 | B-16 | **The DB client is constructed at module load with a non-null assertion.** `src/db/index.ts:22` calls `neon(process.env.DATABASE_URL!)`; with no `DATABASE_URL` the whole build fails during page-data collection. | ✅ VERIFIED — `pnpm build` failed with `No database connection string was provided to neon()` |
@@ -875,7 +875,7 @@ items → case C.
 │ SERVER  (Next.js 16 App Router on Vercel)                            │
 │                                                                       │
 │  /dashboard /history /settings  →  static shells (no data)            │
-│  /api/auth/*                    →  Better Auth                        │
+│  /api/auth/*                    →  Supabase Auth (GoTrue)             │
 │  /api/sync                      →  sync endpoint (push + pull)        │
 │  /api/categories /stores        →  household-scoped CRUD              │
 │                                                                       │
@@ -883,7 +883,7 @@ items → case C.
 │  │ Application layer: sync apply, conflict resolution, authz      │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
 │  ┌─────────────────────────────────────────────────────────────────┐  │
-│  │ PostgreSQL (Neon) via Drizzle                                    │  │
+│  │ PostgreSQL (self-hosted Supabase) via Drizzle / pg                │  │
 │  │  items, stores, categories, item_stores                        │  │
 │  │  sync_operations, sync_changes, devices, entity_conflicts      │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
@@ -896,9 +896,9 @@ items → case C.
 | --- | --- | --- | --- |
 | Framework | Next.js 16 App Router | **Retain** | Already in use; provides the API routes, the static shell, and the deployment target. A rewrite would buy nothing. |
 | UI | React 19, Tailwind v4, shadcn/ui | **Retain** | The design system is polished and consistent. |
-| Auth | Better Auth 1.5 (email/password + organization plugin) | **Retain** | Handles sessions, organizations, invitations. Reimplementing it would be a large, risky, low-value change. |
+| Auth | Supabase Auth (GoTrue), replacing Better Auth 1.5 | **Replace** | The platform is now self-hosted Supabase, and running a second authentication provider beside it would mean two session systems, two user tables and two membership models. Better Auth's `organization` plugin becomes three application tables (§12). The gain is `auth.uid()`, and therefore real row-level security (§9.2b). **ADR-17.** |
 | ORM | Drizzle 0.45 | **Retain** | Typed, idiomatic, already used well. |
-| Database | PostgreSQL (Neon) | **Retain** | Relational model is a good fit for the domain. |
+| Database | PostgreSQL 17 (self-hosted Supabase) | **Replace** (hosting) | The relational model is retained in full — it was never the problem. What changes is where the database runs and how the app connects: the `neon-http` driver and the `DB_DRIVER` switch go away, and the apply path becomes an ordinary interactive transaction (ADR-14, ADR-16). |
 | Server validation | Zod 4 | **Retain** | Already used consistently at every route boundary. |
 | **Local persistence** | **IndexedDB via Dexie 4** | **New** | Required. See §7.3. |
 | **Reactive reads** | **dexie-react-hooks `useLiveQuery`** | **New** | Required. See §7.3. |
@@ -1148,10 +1148,11 @@ union of the fields touched by the row's outstanding operations.
 | Column | Type | Purpose |
 | --- | --- | --- |
 | `id` | `uuid` PK | Unchanged type; the server now accepts client-supplied values. |
+| `household_id` | `text` → `uuid`, `REFERENCES households(id)` | **Renamed and retyped** — it was `organization_id` and referenced Better Auth's `organization` table. The household is the tenant, and the tenant's id is now a `uuid` (§9.1a). The rename is 71 occurrences across 25 files, and it must happen before Phase 3 adds five more tables that would carry the old name. |
 | `deleted_at` | `timestamptz` nullable | **Tombstone.** `NULL` = live. Set on delete; cleared only by an explicit `item.undelete`. |
 | `version` | `integer` not null default 1 | Incremented on every server-applied change. The client's `baseVersion` is checked against it. |
 | `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata. **An entry exists only for a field that a write actually touched** — a row that has only ever had its name changed has a `field_meta` with one key, not eight. The tracked set is exactly: `name`, `quantity`, `note`, `categoryId`, `storeIds`, `isChecked`, `deletedAt`, `archivedAt`. Each entry is `{ v, lamport, device }`, where **`v` is the row `version` that the write produced** — so `field_meta[f].v` is directly comparable with the row's current `version`, and a client can tell whether a given field has moved since its base version. `device` is the id of the device that wrote it, which is what §11's check-wins rule reads (`field_meta["isChecked"].device`). Enables per-field conflict resolution without a separate table. **It also carries the ordering key for the tombstone:** `field_meta["deletedAt"].lamport` records the effective lamport of the delete that set `deleted_at`, so `item.undelete` can tell whether a *newer* delete exists (§11). |
-| `updated_by_id` | `text` nullable → `user(id)` `ON DELETE SET NULL` | Who last changed the row. Named to match the existing `created_by_id` convention, and carries the same foreign key so the column cannot hold a user id that does not exist. |
+| `updated_by_id` | `uuid` nullable → `auth.users(id)` `ON DELETE SET NULL` | Who last changed the row. Named to match the existing `created_by_id` convention, and carries the same foreign key so the column cannot hold a user id that does not exist. The type becomes `uuid` with the move to Supabase Auth (§9.1a). |
 | `lamport` | `bigint` not null default 0 | Highest Lamport value applied to this row. |
 | `last_op_id` | `uuid` nullable | The `opId` of the operation that last **touched** this row. Set by the compare-and-swap in the same batch, **whether or not the operation changed anything** — a refused operation still stamps it, because that is how the ledger statement distinguishes *"the request decided this operation"* from *"the compare-and-swap was lost"*, and a lost compare-and-swap must stay retryable (a ledger row would make the retry look like a duplicate). **It is corroborating, not the guard.** The guard is that the compare-and-swap matched **exactly one row** (§10.8). `last_op_id` additionally identifies *which* operation wrote the row, which matters for an operation that touches **several rows under one `opId`** (`item.bulkArchive`). It must not be used as the replay guard: after an operation has been applied, `last_op_id = $opId` is still true, so a replay would pass that predicate. — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
 
@@ -1177,7 +1178,13 @@ no dual-write, nothing to remember.
 from History*. It is orthogonal to `deleted_at` (*deleted, tombstoned*).
 The current code conflates the two (defect B-11); 📋 **SPEC** separates them.
 
-**`stores`, `categories`** — additive only:
+**`created_by_id`** — the type also becomes `uuid`, for the same reason as
+`updated_by_id` (§9.1a). It is not listed as a separate row because it
+already exists and its meaning does not change.
+
+**`stores`, `categories`** — additive only, plus the same `household_id`
+rename and retype as `items`:
+
 `version integer not null default 1`, `field_meta jsonb not null default '{}'`,
 `updated_by text nullable`, `last_op_id uuid nullable`, `lamport bigint not null default 0`,
 and `deleted_at timestamptz nullable` — a store or a category is deleted with a
@@ -1219,9 +1226,91 @@ exists, which is what makes §11's rule implementable at all. The pair's
 tombstone is retained on the same terms as an item's: never hard-deleted
 (§9.3).
 
+### 9.1a Identity and household ids: one type, everywhere
+
+The move to Supabase Auth (ADR-17) settles the identity types, because
+Supabase Auth owns `auth.users` and its id is a `uuid`. Two rules then run
+through the whole schema, with no exceptions:
+
+- **Every user id is a `uuid` referencing `auth.users(id)`.** That is
+  `items.created_by_id`, `items.updated_by_id`, `sync_changes.actor_id`,
+  `sync_operations.actor_id`, `household_members.user_id`,
+  `household_invitations.invited_by`, and `household_join_links.created_by_id`.
+- **Every household id is a `uuid` referencing `households(id)`.** That is
+  `items.household_id`, `categories.household_id`, `stores.household_id`,
+  `household_join_links.household_id`, and the `household_id` column of all
+  five sync tables.
+
+**The column is renamed from `organization_id` to `household_id`.** The
+household is the tenant; `organization` was Better Auth's word for it, and
+Better Auth is gone (ADR-17). Leaving a column called `organization_id`
+pointing at a table called `households` would be the kind of inconsistency
+that rots, and this is the cheapest moment to fix it: **71 occurrences
+across 25 files**, all mechanical. It must happen **before Phase 3**,
+because Phase 3 adds five tables that would otherwise carry the old name
+into the new schema.
+
+**The conversion is a mapping, not a cast.** The existing `organization.id`
+values are Better Auth's generated strings — 32 characters, not UUIDs — so
+`organization_id::uuid` would fail on every row. The cutover migration
+(§13.4) therefore:
+
+1. creates `households` rows from the legacy `organization` rows, with fresh
+   `uuid` primary keys;
+2. builds a temporary `organization_map (old_id text, new_id uuid)`;
+3. runs `UPDATE … SET household_id = (SELECT new_id FROM organization_map
+   WHERE old_id = household_id)` on `items`, `categories`, `stores` and
+   `household_join_links`;
+4. runs `ALTER TABLE … ALTER COLUMN household_id TYPE uuid USING
+   household_id::uuid`, which now succeeds because every value is a UUID;
+5. drops the map table.
+
+The same procedure maps **user** ids: `user_map (old_id text, new_id uuid)`
+built while the Supabase Auth users are provisioned, applied to
+`created_by_id`, `updated_by_id` and `actor_id`.
+
 ### 9.2 New tables
 
 ```sql
+-- The household IS the tenant. It was Better Auth's `organization` table;
+-- with Better Auth gone it is an ordinary application table (ADR-17), and
+-- the sync tables below reference it.
+CREATE TABLE households (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        text NOT NULL,
+  created_by  uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Membership. Was Better Auth's `member` table. The role vocabulary is
+-- §12.5's: 'owner' | 'admin' | 'member'.
+CREATE TABLE household_members (
+  household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+  user_id      uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  role         text NOT NULL DEFAULT 'member',
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (household_id, user_id)
+);
+CREATE INDEX household_members_user ON household_members (user_id);
+
+-- Invitations. Was Better Auth's `invitation` table. The token is opaque
+-- and random; the row is the invitation's only state. `revoked_at` is what
+-- closes S-2 — several links may exist at once, and each is revocable on
+-- its own instead of every new link deleting every older one.
+CREATE TABLE household_invitations (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+  email       text NOT NULL,
+  role        text NOT NULL DEFAULT 'member',
+  token       text NOT NULL UNIQUE,
+  invited_by  uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  expires_at  timestamptz NOT NULL,
+  accepted_at timestamptz,
+  revoked_at  timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX household_invitations_household ON household_invitations (household_id);
+
 -- Append-only log of every applied change, per household.
 CREATE TABLE sync_changes (
   seq          bigserial PRIMARY KEY,     -- global, monotonic; filter by household
@@ -1229,7 +1318,7 @@ CREATE TABLE sync_changes (
                                          --  advisory lock, so allocation order equals
                                          --  commit order for a household. A plain sequence
                                          --  does NOT order commits on its own — ADR-05.)
-  household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   entity_type  text NOT NULL,             -- CHECK: 'item' | 'category' | 'store'
   entity_id    uuid NOT NULL,
   op_id        uuid,                      -- NULL when there is no originating operation
@@ -1237,7 +1326,7 @@ CREATE TABLE sync_changes (
   version      integer NOT NULL,
   lamport      bigint NOT NULL,
   device_id    uuid NOT NULL,
-  actor_id     text NOT NULL,
+  actor_id     uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT,
   payload      jsonb NOT NULL,            -- full entity snapshot after the change
   deleted      boolean NOT NULL DEFAULT false,
   created_at   timestamptz NOT NULL DEFAULT now()
@@ -1251,9 +1340,9 @@ CREATE INDEX sync_changes_household_seq ON sync_changes (household_id, seq);
 -- silently re-apply an operation that had already been applied.
 CREATE TABLE sync_operations (
   op_id        uuid PRIMARY KEY,
-  household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   device_id    uuid NOT NULL,
-  actor_id     text NOT NULL,
+  actor_id     uuid NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT,
   entity_type  text NOT NULL,
   entity_id    uuid,                      -- NULL for a multi-entity operation (item.bulkArchive):
                                          -- the operation's identity is its op_id, and a bulk
@@ -1278,7 +1367,7 @@ CREATE INDEX sync_operations_household ON sync_operations (household_id, applied
 -- Known devices per household (device id, name, last seen).
 CREATE TABLE devices (
   id           uuid NOT NULL,
-  household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   name         text NOT NULL,
   epoch        uuid,                      -- the epoch this device last synced against
   last_seen_at timestamptz NOT NULL DEFAULT now(),
@@ -1289,7 +1378,7 @@ CREATE TABLE devices (
 -- Per-household sync state: the Lamport clock, the change-log retention
 -- floor, and the sync epoch. None of these fit on any other table.
 CREATE TABLE household_sync_state (
-  household_id      text PRIMARY KEY REFERENCES organization(id) ON DELETE CASCADE,
+  household_id      uuid PRIMARY KEY REFERENCES households(id) ON DELETE CASCADE,
   epoch             uuid NOT NULL,          -- regenerated when a full resync occurs
   min_retained_seq  bigint NOT NULL DEFAULT 0,  -- the change-log floor for this household
   lamport           bigint NOT NULL DEFAULT 0,  -- the household's Lamport clock
@@ -1299,7 +1388,7 @@ CREATE TABLE household_sync_state (
 -- Conflicts the server resolved, surfaced to the losing device.
 CREATE TABLE entity_conflicts (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
+  household_id uuid NOT NULL REFERENCES households(id) ON DELETE CASCADE,
   entity_type  text NOT NULL,
   entity_id    uuid NOT NULL,
   field        text NOT NULL,
@@ -1341,9 +1430,9 @@ needs age access, not just sequence access.
 
 ```sql
 -- The hot path: the active list for a household.
-CREATE INDEX items_active_household ON items (organization_id) WHERE deleted_at IS NULL;
-CREATE INDEX stores_household        ON stores (organization_id);
-CREATE INDEX categories_household    ON categories (organization_id);
+CREATE INDEX items_active_household ON items (household_id) WHERE deleted_at IS NULL;
+CREATE INDEX stores_household        ON stores (household_id);
+CREATE INDEX categories_household    ON categories (household_id);
 CREATE INDEX item_stores_item        ON item_stores (item_id);
 CREATE INDEX item_stores_live        ON item_stores (item_id) WHERE deleted_at IS NULL;
 
@@ -1361,9 +1450,9 @@ must be able to re-create it (§11). The constraint therefore becomes:
 ```sql
 -- A partial unique index, not a table constraint: soft-deleted rows are
 -- outside it, so a deleted name is free to be reused.
-CREATE UNIQUE INDEX categories_org_name_live ON categories (organization_id, name)
+CREATE UNIQUE INDEX categories_org_name_live ON categories (household_id, name)
   WHERE deleted_at IS NULL;
-CREATE UNIQUE INDEX stores_org_name_live ON stores (organization_id, name)
+CREATE UNIQUE INDEX stores_org_name_live ON stores (household_id, name)
   WHERE deleted_at IS NULL;
 ```
 
@@ -1374,6 +1463,71 @@ first, and the backfill must run before the partial index is created, or the
 constraint build will fail on rows that are soft-deleted but not yet marked.
 
 ---
+
+### 9.2b Row-level security: the second layer, now real
+
+ADR-12 excluded PostgreSQL row-level security because the Neon HTTP driver
+gives every statement its own request, with no session state to hang a
+policy on: a policy keyed to `current_setting('app.current_household')` could
+not be set reliably across the separate queries a request makes, and a policy
+written fail-open returns every row while a fail-closed one returns none.
+Either way RLS would have given the *appearance* of defence in depth while
+behaving unpredictably.
+
+**On the self-hosted Supabase instance that objection no longer holds.**
+Supabase Auth issues a signed JWT, and the app connects to Postgres over the
+standard `pg` driver. The documented way to make a *direct* Postgres
+connection behave like a PostgREST one is to set the claims locally, inside
+the transaction that will run the query:
+
+```sql
+SELECT set_config('request.jwt.claims',
+                   '{"sub":"<user uuid>","role":"authenticated"}', true);
+```
+
+The third argument makes it **local to the transaction**, so the setting
+cannot leak to the next request that borrows the connection. Supabase's
+`auth.uid()` reads `request.jwt.claims`, so it resolves to the user. This is
+reliable in a way the Neon HTTP driver was not: the claim and the query are
+in **one transaction**, so there is no window in which one is set and the
+other is not.
+
+**The policies.** Every household-scoped table gets a policy that resolves
+the caller's membership:
+
+```sql
+ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY items_household_isolation ON items
+  USING      (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()))
+  WITH CHECK (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()));
+```
+
+`household_members` gets its own policy — `USING (user_id = auth.uid())` —
+which is what makes the sub-query above terminate. **The recursion trap is
+real**: a policy on `items` that selects from `household_members`, where
+`household_members`'s policy selects from `items`, loops until PostgreSQL
+gives up. The membership table's policy keys only on `auth.uid()`, so it
+does not.
+
+**The application role must not own the tables.** PostgreSQL's table owner
+bypasses RLS unless the table is marked `FORCE ROW LEVEL SECURITY`, and
+Supabase's `postgres` role owns everything it creates. The application
+therefore connects as a **dedicated non-owner role** (`app`), which is
+subject to RLS; `postgres` is used for migrations, backups and the Supabase
+Studio, and bypasses RLS by design.
+
+**What RLS does and does not replace.** It replaces nothing in §12.5 and
+§12.6 — the application-layer scope helper stays, because it is what
+produces a **404** rather than an empty result, and a 404 is what tells a
+caller "this is not yours" without confirming that the row exists. RLS is
+the **second** layer: it makes a missed predicate harmless instead of
+leaking. The integration test that proves it (§16.4) asserts that a user of
+household A receives **zero rows** — not an empty page rendered by a
+filter — when reading household B's item with the application predicate
+deliberately removed.
 
 ### 9.3 Rationale for a server-side change log
 
@@ -1459,7 +1613,7 @@ about, and the pull that follows includes the outcome of that operation.
 
 **Batch granularity: one HTTP request, one transaction, all of the
 request's operations.** This is the only choice that satisfies both
-constraints. Per-operation batches would mean one Neon HTTP request each — 100
+constraints. Per-operation batches would mean one database round trip each — 100
 queued operations could not meet the 1 s p95 sync target (§15.1). Per-household
 batches would break the per-operation isolation the response envelope depends
 on. So: **one batch per request, containing every operation in that request.**
@@ -1565,7 +1719,7 @@ concrete type, so `src/shared/sync.ts` can define it once and both sides agree:
 ```ts
 type EntitySnapshot = {
   id: string;
-  organizationId: string;
+  householdId: string;
   name: string;
   quantity: string | null;
   note: string | null;
@@ -1891,7 +2045,26 @@ the local value it just wrote.
 
 ---
 
-### 10.8 The apply batch in SQL
+### 10.8 The apply transaction in SQL
+
+**The apply path is one interactive transaction.** On the self-hosted Supabase
+instance the app connects to Postgres over the standard `pg` driver, so
+`db.transaction()` is available and the batch becomes a transaction callback
+rather than Neon's HTTP batch. The three statements below are unchanged by
+that move — they are plain PostgreSQL, and they are executed inside the
+transaction in the order the client sent the operations.
+
+Two things follow, and they are the only things that follow:
+
+1. **The transaction is the unit of atomicity.** All of the request's
+   operations commit together or not at all (INV-12), exactly as the Neon
+   HTTP batch behaved.
+2. **The statements are still pre-built.** A transaction callback runs
+   statements whose parameters were fixed before the transaction began, so
+   the read that conflict resolution depends on still cannot sit inside it.
+   The compare-and-swap moves the check into the write, and the ledger's
+   envelope is still **derived in SQL** (§10.8.3). This is the one part of
+   ADR-14's reasoning that the driver change does not touch.
 
 Each operation is applied by **one** statement, not two. This matters: a plain
 `INSERT` in a second statement runs even when the compare-and-swap matched zero
@@ -1904,7 +2077,7 @@ There are **three statement shapes**: the **item-row statement**, which applies
 every operation that touches an existing item; the **create statement**, which
 inserts one; and the **ledger statement**, which records one operation's
 outcome. All three have been **executed against PostgreSQL 17 using this
-document's own §9.1/§9.2 DDL, and their outcomes verified** — thirty-two
+document's own §9.1/§9.2 DDL, and their outcomes verified** — thirty-three
 scenarios covering a normal update, a field lost to a concurrent write, a
 check that loses by check-wins, a write to a tombstoned row, an undelete that
 is too old, a lost compare-and-swap, both arrival orders of an archive racing
@@ -1941,7 +2114,7 @@ and the conflicts addressed to this device. It does not write the ledger; see
 WITH before AS (
   SELECT * FROM items
    WHERE id = $entity_id
-     AND organization_id = $household_id
+     AND household_id = $household_id
      AND version = $cas_version
 ),
 pairs AS (
@@ -2057,9 +2230,9 @@ applied AS (
          updated_by_id = CASE WHEN w.row_changed THEN $actor_id ELSE t.updated_by_id END
     FROM before AS b, flags AS w
    WHERE t.id = $entity_id
-     AND t.organization_id = $household_id
+     AND t.household_id = $household_id
      AND t.version = $cas_version
-  RETURNING t.id, t.organization_id, t.name, t.quantity, t.note, t.category_id,
+  RETURNING t.id, t.household_id, t.name, t.quantity, t.note, t.category_id,
             t.is_checked, t.archived_at, t.deleted_at, t.field_meta, t.version,
             t.lamport, t.last_op_id, t.updated_by_id, t.updated_at, t.created_at,
             w.row_changed AS changed
@@ -2203,7 +2376,7 @@ entity_snapshot AS (
          (a.deleted_at IS NOT NULL) AS deleted,
          a.changed,
          jsonb_build_object(
-           'id', a.id, 'organizationId', a.organization_id, 'name', a.name,
+           'id', a.id, 'householdId', a.household_id, 'name', a.name,
            'quantity', a.quantity, 'note', a.note, 'categoryId', a.category_id,
            'isChecked', a.is_checked, 'archivedAt', a.archived_at,
            'deletedAt', a.deleted_at, 'fieldMeta', a.field_meta,
@@ -2254,7 +2427,7 @@ would recover them.
 
 ```sql
 WITH created AS (
-  INSERT INTO items (id, organization_id, name, quantity, note, category_id,
+  INSERT INTO items (id, household_id, name, quantity, note, category_id,
                      created_by_id, version, lamport, last_op_id, field_meta)
   VALUES ($entity_id, $household_id, $payload->>'name', $payload->>'quantity',
           $payload->>'note', NULLIF($payload->>'categoryId', '')::uuid,
@@ -2267,7 +2440,7 @@ WITH created AS (
             'storeIds',   CASE WHEN $payload ? 'storeIds' THEN jsonb_build_object('v', 1, 'lamport', $op_lamport, 'device', $device_id) END
           )))
   ON CONFLICT (id) DO NOTHING
-  RETURNING id, organization_id, name, quantity, note, category_id,
+  RETURNING id, household_id, name, quantity, note, category_id,
             is_checked, archived_at, deleted_at, field_meta, version,
             lamport, last_op_id, updated_by_id, updated_at, created_at
 ),
@@ -2302,7 +2475,7 @@ entity_snapshot AS (
   SELECT c.id,
          (c.deleted_at IS NOT NULL) AS deleted,
          jsonb_build_object(
-           'id', c.id, 'organizationId', c.organization_id, 'name', c.name,
+           'id', c.id, 'householdId', c.household_id, 'name', c.name,
            'quantity', c.quantity, 'note', c.note, 'categoryId', c.category_id,
            'isChecked', c.is_checked, 'archivedAt', c.archived_at,
            'deletedAt', c.deleted_at, 'fieldMeta', c.field_meta,
@@ -2519,28 +2692,33 @@ was overridden.
 
 #### 10.8.4 What each part does, and the rules it encodes
 
-**The batch holds the whole request.** Its first element is
-`SELECT pg_advisory_xact_lock(hashtextextended($household_id, 0))`; its second
-and subsequent elements are one statement per operation, in the order the
+**The transaction holds the whole request.** Its first statement is
+`SELECT pg_advisory_xact_lock(hashtextextended($household_id::text, 0))`; its
+second and subsequent statements are one per operation, in the order the
 client sent them. All of them commit or none do (§10.1 — one HTTP request, one
 transaction, all of the request's operations).
 
+**The lock is taken with the household id cast to text.** `hashtextextended`
+takes a `text` argument, and `household_id` is a `uuid` (§9.1a), so the
+parameter is cast. The cast is on the *parameter*, not on the column, so it
+is identical for every caller and cannot be forgotten by one of them.
+
 **Lock order is fixed: household first, then entity rows.** The per-household
-advisory lock is always taken before any row lock, and the rows a batch
+advisory lock is always taken before any row lock, and the rows a transaction
 touches are locked in a deterministic order (by entity id). Because every
-request for a household takes the same first lock, two batches for the same
-household cannot deadlock against each other — one simply waits. A fixed
+request for a household takes the same first lock, two transactions for the
+same household cannot deadlock against each other — one simply waits. A fixed
 entity-row order keeps the same guarantee if a future version ever batches
 across households.
 
-`hashtextextended(household_id, 0)` is the interim choice: a 64-bit hash, so
+`hashtextextended(household_id::text, 0)` is the interim choice: a 64-bit hash, so
 an accidental collision between two households — and therefore an unnecessary
 serialisation, or a lock on the wrong household — is vanishingly unlikely. If
 a household's rows ever need to be locked in a different order, a dedicated
 per-household lock table keyed on a `uuid` replaces it without touching the
 protocol.
 
-Because they share one transaction, **no statement in the batch may raise.**
+Because they share one transaction, **no statement in it may raise.**
 Every failure mode must be a defined non-error outcome: validation,
 authorization and duplicate-name checks happen before the batch; a failed
 compare-and-swap updates zero rows; the ledger insert cannot raise; and
@@ -2958,10 +3136,17 @@ is decided by a logical clock, not by wall-clock time (§5, SC-03).
 
 ## 12. Authentication and authorization
 
-### 12.1 Sessions
+### 12.1 Who issues the session
 
-- **Better Auth is retained** for credential handling, session cookies, and the
-  organization plugin.
+- **Supabase Auth issues the session.** The self-hosted instance runs GoTrue,
+  which owns the `auth` schema; the application never writes to it. Sign-up,
+  sign-in, sign-out and token refresh go through `@supabase/ssr`, which
+  stores the session in cookies the Next.js server can read and refresh.
+- **Better Auth is removed** (ADR-17). It was retained for credential
+  handling, session cookies, and its `organization` plugin — and the
+  `organization` plugin is exactly what §12.5's household model needs, so it
+  is replaced by three ordinary application tables: `households`,
+  `household_members` and `household_invitations` (§9.2).
 - Sessions are 30-day sliding (existing behaviour). 📋 **SPEC**: the signed-in
   **identity** (user id, name, email) and the household list are cached locally
   so the client can display them while offline. **The session token is never
@@ -2971,6 +3156,24 @@ is decided by a logical clock, not by wall-clock time (§5, SC-03).
   call is authorized server-side. The cached session exists only so the UI can
   render a correct header offline.
 
+### 12.1a The active household
+
+Supabase Auth knows **who** the user is. It does not know **which household
+the user is looking at** — that was Better Auth's
+`session.activeOrganizationId`, and it has no equivalent in GoTrue.
+
+**The active household is a cookie**, `sb-household`, holding the household's
+`uuid`. It is deliberately *not* a claim in the JWT: a claim is issued when
+the token is minted, so switching household would need a token refresh, and a
+refresh can fail at exactly the wrong moment — mid-shop, on a bad connection.
+
+The cookie is **never trusted**. Every request that touches a household
+resolves it through `household_members`: if the caller's user id is not a
+member of the household the cookie names, the request is rejected (§12.5).
+**The cookie says which household to look at; the database says whether the
+caller may.** This is the same rule §12.1 applies to the cached client
+session, one level up.
+
 ### 12.2 Offline session expiry (scenario 13)
 
 | Situation | Behaviour |
@@ -2979,6 +3182,11 @@ is decided by a logical clock, not by wall-clock time (§5, SC-03).
 | Offline, session expired or unknown | The app **continues to work fully**. The chip shows `Sign in to sync`. Local data is intact and readable. |
 | Reconnect, session expired | The server returns 401. The client keeps the outbox, shows `Sign in to sync`, and prompts for credentials. On successful sign-in, the outbox is pushed. |
 | Session invalid for another reason (revoked, user removed from household) | The client shows the appropriate message and **discards only the data for the household the user is no longer a member of**, after an explicit confirmation. Data for other households is untouched. |
+
+**The offline path never asks Supabase anything.** "Session expired" is not
+knowable while offline; the client treats *every* session as possibly expired
+and simply keeps working. The server is the only place that can decide, and
+it answers 401.
 
 ### 12.3 Sign-out with unsynchronised changes (scenario 11)
 
@@ -3022,8 +3230,13 @@ person the whole shopping list.
 | Situation | Behaviour |
 | --- | --- |
 | Switching to a household already synced on this device | The switch is **instant and offline**. Its cached list renders. The outbox is partitioned per household, so pending work for the other household is untouched. |
-| Switching to a household never synced on this device | The app shows `This household hasn't been downloaded on this device. Connect to download it.` The server-side `activeOrganizationId` is updated on the next successful sync. |
-| Switching with pending work for the current household | The pending work stays queued in its own partition and is pushed when that household is next synced. No loss. |
+| Switching to a household never synced on this device | The app shows `This household hasn't been downloaded on this device. Connect to download it.` The `sb-household` cookie is updated on the next successful sync. |
+| Switching with pending work for the current household | The pending work stays queued in its own partition and is pushed when that household is next synced. |
+
+**The offline switch does not touch the cookie.** The `sb-household` cookie
+is the *server's* view of the active household; the client's offline switch
+is a local rendering decision. They are reconciled on the next successful
+sync, when the client sets the cookie to the household it is showing.
 
 ### 12.5 Authorization rules (server-side, authoritative)
 
@@ -3038,35 +3251,49 @@ person the whole shopping list.
 | Delete a user | Platform admin (`ADMIN_EMAIL`) |
 
 **Every one of these is enforced in the server application layer, not in the UI.**
-The current gap (S-1, S-3) is closed. 📋 **SPEC**: a shared `requireHouseholdRole(orgId, userId, roles)` helper is used by every household-scoped route, replacing the ad-hoc checks.
+The current gap (S-1, S-3) is closed. 📋 **SPEC**: a shared
+`requireHouseholdRole(householdId, userId, roles)` helper is used by every
+household-scoped route, replacing the ad-hoc checks.
+
+**The helper's membership test is a single query against
+`household_members`** — the table that replaces Better Auth's `member` table.
+The role vocabulary is exactly `'owner' | 'admin' | 'member'`, stored as text
+with a `CHECK` constraint, so a role that is not one of the three cannot be
+written at all.
 
 ### 12.6 Tenant isolation
 
-Isolation is enforced in two layers, deliberately:
+Isolation is enforced in three layers, and the third one is new:
 
-1. **Application layer** — every query is scoped by `organization_id` via a
-   shared scope helper that cannot be forgotten. (Today the predicate is applied
-   correctly — verified — but it is repeated by hand in every call site.) The
-   helper becomes the **only** sanctioned way to touch a household-scoped table:
-   direct `db.select().from(items)` calls outside it are forbidden and enforced
-   by a lint rule and by code review.
+1. **Application layer** — every query is scoped by `household_id` via a
+   shared scope helper that cannot be forgotten. (Today the predicate is
+   applied correctly — verified — but it is repeated by hand in every call
+   site.) The helper becomes the **only** sanctioned way to touch a
+   household-scoped table: direct `db.select().from(items)` calls outside it
+   are forbidden and enforced by a lint rule and by code review.
 2. **Test layer** — an integration test asserts that a user of household A
    receives `404` for household B's item on read, update, and delete. This test
    must run against a **real** database, because the current mocked `db` ignores
-   `where()` clauses entirely and would pass even if the predicate were deleted.
+   `where()` clauses entirely and would pass even if the predicate was deleted.
+3. **Database layer** — PostgreSQL row-level security (§9.2b). Every
+   household-scoped table carries a policy that resolves the caller's
+   membership, and the application connects as a non-owner role so the policy
+   actually applies.
 
-**PostgreSQL row-level security is deliberately NOT used** (ADR-12). On the
-Neon HTTP driver each statement is an independent request with no session
-state, so a policy keyed to `current_setting('app.current_household')` cannot be
-set reliably for the whole request. A fail-open policy silently returns every
-row; a fail-closed one silently returns none. RLS would give the *appearance* of
-defence in depth while behaving unpredictably — which is worse than not having
-it, because it would suppress the care the application-layer check needs. RLS is
-recorded as **deferred**, to be reconsidered only if the Neon WebSocket driver
-(adopting real session state) is adopted, at which point it becomes a genuine
-second layer rather than a false one.
+**Layer 3 is what makes layer 1's absence survivable.** A missed predicate in
+layer 1 now yields **zero rows** instead of another household's data, and
+the integration test asserts exactly that — with the application predicate
+deliberately removed, so the test proves the *database* is the backstop rather
+than the application.
 
----
+**RLS was excluded before this, for a reason that no longer holds.** ADR-12
+excluded it because the Neon HTTP driver gave every statement its own request
+with no session state, so a policy could not be keyed reliably to the
+caller. The self-hosted instance connects over the standard `pg` driver, and
+the claims are set **inside the same transaction as the query**
+(`set_config('request.jwt.claims', …, true)`), so there is no window in which
+the policy is evaluated without the caller being known. ADR-12 is amended
+accordingly; the reasoning it recorded is not discarded, it is answered.
 
 ## 13. Data migration and recovery
 
@@ -3109,6 +3336,87 @@ user-data risk of option C does not exist in option B.
   knows and rejects others with `UNSUPPORTED_OPERATION`; the client surfaces
   those as blocked operations rather than dropping them.
 
+### 13.2a The hosting cutover: Neon → self-hosted Supabase
+
+§13.1 is about migrating *user data into the offline-first model*. This
+section is about moving the **database and the hosting** from Neon to the
+self-hosted Supabase instance, and moving **authentication** from Better
+Auth to Supabase Auth (ADR-16, ADR-17). The two happen in one window,
+because the auth change rewrites the identity columns the data move has to
+map anyway.
+
+#### The cutover, in order
+
+| # | Step | When | Reversible? |
+| --- | --- | --- | --- |
+| 1 | **Verify the target.** The instance's PostgreSQL major version is recorded; §10.8's three statements are re-run against it with the §9 DDL (the fixture is the server-side test, §16.4); a restore from the instance's own backup is performed and read back. | T−7 days | n/a |
+| 2 | **Provision the Supabase Auth users.** For each legacy user, create a GoTrue user with `email_confirm: true` and the legacy display name in `user_metadata`. Record `user_map (old_id text, new_id uuid)`. The legacy password hash is **not** convertible — see below — so the provisioned user gets a random unusable password. | T−1 day | Yes — the users are deleted and re-created |
+| 3 | **Dry run.** Dump Neon, restore into a scratch database on the instance, run the whole mapping (§13.2b), and compare row counts table by table. | T−1 day | Yes |
+| 4 | **Maintenance window.** Put the app in read-only mode. Take the final dump, restore, run the mapping, verify. | T−0 | **Yes** — Neon is untouched until the next step |
+| 5 | **Repoint and deploy.** Change `DATABASE_URL` and the Supabase URL/keys in the deployment environment, and deploy. | T−0 | **Yes** — revert the two environment variables and redeploy |
+| 6 | **Smoke test.** Sign in as a migrated user, load a household, create and check an item, and confirm the change log records it. | T−0 | Yes, by reverting |
+| 7 | **Keep Neon for the rollback window.** Neon stays intact and untouched for **14 days** after the cutover. Reverting is a configuration change, not a restore. | T+14 days | — |
+| 8 | **Decommission.** Drop the legacy Better Auth tables, remove the legacy sign-in route, and delete the legacy code. | T+14 days | No |
+
+**The rollback is a configuration change, not a restore — for fourteen days.**
+That is the single most important property of this design, and it is why
+step 7 exists. Nothing is deleted from Neon until the rollback window closes.
+
+#### 13.2b The identity mapping
+
+Two mapping tables are built during the window and dropped with it:
+
+```sql
+CREATE TEMP TABLE user_map (old_id text PRIMARY KEY, new_id uuid NOT NULL);
+CREATE TEMP TABLE organization_map (old_id text PRIMARY KEY, new_id uuid NOT NULL);
+```
+
+The legacy `organization` rows become `households` rows with **fresh** `uuid`
+primary keys; the legacy `member` rows become `household_members` rows with
+`user_id` taken from `user_map`; the legacy `invitation` rows become
+`household_invitations` rows. Then, on each household-scoped table:
+
+```sql
+UPDATE items SET household_id = m.new_id
+  FROM organization_map m WHERE m.old_id = items.household_id;
+-- …and the same for categories, stores and household_join_links —
+
+ALTER TABLE items ALTER COLUMN household_id TYPE uuid USING household_id::uuid;
+```
+
+The cast succeeds **only after** the mapping, because the legacy ids are
+Better Auth's generated strings rather than UUIDs (§9.1a). The same procedure
+applies to `created_by_id`, `updated_by_id` and `actor_id`, using `user_map`.
+
+#### 13.2c Passwords: the one thing that cannot be mapped
+
+**A password hash cannot be converted from one algorithm to another.**
+Better Auth hashes with **scrypt**; GoTrue verifies **bcrypt**. There is no
+function that turns a scrypt hash into a bcrypt hash, because both are
+one-way. So the hashes cannot be carried across, and there are exactly two
+honest options:
+
+| Option | What it costs | Verdict |
+| --- | --- | --- |
+| **Force a password reset** on every account | Every user must reset before they can sync. Users who never reset are locked out of their own shopping list. | Rejected — it treats a password as disposable, and for a family app it is not |
+| **Carry the password across at sign-in** | The old password is in plaintext for the duration of one request, and is handed to GoTrue to be hashed with bcrypt. | **Chosen** |
+
+**The chosen mechanism is a transitional sign-in.** For the rollback window
+(§13.2a step 8), the legacy Better Auth tables are present in the new
+database and Better Auth is still installed, pointed at it. The sign-in route
+tries Supabase Auth first; if that fails **and** the legacy tables still hold
+the account, it verifies the password against the legacy hash, provisions the
+GoTrue user with that same password, and signs the user in. The plaintext
+exists for exactly one request, over TLS, and is never logged.
+
+**A user therefore never has to reset their password, and never sees a
+sign-in prompt they did not expect.** The transitional path is removed when
+the rollback window closes, and the legacy tables are dropped with it.
+
+**What this costs.** Better Auth stays a dependency for two weeks, and its
+tables live in the same database as the new ones. That is a temporary,
+explicit, dated state — not a permanent second authentication system.
+
 ### 13.3 Recovery objectives
 
 | Scenario | Recovery |
@@ -3117,6 +3425,7 @@ user-data risk of option C does not exist in option B.
 | The server database is restored from backup | Clients detect a `fullResyncRequired` response (the `seq` space regressed) and rebuild. |
 | A client is stuck with a corrupt local database | The client detects an open failure on the IndexedDB, offers `Reset local data and re-download`, and preserves the outbox as an exportable JSON file first. |
 | A bad server release corrupts data | The additive migration design means a rollback is a migration down, not a data restore. |
+| The hosting cutover goes wrong | The rollback is a configuration change — the previous `DATABASE_URL` — and is available for fourteen days after the cutover (§13.2a). No restore is needed, because Neon is not modified during the window. |
 
 ---
 
@@ -3125,7 +3434,7 @@ user-data risk of option C does not exist in option B.
 | ID | Requirement |
 | --- | --- |
 | SEC-01 | Every API route MUST verify the session server-side. The middleware is an optimistic redirect only and MUST NOT be treated as an authorization layer (already documented in `middleware.ts:11-13`). |
-| SEC-02 | Every household-scoped query MUST be scoped by `organization_id`, enforced by a shared scope helper that is the only sanctioned access path to household-scoped tables. RLS is explicitly not used (ADR-12). |
+| SEC-02 | Every household-scoped query MUST be scoped by `household_id`, enforced by a shared scope helper that is the only sanctioned access path to household-scoped tables. Row-level security is a **second** layer on top of it, not a replacement (ADR-12, §9.2b). |
 | SEC-03 | Only owners/admins may invite, mint join links, or remove members — enforced server-side, with **403** responses (not 500). |
 | SEC-04 | No endpoint may return data without a session check. `GET /api/invitation-email` must require a session or be removed. |
 | SEC-05 | The service worker MUST NOT cache any authenticated API response. Only the static shell and hashed static assets may be cached. |
@@ -3207,7 +3516,7 @@ degrade to a clear, blocking message rather than a silent failure.
 1. **Do not mock away the system under test.** A test that mocks the database
    proves nothing about tenant isolation. The current suite's core defect is
    that its fake `db` **ignores `.where()` entirely**, so every
-   `organization_id` predicate in the codebase is untested.
+   `household_id` predicate in the codebase is untested.
 2. **Real persistence, real endpoints, real interruption** for at least the
    core sync paths.
 3. **Every invariant in §4.1 has at least one automated test.**
@@ -3304,8 +3613,8 @@ This is the acceptance demonstration for the whole project.
 
 **A second, lower-level fixture sits under it.** §10.8's three statements have
 already been executed against PostgreSQL 17 with this document's own DDL,
-across **thirty-two scenarios**, and their outcomes verified. Those
-thirty-two scenarios are the **server-side fixture** for Phase 3: an
+across **thirty-three scenarios**, and their outcomes verified. Those
+thirty-three scenarios are the **server-side fixture** for Phase 3: an
 implementation that reaches a different outcome for any of them fails the test
 rather than passing review.
 
@@ -3320,8 +3629,9 @@ The list, grouped by what it proves:
 | **BULK** (4) | a mixed bulk operation — one archived, one skipped, one contested; a bulk operation where every candidate was skipped; a row archived **before** the sync model (no `field_meta` entry); a create whose id was already taken | the bulk envelope, and the case where there is no identifiable loser to notify |
 | **ENTITY** (3) | a `category.*` operation is recorded; a `store.*` operation is recorded; an operation whose compare-and-swap was **lost** is not recorded | that the ledger's decided-gate is entity-type aware |
 | **CREATE** (2) | `item.create` writes the item **and** its tags; a create whose id is already taken writes nothing, and leaves no orphan tag rows | the create statement, and its duplicate-id behaviour |
+| **LOCK** (1) | the per-household advisory lock takes a `uuid` parameter (`hashtextextended($household_id::text, 0)`): it executes, yields a 64-bit key, is deterministic for the same household, differs between households, and is transaction-scoped | ADR-05's serialisation primitive, on the parameter type §9.1a introduces |
 
-That is thirty-two scenarios, each asserted against the document's own DDL and
+That is thirty-three scenarios, each asserted against the document's own DDL and
 the document's own SQL.
 
 ### 16.5 CI gates
@@ -3333,13 +3643,23 @@ the document's own SQL.
 | Lint | `pnpm lint` | must pass |
 | Type-check | `pnpm typecheck` (`tsc --noEmit`) | must pass — **the script is missing today (B-9)** |
 | Unit | `pnpm test` | must pass — **fails today (B-8)** |
-| Integration | `pnpm test:integration` (real PostgreSQL service container) | must pass |
+| Integration | `pnpm test:integration` (real PostgreSQL, from the **Supabase local stack**) | must pass |
 | Build | `pnpm build` | must pass |
 | E2E | `pnpm test:e2e` (Playwright, chromium + webkit) | must pass |
 | Offline demo | `pnpm verify:offline` | must pass |
 | Perf | `pnpm verify:perf` (existing Lighthouse harness) | LCP ≤ 2500 ms, score ≥ 90 |
 
 The existing `perf-audit.yml` schedule is kept.
+
+**CI runs the Supabase local stack, not the production instance.** The
+official `supabase` CLI stack (`supabase start`) brings up a version-matched
+PostgreSQL with the `auth` schema, GoTrue and the local role setup — which
+is what the integration suite needs, because the RLS policies depend on
+`auth.uid()` resolving (§9.2b) and a bare PostgreSQL service container cannot
+provide it. **The local stack's PostgreSQL major version must match the
+production instance's**, or the fixture proves something other than what runs
+in production. The version is pinned in `supabase/config.toml` and asserted
+by the integration job.
 
 ---
 
@@ -3383,11 +3703,13 @@ The existing `perf-audit.yml` schedule is kept.
 | **ADR-08** | **Client-generated UUIDv7 primary keys; the server accepts client ids.** | An offline client must know a record's id before the server has seen it. UUIDv7 is time-ordered (good index locality) and fits the existing `uuid` column type. | Server-generated ids — the client cannot reference a record it created offline. ULID — needs a `text`/custom column and a lexicographic-sort assumption; UUIDv7 is a standard UUID. |
 | **ADR-09** | **Tombstones (`deleted_at`) are terminal and are NEVER hard-deleted from the server.** The 90-day retention window applies only to the change log, and it defines the maximum device offline window beyond which a full resync is mandatory and authoritative (FR-31, §9.3). | Makes resurrection impossible (FR-24) and makes "delete" and "clear completed" two clearly distinct, separately recoverable behaviours (fixes B-11). | Hard delete — a stale device would resurrect the item on its next sync. The current `is_active` flag — indistinguishable from "not in the list", and not recoverable from History. |
 | **ADR-10** | **Foreground sync only; no dependency on the Background Sync API.** | iOS Safari does not implement it and Chromium's is unreliable when the browser is terminated. Durability comes from IndexedDB, not from a background task. | Background Sync as primary — silently loses pending work on iOS. |
-| **ADR-11** | **Keep Next.js, Better Auth, Drizzle, and PostgreSQL.** | They are used well and are not the problem. The problem is the data-ownership model, not the tools. | A different framework — large, risky, and buys nothing for this problem. |
-| **ADR-12** | **Server-side authorization is authoritative and role-checked. Tenant isolation is enforced by a single application-layer scope helper, NOT by PostgreSQL row-level security.** | The current join-link gap (S-1) is a UI-only check, so isolation must be enforced on the server. **RLS is deliberately excluded.** On the Neon HTTP driver, each statement is an independent request with no session state: a policy would need `current_setting('app.current_household')`, which can only be set inside a transaction and cannot be relied upon to persist across the separate queries a request makes. A policy written fail-open silently returns every row; one written fail-closed silently returns none. Either way RLS would give the *appearance* of defence in depth while behaving unpredictably — worse than not having it, because it suppresses the care the application-layer check actually needs. A single scope helper that every query must pass through, plus an integration test that asserts a cross-household read returns 404, is honest and testable. | *RLS as a second layer* — unreliable on the retained driver (see rationale); it would create false confidence rather than real isolation. *UI-only checks* — already proven insufficient. |
+| **ADR-11** | **Keep Next.js, Drizzle and PostgreSQL. Replace Better Auth with Supabase Auth** (see ADR-17). | Next.js, Drizzle and PostgreSQL are used well and are not the problem; the problem is the data-ownership model, not the tools. Better Auth is the exception: the organisation plugin it provided is replaced by ordinary tables, because the authentication provider is now the platform's (ADR-17). | A different framework — large, risky, and buys nothing for this problem. *Keeping Better Auth* — see ADR-17. |
+| **ADR-12** | **Server-side authorization is authoritative and role-checked. Tenant isolation is enforced in three layers: the application-layer scope helper, an integration test, and PostgreSQL row-level security.** | The current join-link gap (S-1) is a UI-only check, so isolation must be enforced on the server. **This ADR originally excluded RLS, and the reasoning still stands:** on the Neon HTTP driver each statement was an independent request with no session state, so a policy keyed to `current_setting('app.current_household')` could not be relied upon to persist across the separate queries a request makes; a policy written fail-open silently returns every row, one written fail-closed silently returns none, and either way RLS gives the *appearance* of defence in depth while behaving unpredictably. **The move to the self-hosted Supabase instance answers that objection rather than ignoring it.** Supabase Auth issues a signed JWT, and the app connects over the standard `pg` driver, so the claims can be set with `set_config('request.jwt.claims', …, true)` — **local to the transaction that runs the query**. There is therefore no window in which a policy is evaluated without the caller being known, which is precisely the failure the original objection described. The application connects as a non-owner role so the policies actually apply (§9.2b). | *RLS alone* — it cannot produce a 404, so the application-layer check is still required; it is a second layer, not a replacement. *The original ADR-12* — superseded: its stated blocker no longer exists, and leaving a false rationale in force would suppress the care the application-layer check needs. *UI-only checks* — already proven insufficient. |
 | **ADR-13** | **Integration tests run against a real PostgreSQL, not a mocked `db`.** | The current fake `db` ignores `where()` clauses, so the codebase's tenant-isolation predicates are entirely untested. The `DB_DRIVER` switch already exists (`src/db/index.ts:16-19`). | Continuing to mock the database — it cannot verify isolation, constraints, or migrations. |
-| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap that also stamps the row with the id of the operation that touched it.** The batch's first statement takes a per-household transaction-scoped advisory lock — `pg_advisory_xact_lock(hashtextextended(household_id, 0))`, 64-bit — which is held to commit because a Neon HTTP batch is one transaction on one connection; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`) **and sets `last_op_id = $opId`** — unconditionally, so a *refused* operation still stamps it; the change-log append is then gated on the compare-and-swap having matched (it selects `FROM applied`, which is empty when the update matched no row), and the idempotency record is a **separate statement** whose envelope is derived from the rows the transaction wrote (§10.8.3). | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Four constraints force this shape. (1) The Neon HTTP driver throws on `db.transaction()`, so the apply must use `db.batch()`, which maps to Neon's atomic HTTP batch transaction. (2) A batch executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. (4) **The change-log append must be guarded on the operation, not on the version.** Two different operations can both read `version = 12`; the winner writes `version = 13`, and the loser's compare-and-swap updates zero rows — but a change-log insert written as `INSERT … SELECT … FROM items WHERE id = $1 AND version = 13` matches the **winner's** row and appends a second entry for one logical change, so the change log stops being a faithful total order and the pulled `changes[]` contains the same entity twice. There is no shortcut via a unique constraint: `UNIQUE (op_id, entity_id)` does not help, because the two racing operations have *different* `opId`s. The row itself must carry the id of the operation that touched it — hence `last_op_id` (§9.1). Note that `last_op_id` is **not** the change-log's guard: it is stamped even by an operation that changed nothing, so a `WHERE last_op_id = $opId` predicate would append a change-log entry for a change that never happened. The change log is gated on the compare-and-swap having matched; `last_op_id` answers a different question — *did this operation reach this row at all* — which is what the ledger statement needs to tell a **refused** operation apart from a **lost** one. | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. Guarding the change-log insert on `version` alone — a losing operation appends a duplicate entry for the winner's write. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. The Neon WebSocket driver (interactive transactions) remains the fallback if the batch approach proves insufficient in Phase 2. |
+| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap that also stamps the row with the id of the operation that touched it.** The transaction's first statement takes a per-household transaction-scoped advisory lock — `pg_advisory_xact_lock(hashtextextended(household_id::text, 0))`, 64-bit — which is held to commit because the transaction is one unit of work on one connection; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`) **and sets `last_op_id = $opId`** — unconditionally, so a *refused* operation still stamps it; the change-log append is then gated on the compare-and-swap having matched (it selects `FROM applied`, which is empty when the update matched no row), and the idempotency record is a **separate statement** whose envelope is derived from the rows the transaction wrote (§10.8.3). | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Four constraints force this shape. (1) The apply is **one interactive transaction** — on the self-hosted instance the app connects over the standard `pg` driver, so `db.transaction()` is available and the atomic HTTP batch is no longer needed. (2) A transaction callback still executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. (4) **The change-log append must be guarded on the operation, not on the version.** Two different operations can both read `version = 12`; the winner writes `version = 13`, and the loser's compare-and-swap updates zero rows — but a change-log insert written as `INSERT … SELECT … FROM items WHERE id = $1 AND version = 13` matches the **winner's** row and appends a second entry for one logical change, so the change log stops being a faithful total order and the pulled `changes[]` contains the same entity twice. There is no shortcut via a unique constraint: `UNIQUE (op_id, entity_id)` does not help, because the two racing operations have *different* `opId`s. The row itself must carry the id of the operation that touched it — hence `last_op_id` (§9.1). Note that `last_op_id` is **not** the change-log's guard: it is stamped even by an operation that changed nothing, so a `WHERE last_op_id = $opId` predicate would append a change-log entry for a change that never happened. The change log is gated on the compare-and-swap having matched; `last_op_id` answers a different question — *did this operation reach this row at all* — which is what the ledger statement needs to tell a **refused** operation apart from a **lost** one. | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. Guarding the change-log insert on `version` alone — a losing operation appends a duplicate entry for the winner's write. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. *The Neon WebSocket driver as a fallback* — no longer applicable: the self-hosted instance is reached over the standard `pg` driver, so interactive transactions are the primary path, not a contingency. |
 | **ADR-15** | **Service worker caches the static shell and hashed assets only — never an API response.** | The shell is identical for all users (no user data), so it caches safely and enables offline boot. API responses are per-user and per-household; caching them risks cross-account data leakage on a shared device. | Caching API responses — data-leak risk on shared devices and stale-data bugs. |
+| **ADR-16** | **Self-hosted Supabase is the database and hosting platform; Neon is retired.** The app connects to the instance's PostgreSQL over the standard `pg` driver, and the `neon-http` driver and the `DB_DRIVER` switch are removed. | The instance is already the product owner's chosen platform, and it removes a managed-service dependency from a product whose defining constraint is behaviour on a bad network. The technical consequence is the point: **the Neon HTTP driver throws on `db.transaction()`**, so the sync apply path had to be built as Neon's HTTP batch, with its pre-built-statement constraint and its four-part contortion (ADR-14). Over the standard driver the apply path is an ordinary interactive transaction, which is simpler and is the shape the design always wanted. The §10.8 SQL is **unchanged by the move** — it is plain PostgreSQL — so the verified statements survive the platform change intact. | *Staying on Neon* — the driver constraint stays, and the platform decision contradicts the product owner's stated intent. *Supabase's own client and PostgREST instead of Drizzle* — abandons the retained ORM and the verified SQL, for no benefit this application needs. |
+| **ADR-17** | **Supabase Auth replaces Better Auth. The household model moves from Better Auth's `organization` plugin into three application tables — `households`, `household_members`, `household_invitations` — and the "active household" becomes a cookie validated against membership.** | The authentication provider is now the platform's, so running a second one beside it would be two session systems, two user tables and two membership models — the exact duplication §11 exists to avoid. The cost is the `organization` plugin, and the cost is bounded: three tables, three queries, and the invitation flow, all of which the application already owns in part (`household_join_links` and `/api/invitation-email` are bespoke today). The gain is that the identity id is a `uuid` owned by the platform, which is what makes `auth.uid()` — and therefore **real** row-level security (§9.2b) — possible. That is not a small gain: it converts tenant isolation from one layer to three, and closes S-5 at the database. | *Keeping Better Auth alongside Supabase Auth* — two session systems, two user tables, and the RLS gain is lost, because `auth.uid()` would not know the caller. *Supabase Auth with no household model* — households are the product's central domain concept; modelling them as an afterthought would be worse than modelling them explicitly. *Supabase Auth with the browser querying tables directly through PostgREST* — a second data path beside the server's, with the anon key in the client, for no gain over the existing API routes. |
 
 ---
 
@@ -3474,7 +3796,7 @@ are recorded here so that nothing is silently lost.
 | R-3 | `entity_conflicts` retention beyond the change-log window — retained at least as long for now, with the exact second pruning window undecided | Database | Phase 3 |
 | R-4 | The `epoch` field's exact semantics — it changes on a full resync, but whether it is also rotated on a household reset is undecided | Backend + Database | Phase 3 |
 | R-5 | The `item_stores` primary key requires existing duplicate tag rows to be de-duplicated **before** the constraint is added | Database | Phase 3 |
-| R-6 | The exact trigger conditions under which the Neon WebSocket driver would be adopted instead of the batch approach | Lead + Database | Phase 2 |
+| R-6 | ~~The exact trigger conditions under which the Neon WebSocket driver would be adopted instead of the batch approach~~ — **moot**: the self-hosted instance is reached over the standard `pg` driver, so interactive transactions are the primary path rather than a contingency (ADR-14, ADR-16) | — | Closed |
 | R-7 | The "manage your devices" surface — listing members' devices and last-seen times — is a Phase 6 task whose scope depends on D-6 | Frontend + Backend | Phase 6 |
 | R-8 | Whether the `override` operation should be rate-limited or restricted to household admins | Backend | Phase 3 |
 | R-9 | The `deviceName` the client sends — whether it is a free-text label, a browser/OS-derived name, or user-editable | Frontend | Phase 4 |
