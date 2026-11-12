@@ -271,7 +271,7 @@ beyond the contract types themselves.
 | 2.1 | Write the ADR set from `docs/project.md` §18 into the repository, recording the decisions, the rejected alternatives, and the consequences | Lead | `ARCHITECTURE/0001…0015-*.md` |
 | 2.2 | Define the shared contract types: `SyncOperation`, `SyncRequest`, `SyncResponse`, `SyncChange`, `Conflict`, `LocalItem`, `OutboxOp`, error codes | Lead | `src/shared/sync.ts` |
 | 2.3 | Define the local IndexedDB schema and the Dexie version/migration plan | Frontend | `src/client/db/schema.ts` (design only) |
-| 2.4 | Prototype and **verify the atomicity approach on Neon HTTP**: confirm that `db.batch()` gives an all-or-nothing multi-statement write, and confirm the fallback (the Neon WebSocket driver) if it does not | Database | `src/db/**` (scratch), ADR-0026 |
+| 2.4 | Prototype and **verify the atomicity approach on Neon HTTP** (ADR-14): confirm that `db.batch()` gives an all-or-nothing multi-statement write, and confirm that the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a batch executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it | Database | `src/db/**` (scratch), ADR-0026 |
 | 2.5 | Verify the conflict-resolution matrix as a **pure function** before it is wired to the server, with a table-driven test covering every row of `docs/project.md` §11 | Backend | `src/server/sync/conflict-resolution.ts`, `src/server/sync/__tests__/conflict-resolution.test.ts` |
 | 2.6 | Prove the client-side generation of UUIDv7 ids and the Lamport clock implementation | Frontend | `src/client/db/ids.ts` (design only) |
 
@@ -365,7 +365,7 @@ Phase 2 (frozen contracts, proven atomicity approach).
 
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
-| The apply engine's read-modify-write is not atomic under concurrency | Medium | The apply runs inside `db.batch()` (or the WebSocket-driver transaction, per ADR-0026). Task 3.3 must serialise per entity — a per-entity advisory lock or an `UPDATE … WHERE version = baseVersion` compare-and-swap. |
+| The apply engine's read-modify-write is not atomic under concurrency | Medium | Per ADR-14, the entity write is a **compare-and-swap** — `UPDATE … WHERE id = ? AND version = ?`. Zero rows updated means another device won the race, so the operation is retried against fresh state instead of blindly overwriting. The batch then commits the entity write, the change-log entry, and the idempotency record together. A per-entity advisory lock is **not** used: a lock cannot span a batch on the Neon HTTP driver. |
 | `field_meta` grows unbounded | Low | Only one entry per mutable field per entity; bounded by the field count. |
 | The change log grows large | Medium | Pruning by age (Phase 3.5) plus an index on `(household_id, seq)`. |
 | Legacy `is_active` rows are double-counted during the transition | Low | The backfill is a separate migration, and the active-list query filters on `deleted_at IS NULL` only after the backfill lands. |
