@@ -177,7 +177,7 @@ Requirements are numbered `FR-*`. `MUST` is binding.
 | FR-28 | Sign-up, sign-in, sign-out, and session persistence MUST work as today. |
 | FR-29 | The user MUST be able to sign out with unsynchronised changes and MUST be told what will happen to them before doing so. |
 | FR-30 | An expired session MUST NOT destroy locally stored data. |
-| FR-31 | Deleted items and tombstones MUST be retained server-side for at least 90 days so that a long-offline device cannot resurrect them. |
+| FR-31 | A tombstoned item MUST NOT be hard-deleted from the server for as long as the product exists, so that no stale device can ever resurrect it. The change-log retention window (90 days) separately defines the **maximum offline window**; a device older than that MUST full-resync, and a full resync is authoritative over local state. |
 
 ---
 
@@ -379,8 +379,10 @@ happened on the device is pushed. Nothing is lost in either direction.
 `lamport`. On reconnect the device pushes its outbox, then pulls every change
 since its `lastSeq`. If the device's `lastSeq` is older than the change-log
 retention window (90 days), the server returns `fullResyncRequired` and the
-client rebuilds its local tables and **replays its outbox afterwards**
-(INV-11, §10.6).
+client rebuilds its local tables, **discarding its local tombstones because the
+server snapshot is authoritative** (§9.3, FR-31), and then **replays its outbox
+afterwards** (INV-11, §10.6). Replayed operations against a tombstoned entity
+are rejected by the server, so a replay cannot resurrect a deleted item.
 
 **Acceptance criteria.**
 - The device can be offline for 7 simulated days with no loss and no degraded
@@ -388,6 +390,9 @@ client rebuilds its local tables and **replays its outbox afterwards**
 - On reconnect, all changes from both directions are present.
 - With `lastSeq` forced below the retention floor, the device re-bootstraps and
   its own pending operations are **still applied** afterwards.
+- An item deleted on the server while the device was offline **does not
+  reappear** on the device after the re-bootstrap — the full resync is
+  authoritative over the device's stale local state.
 
 ---
 
@@ -970,11 +975,30 @@ monotonic `bigserial` per change is cheap, gives a total order, supports
 incremental pull with a single indexed range scan, and doubles as an audit trail
 of who changed what and when.
 
-**Retention.** `sync_changes` rows are pruned after a window (90 days,
-matching FR-31). A client whose `lastSeq` predates the oldest retained `seq` for
-its household receives `fullResyncRequired: true` and re-bootstraps. Local
-unsynchronised operations are preserved and replayed after the snapshot
-(INV-11, scenario 17).
+**Retention — two different clocks, and conflating them resurrects deleted
+items.**
+
+1. **Tombstones are never hard-deleted.** An `items` row whose `deleted_at` is
+   set is retained indefinitely. If it were purged, a device that has been
+   offline longer than the purge window would still hold the item as live, would
+   reconnect, and would push an `item.update` for a row the server no longer
+   knows is deleted — resurrecting it and breaking FR-24 and INV-07. Purging
+   tombstones is therefore **not** offered as a space optimisation.
+2. **The change log is pruned after 90 days.** `sync_changes` rows are the only
+   thing that grows without bound, so they are the only thing pruned. The
+   90-day window therefore defines the **maximum device offline window**: a
+   client whose `lastSeq` predates the oldest retained `seq` for its household
+   receives `fullResyncRequired: true` and re-bootstraps.
+
+**A full resync is authoritative over local state.** On a full resync the client
+discards its local tables *and its local tombstones* and rebuilds them from the
+server snapshot. This is what closes the second resurrection path: a device
+that has been offline longer than the change-log window cannot carry stale
+"live" state into the new world, because its entire local view — including any
+item it believed was deleted — is replaced by the server's. Local
+unsynchronised operations are preserved and replayed *after* the snapshot
+(INV-11, SC-17); the server rejects any replayed operation against a
+tombstoned entity, so a replay cannot resurrect an item either.
 
 ### 9.4 Migration safety
 
@@ -1348,18 +1372,29 @@ The current gap (S-1, S-3) is closed. 📋 **SPEC**: a shared `requireHouseholdR
 
 ### 12.6 Tenant isolation
 
-Isolation is enforced in three layers:
+Isolation is enforced in two layers, deliberately:
 
 1. **Application layer** — every query is scoped by `organization_id` via a
-   shared query helper that cannot be forgotten. (Today the predicate is applied
-   correctly — verified — but it is repeated by hand in every call site.)
-2. **Database layer** — 📋 **SPEC**: PostgreSQL row-level security policies on
-   `items`, `stores`, `categories`, `item_stores`, keyed to a session variable
-   set per request. This makes a missing predicate a no-op rather than a leak.
-3. **Test layer** — an integration test asserts that a user of household A
+   shared scope helper that cannot be forgotten. (Today the predicate is applied
+   correctly — verified — but it is repeated by hand in every call site.) The
+   helper becomes the **only** sanctioned way to touch a household-scoped table:
+   direct `db.select().from(items)` calls outside it are forbidden and enforced
+   by a lint rule and by code review.
+2. **Test layer** — an integration test asserts that a user of household A
    receives `404` for household B's item on read, update, and delete. This test
    must run against a **real** database, because the current mocked `db` ignores
    `where()` clauses entirely and would pass even if the predicate were deleted.
+
+**PostgreSQL row-level security is deliberately NOT used** (ADR-12). On the
+Neon HTTP driver each statement is an independent request with no session
+state, so a policy keyed to `current_setting('app.current_household')` cannot be
+set reliably for the whole request. A fail-open policy silently returns every
+row; a fail-closed one silently returns none. RLS would give the *appearance* of
+defence in depth while behaving unpredictably — which is worse than not having
+it, because it would suppress the care the application-layer check needs. RLS is
+recorded as **deferred**, to be reconsidered only if the Neon WebSocket driver
+(adopting real session state) is adopted, at which point it becomes a genuine
+second layer rather than a false one.
 
 ---
 
@@ -1411,7 +1446,7 @@ user-data risk of option C does not exist in option B.
 | ID | Requirement |
 | --- | --- |
 | SEC-01 | Every API route MUST verify the session server-side. The middleware is an optimistic redirect only and MUST NOT be treated as an authorization layer (already documented in `middleware.ts:11-13`). |
-| SEC-02 | Every household-scoped query MUST be scoped by `organization_id`, enforced by a shared helper and by RLS. |
+| SEC-02 | Every household-scoped query MUST be scoped by `organization_id`, enforced by a shared scope helper that is the only sanctioned access path to household-scoped tables. RLS is explicitly not used (ADR-12). |
 | SEC-03 | Only owners/admins may invite, mint join links, or remove members — enforced server-side, with **403** responses (not 500). |
 | SEC-04 | No endpoint may return data without a session check. `GET /api/invitation-email` must require a session or be removed. |
 | SEC-05 | The service worker MUST NOT cache any authenticated API response. Only the static shell and hashed static assets may be cached. |
@@ -1635,16 +1670,16 @@ The existing `perf-audit.yml` schedule is kept.
 | **ADR-02** | **The shopping surface becomes a client render from IndexedDB; app pages become static shells; auth redirects move to the client.** | The server-side session check in the page layout is a network round trip that cannot succeed offline, and server-rendered data is incompatible with "IndexedDB is the source of truth". Because the shells contain no user data, moving the redirect client-side leaks nothing; all API calls remain server-authorized. | *Keep SSR and reconcile with local data* — two sources of truth and a hydration race. *Cache the SSR'd HTML per user* — breaks cross-user cache sharing and still fails offline when the session check runs. |
 | **ADR-03** | **IndexedDB via Dexie.** | The only storage that satisfies "persistent local database" with structured data and transactional writes. Dexie adds versioned schema migrations, which the requirements demand, and a reactive query hook, which removes a hand-rolled store layer. | `localStorage` (synchronous, 5 MB, string-only), `idb` (no migrations), SQLite/WASM (large payload, no benefit at this scale). |
 | **ADR-04** | **One `POST /api/sync` endpoint that pushes and pulls.** | One round trip per cycle; simpler retry semantics; the response is a consistent snapshot. | Separate push/pull endpoints — two round trips, two failure modes, and a harder-to-reason-about interleaving. |
-| **ADR-05** | **Server-side change log (`sync_changes`) as the source of truth for incremental sync.** | A monotonic `bigserial` gives a total order that `updated_at` cannot, survives clock skew, supports one indexed range scan per pull, and doubles as an audit trail. | Deriving changes from `items.updated_at` — ambiguous ordering, no per-field history, breaks on equal timestamps. Polling the full table — O(n) per sync, and would not survive a long offline period cleanly. |
+| **ADR-05** | **Server-side change log (`sync_changes`) as the source of truth for incremental sync, with the apply path serialized per household so that `seq` allocation order equals commit order.** | A monotonic `bigserial` gives a total order that `updated_at` cannot, survives clock skew, supports one indexed range scan per pull, and doubles as an audit trail. **The serialisation is not optional:** `seq` is allocated at INSERT time and `created_at default now()` is transaction-start time, so two concurrent devices can allocate `seq` 100 and 200 and commit in the opposite order. A client pulling `seq > lastSeq` can then advance past 100 before 100 commits and **never receive that change** — silent loss from the log that is the source of truth. Taking a per-household transaction-scoped advisory lock as the first statement of the apply batch makes allocation order and commit order the same order. | Deriving changes from `items.updated_at` — ambiguous ordering, no per-field history, breaks on equal timestamps. Polling the full table — O(n) per sync, and would not survive a long offline period cleanly. Relying on `bigserial` alone without per-household serialisation — commits can invert, and a change can be skipped forever by a pulling client. |
 | **ADR-06** | **Idempotency keyed on a client-generated `opId`**, recorded in a dedicated `sync_operations` table. | The primary key *is* the guarantee. Replay returns the cached result. Handles every duplication scenario uniformly (retry, timeout, crash-restart, batch replay). | `If-Match`/ETag on entities — does not cover a queued operation that was never acknowledged, and does not cover batch-level retries. |
 | **ADR-07** | **Per-field conflict resolution with per-field version metadata in `field_meta jsonb`.** | Satisfies "conflict resolution per operation type rather than simplistic last-write-wins" without a separate version table, a CRDT, or a per-field row. JSONB keeps the whole row in one heap tuple, avoiding a second table and a join on the hot path. | Entity-level LWW — loses a concurrent quantity edit when a check arrives, which is exactly the scenario the brief calls out. A CRDT — unjustifiable complexity at household scale. |
 | **ADR-08** | **Client-generated UUIDv7 primary keys; the server accepts client ids.** | An offline client must know a record's id before the server has seen it. UUIDv7 is time-ordered (good index locality) and fits the existing `uuid` column type. | Server-generated ids — the client cannot reference a record it created offline. ULID — needs a `text`/custom column and a lexicographic-sort assumption; UUIDv7 is a standard UUID. |
-| **ADR-09** | **Tombstones (`deleted_at`) are terminal and retained for 90 days.** | Makes resurrection impossible (FR-24) and makes "delete" and "clear completed" two clearly distinct, separately recoverable behaviours (fixes B-11). | Hard delete — a stale device would resurrect the item on its next sync. The current `is_active` flag — indistinguishable from "not in the list", and not recoverable from History. |
+| **ADR-09** | **Tombstones (`deleted_at`) are terminal and are NEVER hard-deleted from the server.** The 90-day retention window applies only to the change log, and it defines the maximum device offline window beyond which a full resync is mandatory and authoritative (FR-31, §9.3). | Makes resurrection impossible (FR-24) and makes "delete" and "clear completed" two clearly distinct, separately recoverable behaviours (fixes B-11). | Hard delete — a stale device would resurrect the item on its next sync. The current `is_active` flag — indistinguishable from "not in the list", and not recoverable from History. |
 | **ADR-10** | **Foreground sync only; no dependency on the Background Sync API.** | iOS Safari does not implement it and Chromium's is unreliable when the browser is terminated. Durability comes from IndexedDB, not from a background task. | Background Sync as primary — silently loses pending work on iOS. |
 | **ADR-11** | **Keep Next.js, Better Auth, Drizzle, and PostgreSQL.** | They are used well and are not the problem. The problem is the data-ownership model, not the tools. | A different framework — large, risky, and buys nothing for this problem. |
-| **ADR-12** | **Server-side authorization is authoritative and role-checked; RLS added as a second layer.** | The current join-link gap (S-1) is a UI-only check. Isolation must be enforced where the data lives. | UI-only checks — already proven insufficient. |
+| **ADR-12** | **Server-side authorization is authoritative and role-checked. Tenant isolation is enforced by a single application-layer scope helper, NOT by PostgreSQL row-level security.** | The current join-link gap (S-1) is a UI-only check, so isolation must be enforced on the server. **RLS is deliberately excluded.** On the Neon HTTP driver, each statement is an independent request with no session state: a policy would need `current_setting('app.current_household')`, which can only be set inside a transaction and cannot be relied upon to persist across the separate queries a request makes. A policy written fail-open silently returns every row; one written fail-closed silently returns none. Either way RLS would give the *appearance* of defence in depth while behaving unpredictably — worse than not having it, because it suppresses the care the application-layer check actually needs. A single scope helper that every query must pass through, plus an integration test that asserts a cross-household read returns 404, is honest and testable. | *RLS as a second layer* — unreliable on the retained driver (see rationale); it would create false confidence rather than real isolation. *UI-only checks* — already proven insufficient. |
 | **ADR-13** | **Integration tests run against a real PostgreSQL, not a mocked `db`.** | The current fake `db` ignores `where()` clauses, so the codebase's tenant-isolation predicates are entirely untested. The `DB_DRIVER` switch already exists (`src/db/index.ts:16-19`). | Continuing to mock the database — it cannot verify isolation, constraints, or migrations. |
-| **ADR-14** | **The sync apply path must be atomic, using compare-and-swap rather than a read-decide-write transaction.** The Neon HTTP driver throws on `db.transaction()`; `db.batch()` maps to Neon's atomic HTTP batch transaction. | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). **Note the limitation:** a batch executes *pre-built* statements, so the read that conflict resolution depends on cannot sit inside it. The read therefore happens first, and the write uses a compare-and-swap — `UPDATE … WHERE id = ? AND version = ?` — so a concurrent modification causes zero rows to be updated and the operation is retried against fresh state. The batch then commits the entity write, the change-log entry, and the idempotency record together. | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. Blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. The Neon WebSocket driver (interactive transactions) is the fallback if compare-and-swap proves insufficient. |
+| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap.** The batch's first statement takes a per-household transaction-scoped advisory lock; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`), and inserts the change-log row **only if that update matched**; the third records the idempotency key. | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Three constraints force this shape. (1) The Neon HTTP driver throws on `db.transaction()`, so the apply must use `db.batch()`, which maps to Neon's atomic HTTP batch transaction. (2) A batch executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. The CTE makes the change-log insert conditional on the compare-and-swap having matched, so a failed compare-and-swap leaves no orphan log entry. | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. The Neon WebSocket driver (interactive transactions) remains the fallback if the batch approach proves insufficient in Phase 2. |
 | **ADR-15** | **Service worker caches the static shell and hashed assets only — never an API response.** | The shell is identical for all users (no user data), so it caches safely and enables offline boot. API responses are per-user and per-household; caching them risks cross-account data leakage on a shared device. | Caching API responses — data-leak risk on shared devices and stale-data bugs. |
 
 ---
@@ -1665,6 +1700,8 @@ The recovery is complete when **all** of the following are demonstrably true.
 | AC-06 | Submitting the same operation 10 times applies it exactly once. | Idempotency test against a real database |
 | AC-07 | Two devices making conflicting offline edits converge to the documented resolution, and the losing edit is presented to the user rather than discarded. | The §16.4 demonstration script |
 | AC-08 | A deleted item is not resurrected when a device that has been offline for 7 days reconnects. | Tombstone test with a stale `lastSeq` |
+| AC-08a | A deleted item is not resurrected when a device that has been offline **longer than the change-log retention window** reconnects: the device full-resyncs, discards its local tombstones, and the item stays deleted. Tombstoned rows are never hard-deleted from the server (FR-31). | Resync test with `lastSeq` below the retention floor |
+| AC-08b | Two concurrent applies to the same household cannot invert commit order: a pulling client that advances past a `seq` always receives that change. | Integration test: apply two changes concurrently, pull between them, assert no change is skipped |
 | AC-09 | Killing the app mid-sync and relaunching loses no queued operation. | Process-kill test |
 | AC-10 | The outbox is empty and the status chip reads `Up to date` after a full online sync cycle. | Assertion in the E2E suite |
 
@@ -1685,7 +1722,7 @@ The recovery is complete when **all** of the following are demonstrably true.
 | AC-15 | A plain household member receives **403** when minting a join link, when inviting by email, and when removing a member. |
 | AC-16 | Every unauthenticated request to any `/api/*` route returns 401. `GET /api/invitation-email` is either authenticated or removed. |
 | AC-17 | A user of household B receives 404 for household A's item on read, update, and delete — proven by a test against a real database. |
-| AC-18 | RLS policies are active on the household-scoped tables and are proven by a test that sets a mismatched household and asserts zero rows returned. |
+| AC-18 | A household-scoped table cannot be queried without passing through the scope helper — enforced by a lint rule — and an integration test proves a mismatched household receives 404 on read, update, and delete. |
 | AC-19 | The service worker cache contains no API responses and no user data. |
 
 ### 19.4 Quality

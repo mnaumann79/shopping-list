@@ -192,7 +192,7 @@ builds the authorization helper that Phase 3 reuses.
 | 1.1 | Add `requireHouseholdRole(orgId, userId, roles)` and enforce it on every household-scoped route: join links, invites, member removal (closes S-1, S-2, S-3) | Backend | `src/lib/request-auth.ts`, `src/server/services/households.ts`, `src/app/api/households/**` |
 | 1.2 | Make authorization failures return **403** with a stable error code, not 500 with a raw Better Auth message | Backend | `src/server/services/service-error.ts`, `src/server/services/households.ts` |
 | 1.3 | Remove or authenticate `GET /api/invitation-email` (closes S-4) | Backend | `src/app/api/invitation-email/route.ts` |
-| 1.4 | Introduce a shared household-scoped query helper so `organization_id` can never be forgotten; add PostgreSQL RLS policies on the household-scoped tables (closes S-5) | Database | `src/db/schema/**`, `src/db/migrations/**`, `src/server/services/items.ts` (consumption) |
+| 1.4 | Introduce a shared household-scope helper that is the **only** sanctioned access path to the household-scoped tables, plus a lint rule forbidding direct `db.select().from(<household table>)` outside it (closes S-5). **RLS is deliberately not used** — see ADR-12 | Database | `src/db/schema/**`, `src/db/migrations/**`, `src/server/services/items.ts` (consumption) |
 | 1.5 | Fix the quantity input: accept free-form text end to end (closes B-6) | Frontend | `src/lib/utils.ts`, `src/app/(app)/dashboard/_components/QuickAddBar.tsx`, `src/app/(app)/dashboard/_components/ItemDialogs.tsx` |
 | 1.6 | Separate *delete* (tombstone) from *clear completed* (archive); make deletion recoverable and consistent (closes B-11) | Database + Backend | `src/db/schema/items.ts`, `src/db/migrations/**`, `src/server/services/items.ts`, `src/app/api/items/**` |
 | 1.7 | Make the item-store replacement atomic using `db.batch()` (closes B-13); make the bulk "clear completed" skip items changed since the request began (closes B-12) | Backend | `src/server/services/items.ts` |
@@ -225,7 +225,7 @@ new integration test suite.
 
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
-| The RLS policies break the app if the session variable is not set per request | Medium | Introduce RLS **after** the application-layer helper, and add a test that asserts both layers. Provide a documented escape hatch for background jobs. |
+| The scope helper is bypassed by a direct query, leaking across households | Medium | The helper is the only sanctioned path; a lint rule fails the build on a direct household-table query; an integration test against a real database asserts a cross-household read, update, and delete all return 404. RLS was considered and **rejected** as unreliable on the Neon HTTP driver (ADR-12) — it would create false confidence rather than real isolation. |
 | The tombstone change affects the History page, which currently relies on `archived_at` semantics | Medium | Task 1.6 updates the History query in the same PR and adds an explicit test for both behaviours. |
 | The real-database integration suite is slow in CI | Low | Use a PostgreSQL service container and run the suite against a schema applied once per job, not per test. |
 | The quantity change lets arbitrary text through, weakening the schema | Low | The column is already `text`; validation is length-bounded (≤ 50 chars), not format-bounded. |
@@ -271,7 +271,7 @@ beyond the contract types themselves.
 | 2.1 | Write the ADR set from `docs/project.md` §18 into the repository, recording the decisions, the rejected alternatives, and the consequences | Lead | `ARCHITECTURE/0001…0015-*.md` |
 | 2.2 | Define the shared contract types: `SyncOperation`, `SyncRequest`, `SyncResponse`, `SyncChange`, `Conflict`, `LocalItem`, `OutboxOp`, error codes | Lead | `src/shared/sync.ts` |
 | 2.3 | Define the local IndexedDB schema and the Dexie version/migration plan | Frontend | `src/client/db/schema.ts` (design only) |
-| 2.4 | Prototype and **verify the atomicity approach on Neon HTTP** (ADR-14): confirm that `db.batch()` gives an all-or-nothing multi-statement write, and confirm that the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a batch executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it | Database | `src/db/**` (scratch), ADR-0026 |
+| 2.4 | Prototype and **verify the apply design on Neon HTTP** (ADR-14): (a) `db.batch()` gives an all-or-nothing multi-statement write; (b) the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a batch executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it; (c) the **data-modifying CTE** form makes the change-log insert conditional on the compare-and-swap having matched; (d) a per-household `pg_advisory_xact_lock` as the first statement of the batch makes `seq` allocation order equal commit order (ADR-05), proven by two concurrent applies whose commits would otherwise invert | Database | `src/db/**` (scratch), ADR-0026 |
 | 2.5 | Verify the conflict-resolution matrix as a **pure function** before it is wired to the server, with a table-driven test covering every row of `docs/project.md` §11 | Backend | `src/server/sync/conflict-resolution.ts`, `src/server/sync/__tests__/conflict-resolution.test.ts` |
 | 2.6 | Prove the client-side generation of UUIDv7 ids and the Lamport clock implementation | Frontend | `src/client/db/ids.ts` (design only) |
 
@@ -338,9 +338,9 @@ proven against a real PostgreSQL.
 | --- | --- | --- | --- |
 | 3.1 | Additive migrations: `items.deleted_at`, `items.version`, `items.field_meta`, `items.updated_by`, `items.lamport`; the same for `stores` and `categories`; the `is_active → deleted_at` backfill as a separate migration | Database | `src/db/schema/**`, `src/db/migrations/**` |
 | 3.2 | Create the `sync_changes`, `sync_operations`, `devices`, and `entity_conflicts` tables with their indexes | Database | `src/db/migrations/**` |
-| 3.3 | Implement the apply engine: deduplicate on `opId`, load the entity, resolve the conflict per §11, write the entity, append the change-log entry, and record the idempotency key — atomically | Backend | `src/server/sync/apply.ts` |
+| 3.3 | Implement the apply engine as one per-household-serialised batch (ADR-14): deduplicate on `opId`; resolve the conflict per §11; then in a single batch take `pg_advisory_xact_lock(hashtext(household_id))`, perform the compare-and-swap inside a data-modifying CTE that inserts the change-log row **only if the update matched**, and record the idempotency key. A zero-row compare-and-swap means the operation is retried against fresh state, leaving no orphan log entry | Backend | `src/server/sync/apply.ts` |
 | 3.4 | Implement `POST /api/sync` per the frozen contract: push + pull in one round trip, batched, with `fullResyncRequired` detection | Backend | `src/app/api/sync/route.ts`, `src/server/sync/**` |
-| 3.5 | Implement the incremental pull query and the full-snapshot path, plus change-log pruning | Backend + Database | `src/server/sync/pull.ts`, `src/db/**` |
+| 3.5 | Implement the incremental pull query and the full-snapshot path; prune **only** the change log (90 days). Tombstoned item rows are never hard-deleted, and a full resync discards the client's local tombstones because the snapshot is authoritative (FR-31, §9.3) | Backend + Database | `src/server/sync/pull.ts`, `src/db/**` |
 | 3.6 | Enforce the authorization matrix on `/api/sync` and on every entity it touches | Backend | `src/app/api/sync/route.ts` |
 | 3.7 | Server-side integration tests: idempotency (repeat an op 10×), conflict resolution per §11, cross-household rejection, atomicity under induced failure, resync detection | Backend | `src/server/sync/__tests__/**`, `src/app/api/sync/route.test.ts` |
 | 3.8 | Migration tests: apply to an empty DB; apply to a DB seeded with legacy rows; assert legacy content is unchanged and `is_active = false` rows became tombstones | Database | `src/db/__tests__/migrations.test.ts` |
@@ -365,7 +365,8 @@ Phase 2 (frozen contracts, proven atomicity approach).
 
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
-| The apply engine's read-modify-write is not atomic under concurrency | Medium | Per ADR-14, the entity write is a **compare-and-swap** — `UPDATE … WHERE id = ? AND version = ?`. Zero rows updated means another device won the race, so the operation is retried against fresh state instead of blindly overwriting. The batch then commits the entity write, the change-log entry, and the idempotency record together. A per-entity advisory lock is **not** used: a lock cannot span a batch on the Neon HTTP driver. |
+| The apply engine's read-modify-write is not atomic under concurrency | Medium | Per ADR-14, the entity write is a **compare-and-swap** — `UPDATE … WHERE id = ? AND version = ?` — inside a data-modifying CTE. Zero rows updated means another device won the race, so the operation is retried against fresh state and the CTE leaves no orphan change-log entry. |
+| `sync_changes.seq` is allocated in one order and committed in the opposite, so a pulling client skips a change forever | Medium | Per ADR-05, the apply path takes a **per-household** `pg_advisory_xact_lock` as the first statement of the batch, which makes allocation order equal commit order. The granularity is **per household**, not per entity: the `seq` order is per household, so a per-entity lock would not prevent the inversion. The lock is transaction-scoped, so it is released automatically at commit and needs no cleanup path. |
 | `field_meta` grows unbounded | Low | Only one entry per mutable field per entity; bounded by the field count. |
 | The change log grows large | Medium | Pruning by age (Phase 3.5) plus an index on `(household_id, seq)`. |
 | Legacy `is_active` rows are double-counted during the transition | Low | The backfill is a separate migration, and the active-list query filters on `deleted_at IS NULL` only after the backfill lands. |
@@ -681,7 +682,7 @@ the app through adding, checking, closing, and reconnecting.
 | --- | --- | --- |
 | 1 | Phase 0 — CI gate | Everything else depends on a gate that works. |
 | 2 | Phase 1.1–1.3 — authorization | Security fixes with no dependencies; land early. |
-| 3 | Phase 1.4 — RLS | Depends on 2. Land before any schema work in Phase 3. |
+| 3 | Phase 1.4 — household scope helper + lint rule | Depends on 2. Land before any schema work in Phase 3. |
 | 4 | Phase 1.5–1.6, 1.10 — UX and data-integrity fixes | Independent of each other; land in any order after 3. |
 | 5 | Phase 1.7–1.9 — atomicity and integration tests | Depends on 4 (the tombstone change). |
 | 6 | Phase 2 — contracts | Must precede all of Phase 3/4/5. |
@@ -741,7 +742,7 @@ assessment; the ones that block work are here.
 | # | Decision | Blocks |
 | --- | --- | --- |
 | D-1 | Approve the conflict-resolution matrix (`docs/project.md` §11), in particular **check-wins** and **delete-wins**. | Phase 3 |
-| D-2 | Confirm the retention window for tombstones and the change log (proposed: 90 days). | Phase 3.1, 3.5 |
+| D-2 | Confirm the change-log retention window (proposed: 90 days). It defines the **maximum device offline window** — beyond it a device must full-resync, and a full resync is authoritative over local state. Note that tombstones are **not** subject to this window: a tombstoned item row is never hard-deleted, because purging it would let a long-offline device resurrect the item (FR-24, INV-07). | Phase 3.1, 3.5 |
 | D-3 | Confirm the sync interval (proposed: push 2 s after a change, poll every 30 s while pending) — a trade of battery against freshness. | Phase 5.2 |
 | D-4 | Confirm that deleting an item makes it recoverable from History (today it does not) and that "clear completed" remains separately recoverable. | Phase 1.6 |
 | D-5 | Confirm the sign-out behaviour when unsynchronised changes exist: block, or allow with an explicit choice? | Phase 6.4 |
