@@ -1185,6 +1185,13 @@ tombstone exactly like an item, so that a stale device cannot resurrect it and
 so that `category.delete` and `store.delete` have the same semantics as
 `item.delete` (§11).
 
+`categories` also gains **`updated_at timestamptz`**: it has `created_at`
+today but no `updated_at`, while `stores` has both. The category and store
+apply statements stamp `updated_at` on every applied write, exactly as the
+item statement does, and without the column the two tables could not share
+one statement shape. The conversion to `timestamptz` follows the same rule as
+the items table's (*One meaning of "now" per table*, above).
+
 **`item_stores`** — the item-to-store tag table needs to carry conflict
 metadata, because `storeIds` is **not** a column on `items` and `field_meta`
 holds one entry per *field*, not per tag. The per-pair rule (§11,
@@ -1258,7 +1265,11 @@ CREATE TABLE sync_operations (
   op_type      text NOT NULL,
   lamport      bigint NOT NULL,
   payload      jsonb NOT NULL,
-  result       jsonb NOT NULL,            -- the FULL per-op response envelope, cached for replay
+  result       jsonb NOT NULL,            -- the operation's DERIVED envelope, cached for replay:
+                                         -- { entities: [{entityId, entity}], conflicts: [...],
+                                         --   skipped: N }. It is derived inside the transaction
+                                         -- from the rows that transaction wrote (S10.8.3), so a
+                                         -- replay returns the same envelope the original did.
   outcome      text NOT NULL,             -- 'applied' | 'partial' | 'rejected' | 'duplicate'
   applied_at   timestamptz NOT NULL DEFAULT now()
 );
@@ -1772,13 +1783,23 @@ pulled changes second, subject to the pending-field rule in §10.7.
 4. The client crashes mid-request → on restart the outbox still holds every
    un-acknowledged op → they are re-sent → duplicates → resolved.
 
-**The cached `result` is the full per-operation response envelope**, including
-the `conflicts[]` array. This is what makes a replay *identical* rather than
-merely equivalent: if a losing operation is re-sent after a timeout, the
+**The cached `result` is the operation's derived envelope** — `{ entities,
+conflicts, skipped }` — and it is what makes a replay *identical* rather than
+merely equivalent. If a losing operation is re-sent after a timeout, the
 replayed response must still carry the server's value, or the client never
 learns what it lost. Storing only the applied entity would leave a re-sent
 losing operation with no way to show the "Keep mine / Use theirs / Dismiss"
 card.
+
+**The envelope and the response are not the same shape, and that is stated
+rather than glossed over.** The ledger stores what the transaction *derived*;
+the response is *assembled* from it. For a single-entity operation the response
+carries one `entity`; for a multi-entity operation it carries a list, and the
+`skipped` count has no counterpart in a single-entity response at all. So
+"the replay is identical" means **the ledger's stored envelope is returned
+byte for byte**, and the response is rebuilt from it by the same code that
+built the original — the reshape is part of the replay path, not an
+afterthought.
 
 **Clock merge.** The client sets `lamport = max(localLamport, serverClock) + 1`
 for every operation it creates after a sync, and the server sets
@@ -1883,13 +1904,13 @@ There are **three statement shapes**: the **item-row statement**, which applies
 every operation that touches an existing item; the **create statement**, which
 inserts one; and the **ledger statement**, which records one operation's
 outcome. All three have been **executed against PostgreSQL 17 using this
-document's own §9.1/§9.2 DDL, and their outcomes verified** — twenty-nine scenarios
-covering a normal update, a field lost to a concurrent write, a check that
-loses by check-wins, a write to a tombstoned row, an undelete that is too
-old, a lost compare-and-swap, both arrival orders of an archive racing an
-uncheck, five store-tag outcomes, a bulk operation, two replays, a create with
-tags, and a create whose id is already taken. They are the normative form; an
-implementer should not have to rediscover that they parse.
+document's own §9.1/§9.2 DDL, and their outcomes verified** — thirty-two
+scenarios covering a normal update, a field lost to a concurrent write, a
+check that loses by check-wins, a write to a tombstoned row, an undelete that
+is too old, a lost compare-and-swap, both arrival orders of an archive racing
+an uncheck, eight store-tag outcomes, a bulk operation, two replays, a create
+with tags, and a create whose id is already taken. They are the normative form;
+an implementer should not have to rediscover that they parse.
 
 > ⚠️ **Two versions, and they must not be confused.** `$op_base_version` is
 > **immutable** — it is the version the *client* edited from, and it is what
@@ -2101,9 +2122,10 @@ archive_conflicts AS (
          $device_id,
          $op_lamport,
          $op_id,
-         COALESCE(NULLIF((b.field_meta -> 'archivedAt') ->> 'device', '')::uuid, $device_id)
+         NULLIF((b.field_meta -> 'archivedAt') ->> 'device', '')::uuid
     FROM before AS b, wins AS w
    WHERE w.w_reverses_archive
+     AND NULLIF((b.field_meta -> 'archivedAt') ->> 'device', '') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
   RETURNING id, field, store_id, local_value, server_value, resolution,
             winner_device_id, winner_lamport, device_id
@@ -2220,7 +2242,8 @@ SELECT e.id AS entity_id,
            ) AS x
           WHERE x.device_id = $device_id
        ), '[]'::jsonb) AS conflicts
-  FROM entity_snapshot AS e;```
+  FROM entity_snapshot AS e;
+```
 
 #### 10.8.2 The create statement
 
@@ -2301,7 +2324,8 @@ SELECT e.id AS entity_id,
        TRUE AS changed,
        e.entity,
        '[]'::jsonb AS conflicts
-  FROM entity_snapshot AS e;```
+  FROM entity_snapshot AS e;
+```
 
 #### 10.8.3 The ledger statement
 
@@ -2389,9 +2413,17 @@ SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, $entity_id,
          -- written -- a ledger row would make the retry look like a
          -- duplicate.
          ELSE EXISTS (SELECT 1 FROM items
-                       WHERE id = $entity_id AND last_op_id = $op_id)
+                       WHERE $entity_type = 'item'
+                         AND id = $entity_id AND last_op_id = $op_id)
+            OR EXISTS (SELECT 1 FROM categories
+                       WHERE $entity_type = 'category'
+                         AND id = $entity_id AND last_op_id = $op_id)
+            OR EXISTS (SELECT 1 FROM stores
+                       WHERE $entity_type = 'store'
+                         AND id = $entity_id AND last_op_id = $op_id)
        END
-ON CONFLICT (op_id) DO NOTHING;```
+ON CONFLICT (op_id) DO NOTHING;
+```
 
 **Why the envelope is derived here, and not passed in.** A batch executes
 **pre-built** statements: their parameters are fixed before the transaction
@@ -2441,6 +2473,16 @@ not for one it could not.** The two are different outcomes:
 | The compare-and-swap matched but **every** contested field was refused | **Yes** | `outcome = 'rejected'` — the client must be told, or it retries forever |
 | The compare-and-swap was **lost** | **No** | The operation must stay retryable; a ledger row would make the retry look like a duplicate |
 
+**The gate is entity-type aware, because the operation may not be on an item.**
+A `category.*` or `store.*` operation is decided by a compare-and-swap on
+`categories` or `stores`, so the gate checks those tables too — each guarded by
+`$entity_type` so that a single statement serves all three entity types. A gate
+hard-wired to `items` would silently drop every `category.*` and `store.*`
+operation from the ledger: the pre-batch duplicate check (§10.8.5) would then
+never recognise their replays, and a replayed operation would be **applied
+twice** (INV-08). §9.1 adds `last_op_id` to `categories` and `stores` for
+exactly this reason — without that column the check cannot be made at all.
+
 **The outcome vocabulary is one vocabulary.** `sync_operations.outcome` takes
 exactly four values — `'applied' | 'partial' | 'rejected' | 'duplicate'` — and
 the per-operation `outcome` in the response envelope (§10.1) uses the **same
@@ -2455,6 +2497,25 @@ a guard — `WHERE NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id =
 $op_id)` — so that a replayed operation does not append a duplicate record of
 a conflict that has already been recorded. The compare-and-swap already
 protects the entity and the change log; this protects the conflict history.
+
+**A reversed archive is reported to the archiver, and only to the archiver.**
+A conflict row's `device_id` is the device whose write **lost** — the device
+that archived the item — and `winner_device_id` is the device whose uncheck
+won. That follows the table's convention (a conflict is addressed to the
+loser), and it means the **requester's** `conflicts[]` is empty: the
+requester won, so it has no conflict of its own to report. The archiver
+learns about the reversal through the conflict cursor (§10.8.5), and the
+change log carries the state either way.
+
+**When the archiving device is unknown, there is no conflict row.** A row
+archived *before* the sync model has `archived_at` set but no `field_meta`
+entry, so there is no device to name — and `entity_conflicts.device_id` is
+`NOT NULL`. Addressing the conflict to the requester instead would report a
+conflict the requester **won**, which is worse than reporting none. So the
+reversal still applies — the item comes back, unchecked — but no conflict row
+is written, because there is no identifiable loser to notify. Nothing is
+discarded: the archive was pre-existing state, not a synchronised edit that
+was overridden.
 
 #### 10.8.4 What each part does, and the rules it encodes
 
@@ -2497,9 +2558,11 @@ naming the device that deleted the item.
 **An operation that wins nothing does not touch the row — but it is still
 acknowledged.** `flags.row_changed` is the single place that decides whether
 the operation changed anything. When it is false, the row's `version`,
-`field_meta`, `lamport`, `last_op_id`, `updated_at` and `updated_by_id` are all
-left exactly as they were, and `logged` writes **no** change-log row — there
-is nothing for other devices to learn. The ledger row is **still written**,
+`field_meta`, `lamport`, `updated_at` and `updated_by_id` are all left exactly
+as they were, and `logged` writes **no** change-log row — there is nothing for
+other devices to learn. **`last_op_id` is the one exception: it is stamped
+whenever the compare-and-swap matched**, because that is how the ledger
+statement tells a refused operation apart from a lost one (§10.8.3). The ledger row is **still written**,
 because the operation *was* decided. Without it the client would never be
 acknowledged and would retry the same operation forever. This is the difference
 between "the operation was refused" and "the operation never happened", and the
@@ -3241,20 +3304,25 @@ This is the acceptance demonstration for the whole project.
 
 **A second, lower-level fixture sits under it.** §10.8's three statements have
 already been executed against PostgreSQL 17 with this document's own DDL,
-across **twenty-nine scenarios**, and their outcomes verified. Those twenty-nine
-scenarios are the **server-side fixture** for Phase 3: an implementation that
-reaches a different outcome for any of them fails the test rather than passing
-review. The list is: a normal update; a field lost to a concurrent write; a
-check that loses by check-wins; a write to a tombstoned row; an undelete whose
-lamport is older than the tombstone's; a lost compare-and-swap; an archive
-skipped because the item is no longer checked; an archive that applies; **both
-arrival orders of an archive racing an uncheck, and the assertion that they
-converge on the same state**; and, for store tags, an addition, a sequential
-removal, a concurrent removal, a concurrent re-add refused by a tombstone, and
-a sequential removal that loses on lamport; plus a bulk operation sharing one
-`opId` across two items, a replay of an operation that won nothing, a replay
-of an applied operation, the outcome vocabulary, a create that writes its
-tags, and a create whose id is already taken.
+across **thirty-two scenarios**, and their outcomes verified. Those
+thirty-two scenarios are the **server-side fixture** for Phase 3: an
+implementation that reaches a different outcome for any of them fails the test
+rather than passing review.
+
+The list, grouped by what it proves:
+
+| Group | Scenarios | What it proves |
+| --- | --- | --- |
+| **FIELD** (6) | a normal update; a field lost to a concurrent write; a check that loses by check-wins (the retry keeps the **original** base version); a write to a tombstoned row (delete-wins, terminal); an undelete that is refused when its lamport is older than the tombstone's, and one that clears the tombstone when it is newer; a lost compare-and-swap | per-field resolution, and that a lost CAS leaves the row untouched |
+| **PAIR** (8) | an addition whose payload key is `storeId`; a sequential removal that tombstones the pair; a concurrent removal that still wins (`removal_wins`); a concurrent re-add refused by a tombstone; a sequential removal that loses on lamport and keeps the tag; a stale add that must not overwrite the stored ordering key; two devices adding different stores, both surviving; removing a tag that is not there | the per-tag rule of §11, in both directions |
+| **ARCHIVE** (5) | the archive skipped when the item is no longer checked; the archive applying to a checked item; the uncheck arriving first and the archive second; the archive arriving first and the uncheck second; **both arrival orders converging on the same state** | §11's archive-wins-with-reversal, and its order-independence |
+| **LEDGER** (4) | a bulk operation spanning two items under one `opId`; a replay of an operation that won nothing; a replay of an applied operation; the outcome vocabulary | the idempotency ledger and the four outcomes |
+| **BULK** (4) | a mixed bulk operation — one archived, one skipped, one contested; a bulk operation where every candidate was skipped; a row archived **before** the sync model (no `field_meta` entry); a create whose id was already taken | the bulk envelope, and the case where there is no identifiable loser to notify |
+| **ENTITY** (3) | a `category.*` operation is recorded; a `store.*` operation is recorded; an operation whose compare-and-swap was **lost** is not recorded | that the ledger's decided-gate is entity-type aware |
+| **CREATE** (2) | `item.create` writes the item **and** its tags; a create whose id is already taken writes nothing, and leaves no orphan tag rows | the create statement, and its duplicate-id behaviour |
+
+That is thirty-two scenarios, each asserted against the document's own DDL and
+the document's own SQL.
 
 ### 16.5 CI gates
 
