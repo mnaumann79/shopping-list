@@ -196,7 +196,7 @@ must have an automated test (§16).
 | **INV-04** | A queued operation is never dropped silently. It is either acknowledged by the server, or it remains visible as pending, or it is surfaced as a rejected conflict the user can act on. | Outbox-integrity test after forced failure |
 | **INV-05** | Only the sync engine talks to the server for domain data. No component calls `fetch` for items, categories, or stores. | Static lint rule |
 | **INV-06** | Every read of shopping data is served from IndexedDB. | Static lint rule + component test |
-| **INV-07** | Deletion is a tombstone. Only an explicit, later restore operation clears it. | Resurrection test |
+| **INV-07** | Deletion is a tombstone. Only an explicit, later `item.undelete` operation clears it. | Resurrection test |
 | **INV-08** | Every operation carries a globally unique `opId`; the server deduplicates on it. | Idempotency test |
 | **INV-09** | Queues, tombstones, and cached snapshots are partitioned by household. Switching households never mixes data. | Household-switch test |
 | **INV-10** | The application shell is served from cache when the network is unavailable; the list renders from IndexedDB. | Offline E2E test |
@@ -363,7 +363,7 @@ not applied to a deleted row, and is not silently thrown away — it is shown to
 that user as "this item was deleted on another device".
 
 **Technical handling.** The delete writes a tombstone (`deleted_at`) and is
-**terminal** (§11): only a strictly later `restore` operation clears it. The
+**terminal** (§11): only a strictly later `item.undelete` operation clears it. The
 concurrent edit is recorded as a conflict against a deleted entity and surfaced
 to the editing device.
 
@@ -1141,7 +1141,7 @@ union of the fields touched by the row's outstanding operations.
 | Column | Type | Purpose |
 | --- | --- | --- |
 | `id` | `uuid` PK | Unchanged type; the server now accepts client-supplied values. |
-| `deleted_at` | `timestamptz` nullable | **Tombstone.** `NULL` = live. Set on delete; cleared only by an explicit restore. |
+| `deleted_at` | `timestamptz` nullable | **Tombstone.** `NULL` = live. Set on delete; cleared only by an explicit `item.undelete`. |
 | `version` | `integer` not null default 1 | Incremented on every server-applied change. The client's `baseVersion` is checked against it. |
 | `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata. **An entry exists only for a field that a write actually touched** — a row that has only ever had its name changed has a `field_meta` with one key, not eight. The tracked set is exactly: `name`, `quantity`, `note`, `categoryId`, `storeIds`, `isChecked`, `deletedAt`, `archivedAt`. Each entry is `{ v, lamport, device }`, where **`v` is the row `version` that the write produced** — so `field_meta[f].v` is directly comparable with the row's current `version`, and a client can tell whether a given field has moved since its base version. `device` is the id of the device that wrote it, which is what §11's check-wins rule reads (`field_meta["isChecked"].device`). Enables per-field conflict resolution without a separate table. **It also carries the ordering key for the tombstone:** `field_meta["deletedAt"].lamport` records the effective lamport of the delete that set `deleted_at`, so `item.undelete` can tell whether a *newer* delete exists (§11). |
 | `updated_by_id` | `text` nullable → `user(id)` `ON DELETE SET NULL` | Who last changed the row. Named to match the existing `created_by_id` convention, and carries the same foreign key so the column cannot hold a user id that does not exist. |
@@ -1265,10 +1265,12 @@ CREATE TABLE entity_conflicts (
   entity_type  text NOT NULL,
   entity_id    uuid NOT NULL,
   field        text NOT NULL,
+  seq          bigserial NOT NULL,        -- cursor for delivering conflicts to other devices
   local_value  jsonb,
   server_value jsonb,
+  store_id     uuid NULL,                  -- the contested tag pair, for item.storeTags
   resolution   text NOT NULL,             -- 'lww' | 'check_wins' | 'delete_wins' |
-                                           -- 'add_wins' | 'override' | 'rejected'
+                                           -- 'removal_wins' | 'override' | 'rejected'
   winner_device_id uuid,                  -- the device whose value won (NULL for a server-side rejection)
   winner_lamport  bigint,                 -- the Lamport value of the winning write
   op_id        uuid NOT NULL,
@@ -1276,6 +1278,8 @@ CREATE TABLE entity_conflicts (
   resolved_at  timestamptz,
   created_at   timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX entity_conflicts_seq ON entity_conflicts (seq);
+CREATE INDEX entity_conflicts_household_seq ON entity_conflicts (household_id, seq);
 ```
 
 **Retention.** `entity_conflicts` rows are retained **at least as long as the
@@ -1439,6 +1443,7 @@ outcome, so all of the request's operations can share one transaction safely.
   "householdId": "org_abc",
   "deviceId": "uuid-v7-of-this-browser-install",
   "deviceName": "Sara's iPhone",          // upserted into devices on first sight
+  "lastConflictSeq": 87,                  // cursor for conflicts this device did not create
   "lastSeq": 1042,              // highest seq this client has applied
   "clientClock": 87,            // client's current Lamport counter
   "operations": [
@@ -1474,6 +1479,7 @@ so the client never has to special-case one of them:
       "conflicts": [
         { "id": "uuid",              // the conflict's id, so both sides can name it
           "field": "quantity",
+          "storeId": null,          // the contested tag pair, for item.storeTags
           "localValue": "2 kg",
           "serverValue": "3 kg",
           "resolution": "lww",      // which rule decided it — see §11
@@ -1491,7 +1497,15 @@ so the client never has to special-case one of them:
     { "seq": 1043, "entityType": "item", "entity": { /* EntitySnapshot — see below */ },
       "deleted": false, "version": 13, "updatedBy": "user_x", "updatedAt": "…" }
   ],
+  "conflicts": [
+    { "seq": 91, "id": "uuid", "entityType": "item", "entityId": "uuid",
+      "field": "quantity", "storeId": null,
+      "localValue": "2 kg", "serverValue": "3 kg",
+      "resolution": "lww", "winnerDeviceId": "uuid", "winnerLamport": 91,
+      "resolvedAt": "…" }
+  ],
   "nextSeq": 1043,             // the highest seq DELIVERED in this response
+  "nextConflictSeq": 91,       // the highest conflict seq DELIVERED in this response
   "hasMore": false,            // true when more changes remain beyond nextSeq
   "serverClock": 91,
   "epoch": "uuid",              // the household's sync epoch — changes when a full resync occurred
@@ -1639,7 +1653,7 @@ exactly one of these strings, and §11's conflict rules are keyed to them.
 | `category.delete` | category | — | Rejected if any item still references it. |
 | `store.create` | store | `name` | Duplicate names are rejected. |
 | `store.rename` | store | `name` | Field-level LWW. |
-| `store.delete` | store | — | Removes the store's item tags; the items themselves survive. |
+| `store.delete` | store | — | **Tombstones the store** (§9.1). The row and its `item_stores` rows remain; the store is hidden from the store list. |
 
 > **Naming note.** The `type` values are namespaced by entity (`item.update`,
 > not `update`), so that a client reading an unfamiliar operation type can
@@ -2012,6 +2026,56 @@ cleared by their own operations (`item.undelete` clears `deleted_at`,
 so a tombstone is always logged as a deletion and an archive is never
 mistaken for one.
 
+**Conflicts must reach the device that did not create them.** Some
+conflicts concern a device that never pushed the losing operation — most
+importantly `item.override`, where one member's "Keep mine" silently
+overwrites another member's edit (§11, §11.2). That other member has to be
+told, or their edit vanishes with no record on their side (INV-04). So the
+response carries a **top-level `conflicts[]` array** alongside `changes[]`, and
+`entity_conflicts` has its own `seq` cursor (`bigserial`), paged by the
+request's `lastConflictSeq` and reported back as `nextConflictSeq`. It is a
+**separate cursor** from `lastSeq`, because `sync_changes` and
+`entity_conflicts` are different sequence spaces and sharing a counter would
+skip one of them.
+
+**`item.storeTags` needs its own write.** Bumping `items.version` and writing
+nothing else would lose the tag change entirely, and the change-log payload
+built from `to_jsonb(a)` carries no `storeIds` — so the snapshot's tag set
+could never be populated and a client could never rebuild its tags. The
+statement therefore writes the tag rows themselves, per pair, each with its
+own `version`, `lamport` and `device_id`:
+
+```sql
+tagged AS (
+  INSERT INTO item_stores (item_id, store_id, version, lamport, device_id)
+  SELECT $entity_id, t.store_id, 1, $op_lamport, $device_id
+    FROM jsonb_to_recordset($payload->'storeIds')
+         AS t(store_id uuid, version integer, present boolean)
+   WHERE t.present
+  ON CONFLICT (item_id, store_id) DO UPDATE
+    SET version  = item_stores.version + 1,
+        lamport  = GREATEST(item_stores.lamport, $op_lamport),
+        device_id = $device_id
+  RETURNING item_id, store_id, version
+),
+untagged AS (
+  DELETE FROM item_stores
+   WHERE item_id = $entity_id
+     AND store_id IN (SELECT (t.store_id)::uuid
+                        FROM jsonb_to_recordset($payload->'storeIds')
+                             AS t(store_id uuid, version integer, present boolean)
+                      WHERE NOT t.present)
+  RETURNING item_id, store_id
+)
+```
+
+**The payload's tag set is assembled from two sources**, because the CTEs in
+one statement share a snapshot: the rows this statement wrote (from `tagged`
+and `untagged`), **union** the snapshot's other rows for that item. Reading
+`item_stores` alone would miss the rows this statement just wrote; reading
+only the CTEs would miss the tags it did not touch. The change-log payload is
+therefore `to_jsonb(a) || jsonb_build_object('storeIds', …)` with that union.
+
 **A create is a different statement shape.** `item.create` inserts a
 client-supplied id, so the id can already exist:
 
@@ -2127,7 +2191,7 @@ The **Operation** column uses the authoritative `type` values enumerated in
 | `item.update` | `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`. | The loser's value is stored as a **conflict record**; the winner's value applies. | **Yes** |
 | `item.check` | `isChecked` | **Check-wins**, with the comparison stated exactly: the uncheck **applies** iff `op.baseVersion >= field_meta["isChecked"].v` — that is, iff the uncheck was made against a version that already included the check. Otherwise the check is newer than the uncheck's base, the check stands, and the uncheck is reported as a conflict. | Device A checks; device B (offline) unchecks from an older base → `baseVersion < field_meta["isChecked"].v` → **the item stays checked**. | **Yes** — the item shows `Checked by <name>` and an entry is added to "Needs attention". The *outcome* is intuitive, but the **user's action was overridden**, and FR-23 requires that an overridden edit is never silently discarded. |
 | `item.storeTags` | `storeIds` | The tag set is resolved **per `(item_id, store_id)` pair**, not as a set — each pair is an independent entity with its own `version`, `lamport`, and `device_id` (§9.1). For a single pair: an addition and a removal are ordered by `(lamport, deviceId)`, and when they are **concurrent** (neither operation's base version includes the other's write) the **removal wins** — a deliberate removal must not be undone by a concurrent re-add. Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]` and surfaced. | A adds "Costco", B adds "Aldi" → both tags present. A removes "Costco" while B concurrently re-adds it → **the removal wins**, and A is told. | **Yes**, for any contested or dropped tag |
-| `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `restore` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
+| `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `item.undelete` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
 | `item.undelete` | `deletedAt` | Clears a **delete** tombstone. Rejected if a **newer** delete exists — compared as: the tombstone's effective lamport (`field_meta["deletedAt"].lamport`, the lamport of the delete that set it) must not be **greater than** the undelete's own lamport. The delete's ordering value is persisted on the row for exactly this purpose (§9.1). | Delete-then-undelete ordering is respected: a delete at lamport 10 is not undone by an undelete at lamport 5. | No |
 | `item.unarchive` | `archivedAt` | Clears an **archive** mark and returns the item to the active list. Distinct from `item.undelete`, which clears a *delete* tombstone — conflating them resurrects a deleted item. | Re-adding an archived item on two devices → the item is unarchived once; the second is a no-op. | No |
 | `item.bulkUnarchive` | `archivedAt` | The bulk form of `item.unarchive`, carrying a `baseVersion`. Skips items changed since the base, exactly as `item.bulkArchive` does. | Undoing a bulk archive does not resurrect an item another device changed in the meantime. | No |
@@ -2135,9 +2199,9 @@ The **Operation** column uses the authoritative `type` values enumerated in
 | `item.bulkArchive` (clear completed, bulk) | `archivedAt` | The bulk form of `item.archive`: the same per-item version skip rule, applied across every checked item. The response reports how many items were skipped and why. | A clears completed offline; B changes an item's quantity → that item is **skipped**, not archived, and A is told how many were skipped. | **Yes**, the skipped count is reported |
 | `category.create` | all | Unique `(household_id, name)`. The insert uses **`ON CONFLICT DO NOTHING`**, and a no-op insert is reported as `DUPLICATE_NAME` for that operation alone. It must **not** rely on catching a unique-violation error: in PostgreSQL an error inside a transaction aborts the whole transaction, so one duplicate name would take every other operation in the request down with it. | Two devices create the same category name → one succeeds, the other is rejected with `DUPLICATE_NAME`. Neither affects the other's operations. | **Yes** |
 | `category.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
-| `store.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
+| `store.rename` | `name` | Field-level LWW. A tombstoned store returns `ENTITY_NOT_FOUND` — it cannot be renamed. | Winner applies; loser recorded. | **Yes** |
 | `store.create` | all | Duplicate names are handled with **`ON CONFLICT DO NOTHING`** and reported as `DUPLICATE_NAME` for that operation alone, for the same reason as `category.create`: a raised constraint violation would abort the shared transaction. The store is created with the client's id. | Two devices create the same store name → one succeeds, one is rejected and surfaced. Neither affects the other's operations. | **Yes** |
-| `store.delete` | all | Removes the store's item tags. The items themselves survive, untagged. A concurrent `item.storeTags` on the same store loses to the delete. | A tags an item to a store while B deletes the store → the store is gone and the item keeps no tag for it. | No (the outcome is intuitive) |
+| `store.delete` | all | **Tombstones the store**, exactly like `item.delete` — the row and its `item_stores` rows remain, so the store's tags are not silently stripped from the items that carry them. A concurrent `item.storeTags` on the same store loses to the delete. | A tags an item to a store while B deletes the store → the store is tombstoned and hidden from the store list; the tag row stays, so the item keeps a reference to a store that is no longer offered. `store.rename` on a tombstoned store returns `ENTITY_NOT_FOUND`. | No (the outcome is intuitive) |
 | `category.delete` | all | Rejected with `CATEGORY_IN_USE` while any item still references the category. The client is told which items block it. | Two devices delete categories → one succeeds; the other is rejected and surfaced. | **Yes** |
 | `item.override` | the contested field | **Bypasses the LWW comparison** for the named field. This is the "Keep mine" action (§11.2) — a user decision, not a race. Two boundary rules: (1) an override on a **tombstoned** entity is rejected with `ENTITY_NOT_FOUND` — you cannot keep your version of something that has been deleted; (2) overriding **`isChecked` is allowed**, and beats check-wins, because an explicit user decision outranks a rule that another user happened to trigger first. The value it replaced is written to `entity_conflicts` so the *other* device learns that its edit was overridden. | Device B's edit is overridden by device A's "Keep mine" → B is told, on its next sync, that its value was replaced. | **Yes**, on both sides |
 
