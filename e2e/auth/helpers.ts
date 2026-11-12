@@ -1,30 +1,12 @@
-import { expect as baseExpect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { appOrigin, PASSWORD } from "../support/helpers";
 
 /**
  * Helpers for the AUTH-01…04 specs.
  *
- * They live in this directory on purpose: `e2e/support/` is reserved for the
- * household half of task 0.7, so the two halves cannot collide.
+ * The helpers that more than one suite needs live in `e2e/support/helpers.ts`;
+ * the ones that only make sense for the auth specs stay here.
  */
-
-export const PASSWORD = "TestPassword123!";
-
-// The specs run against a dev server that compiles a page the first time it
-// is asked for it, so the default 5s expectation timeout is too tight on a
-// cold page.
-export const expect = baseExpect.configure({ timeout: 15_000 });
-
-// An address can only be registered once, so every user gets its own.
-export function uniqueEmail(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-}
-
-// The origin the app runs on. Better Auth refuses API calls that carry a
-// session cookie without an Origin header, and the request fixture always
-// carries one.
-export function appOrigin(): string {
-  return new URL(test.info().project.use.baseURL ?? "http://localhost:3000").origin;
-}
 
 /**
  * Registers a user and gives them a household, over the Better Auth API.
@@ -56,6 +38,35 @@ export async function registerUser(
   expect(created.ok(), `Could not create the household: ${createdBody}`).toBeTruthy();
 }
 
+// Collects the requests a page sends to one endpoint, so a spec can assert
+// that a form did not submit at all.
+export function trackRequests(page: Page, endpoint: string): string[] {
+  const seen: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes(endpoint)) seen.push(request.url());
+  });
+  return seen;
+}
+
+/**
+ * Opens the account menu and waits for its "Log out" item.
+ *
+ * The menu is a Base UI dropdown: it opens on pointerdown, and a click that
+ * lands before React has hydrated the header is swallowed, so the menu never
+ * opens. Click again when that happens.
+ */
+export async function openAccountMenu(page: Page): Promise<void> {
+  const trigger = page.getByRole("button", { name: "Account menu" });
+  const item = page.getByRole("menuitem", { name: /log out/i });
+
+  await expect(async () => {
+    if ((await trigger.getAttribute("aria-expanded")) !== "true") {
+      await trigger.click();
+    }
+    await expect(item).toBeVisible({ timeout: 3_000 });
+  }).toPass({ timeout: 15_000 });
+}
+
 /**
  * Gives the browser a session of its own, apart from the shared one.
  *
@@ -73,46 +84,4 @@ export async function startOwnSession(
   await registerUser(request, options);
   const state = await request.storageState();
   await page.context().addCookies(state.cookies);
-}
-
-// A click before React hydrates is swallowed, so wait for the request the
-// handler sends and click again when nothing went out.
-export async function submitForm(page: Page, buttonName: string, endpoint: string): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const sent = page
-      .waitForRequest((request) => request.url().includes(endpoint), { timeout: 5_000 })
-      .then(() => true, () => false);
-    await page.getByRole("button", { name: buttonName }).click();
-    if (await sent) return;
-  }
-  throw new Error(`The "${buttonName}" form sent no request to ${endpoint}`);
-}
-
-// Collects the requests a page sends to one endpoint, so a spec can assert
-// that a form did not submit at all.
-export function trackRequests(page: Page, endpoint: string): string[] {
-  const seen: string[] = [];
-  page.on("request", (request) => {
-    if (request.url().includes(endpoint)) seen.push(request.url());
-  });
-  return seen;
-}
-
-/**
- * Opens the account menu and waits for its "Log out" item.
- *
- * The menu is a Base UI dropdown: it opens on pointerdown, and a click that
- * lands before React has hydrated the header is swallowed, so the menu never
- * opens. Click again when the menu did not open.
- */
-export async function openAccountMenu(page: Page): Promise<void> {
-  const trigger = page.getByRole("button", { name: "Account menu" });
-  const item = page.getByRole("menuitem", { name: /log out/i });
-
-  await expect(async () => {
-    if ((await trigger.getAttribute("aria-expanded")) !== "true") {
-      await trigger.click();
-    }
-    await expect(item).toBeVisible({ timeout: 3_000 });
-  }).toPass({ timeout: 15_000 });
 }

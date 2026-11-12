@@ -1,5 +1,6 @@
 import { test } from "@playwright/test";
-import { expect, openAccountMenu, startOwnSession, uniqueEmail } from "./helpers";
+import { expect, uniqueEmail } from "../support/helpers";
+import { openAccountMenu, startOwnSession } from "./helpers";
 
 // AUTH-04: User can log out from any page
 //
