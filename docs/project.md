@@ -1338,9 +1338,15 @@ items.**
    client whose `lastSeq` predates the oldest retained `seq` for its household
    receives `fullResyncRequired: true` and re-bootstraps.
 
-**A full resync is authoritative over local state.** On a full resync the client
-discards its local tables *and its local tombstones* and rebuilds them from the
-server snapshot. This is what closes the second resurrection path: a device
+**A full resync is authoritative over local state, and the client re-bases
+its pending operations onto it.** On a full resync the client discards its
+local tables *and its local tombstones* and rebuilds them from the server
+snapshot. Any operation still in the outbox carried a `baseVersion` from
+*before* that snapshot, which is now stale — so the client **re-bases each
+pending operation's `baseVersion` to the version in the snapshot** for that
+entity. Without the re-base, every replayed operation would present a
+`baseVersion` the server has long since moved past and would be reported as a
+conflict, even though nothing was actually contested. This is what closes the second resurrection path: a device
 that has been offline longer than the change-log window cannot carry stale
 "live" state into the new world, because its entire local view — including any
 item it believed was deleted — is replaced by the server's. Local
@@ -1466,7 +1472,7 @@ so the client never has to special-case one of them:
       "conflicts": [] }          // conflicts on fields this op LOST but that still applied
   ],
   "changes": [
-    { "seq": 1043, "entityType": "item", "entity": { /* full snapshot */ },
+    { "seq": 1043, "entityType": "item", "entity": { /* EntitySnapshot — see below */ },
       "deleted": false, "version": 13, "updatedBy": "user_x", "updatedAt": "…" }
   ],
   "nextSeq": 1043,             // the highest seq SCANNED for this household, not the highest applied
@@ -1477,6 +1483,37 @@ so the client never has to special-case one of them:
   "fullResyncRequired": false
 }
 ```
+
+**The snapshot type.** `changes[].entity` is not an opaque blob — it is a
+concrete type, so `src/shared/sync.ts` can define it once and both sides agree:
+
+```ts
+type EntitySnapshot = {
+  id: string;
+  organizationId: string;
+  name: string;
+  quantity: string | null;
+  note: string | null;
+  categoryId: string | null;
+  isChecked: boolean;
+  archivedAt: string | null;
+  deletedAt: string | null;
+  storeIds: string[];                       // assembled from item_stores
+  fieldMeta: Record<string, { v: number; lamport: number; device: string }>;
+  version: number;
+  lamport: number;
+  lastOpId: string | null;
+  updatedById: string | null;
+  updatedAt: string;
+  createdAt: string;
+};
+```
+
+Every column of §9.1's `items` table appears, plus `storeIds` (assembled from
+`item_stores`) and the `fieldMeta` the client needs to resolve its own
+outstanding operations. `deleted` on the change is **derived** from
+`deletedAt IS NOT NULL` and is therefore redundant — it is included only so a
+client can filter without inspecting the snapshot.
 
 **The pull cursor.** `sync_changes.seq` is a *global* `bigserial`, filtered
 per household — so there is no "the household's next sequence number". A
@@ -1748,36 +1785,134 @@ rows, leaving an orphan change-log entry for a change that never happened. The
 gates correctly.
 
 ```sql
-WITH applied AS (
-  UPDATE items
-     SET version      = version + 1,
-         name         = CASE WHEN $op_type = 'item.update' AND $fields ? 'name'
-                             THEN $payload->>'name' ELSE name END,
-         -- ... one CASE per mutable field, driven by the operation's field set ...
-         lamport    = GREATEST(lamport, $op_lamport),
-         last_op_id = $op_id,
-         updated_at = now(),
-         updated_by = $actor_id
+-- The PRE-IMAGE, read from this statement's snapshot. Every CTE in the
+-- statement sees the same snapshot, so this is the row as it was before
+-- the update -- which is what a conflict record needs.
+before AS (
+  SELECT * FROM items
    WHERE id = $entity_id
      AND organization_id = $household_id
-     AND version = $base_version          -- the compare-and-swap
-  RETURNING id, organization_id, name, quantity, note, category_id,
-            is_checked, archived_at, deleted_at, field_meta, version,
-            lamport, last_op_id, updated_by, updated_at, created_at
+     AND version = $base_version
+),
+applied AS (
+  UPDATE items AS t
+     SET version       = t.version + 1,
+
+         -- PER FIELD: the incoming value is written ONLY when this
+         -- operation wins that field. The row-level CAS gates the row;
+         -- these expressions gate the fields. A field the operation
+         -- loses keeps the server's value, and is recorded as a conflict
+         -- by the `conflicts` CTE below.
+         name          = CASE WHEN $op_type = 'item.update' AND $fields ? 'name'
+                               AND ($op_lamport, $device_id) >
+                                   (COALESCE((b.field_meta->'name')->>'lamport','0')::bigint,
+                                    COALESCE((b.field_meta->'name')->>'device',''))
+                              THEN $payload->>'name' ELSE t.name END,
+         quantity      = CASE WHEN $op_type = 'item.update' AND $fields ? 'quantity'
+                               AND ($op_lamport, $device_id) >
+                                   (COALESCE((b.field_meta->'quantity')->>'lamport','0')::bigint,
+                                    COALESCE((b.field_meta->'quantity')->>'device',''))
+                              THEN $payload->>'quantity' ELSE t.quantity END,
+         note          = CASE WHEN $op_type = 'item.update' AND $fields ? 'note'
+                               AND ($op_lamport, $device_id) >
+                                   (COALESCE((b.field_meta->'note')->>'lamport','0')::bigint,
+                                    COALESCE((b.field_meta->'note')->>'device',''))
+                              THEN $payload->>'note' ELSE t.note END,
+         category_id   = CASE WHEN $op_type = 'item.update' AND $fields ? 'categoryId'
+                               AND ($op_lamport, $device_id) >
+                                   (COALESCE((b.field_meta->'categoryId')->>'lamport','0')::bigint,
+                                    COALESCE((b.field_meta->'categoryId')->>'device',''))
+                              THEN ($payload->>'categoryId')::uuid ELSE t.category_id END,
+
+         -- check-wins uses baseVersion, NOT lamport ordering (section 11).
+         is_checked    = CASE WHEN $op_type = 'item.check'
+                               AND $base_version >=
+                                   COALESCE((b.field_meta->'isChecked')->>'v','0')::int
+                              THEN ($payload->>'isChecked')::boolean ELSE t.is_checked END,
+
+         -- The tombstone and the archive mark are set by their own
+         -- operations, and are cleared by their own operations.
+         archived_at   = CASE WHEN $op_type IN ('item.archive','item.bulkArchive')
+                              THEN now() ELSE t.archived_at END,
+         deleted_at    = CASE WHEN $op_type = 'item.delete'
+                              THEN now() ELSE t.deleted_at END,
+
+         -- field_meta MUST be maintained per won field. Without this, every
+         -- per-field rule in section 11 reads metadata the apply never
+         -- writes, and the next operation's comparison has nothing to
+         -- compare against.
+         field_meta    = t.field_meta || jsonb_build_object(
+                           'name',        jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
+                           'quantity',    jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
+                           'note',        jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
+                           'categoryId',  jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
+                           'isChecked',   jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
+                           'deletedAt',   jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id),
+                           'archivedAt',  jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id)
+                         ),
+
+         lamport       = GREATEST(t.lamport, $op_lamport),
+         last_op_id    = $op_id,
+         updated_at    = now(),
+         updated_by_id = $actor_id
+    FROM before AS b
+   WHERE t.id = $entity_id
+     AND t.organization_id = $household_id
+     AND t.version = $base_version          -- the row-level compare-and-swap
+  RETURNING t.id, t.organization_id, t.name, t.quantity, t.note, t.category_id,
+            t.is_checked, t.archived_at, t.deleted_at, t.field_meta, t.version,
+            t.lamport, t.last_op_id, t.updated_by_id, t.updated_at, t.created_at
+),
+lost AS (
+  -- The fields this operation LOST: the operation asked for the field,
+  -- the server's value was newer, so the pre-image IS the winning value.
+  SELECT f.field,
+         f.local_value,
+         CASE f.field WHEN 'name' THEN b.name WHEN 'quantity' THEN b.quantity
+                      WHEN 'note' THEN b.note WHEN 'categoryId' THEN b.category_id
+                      WHEN 'isChecked' THEN b.is_checked END AS server_value,
+         COALESCE((b.field_meta->f.field)->>'device','')::uuid AS winner_device_id,
+         COALESCE((b.field_meta->f.field)->>'lamport','0')::bigint AS winner_lamport
+    FROM before AS b,
+         unnest($fields) AS f(field)
+   WHERE $op_type IN ('item.update','item.check')
+     AND NOT (($op_lamport, $device_id) >
+              (COALESCE((b.field_meta->f.field)->>'lamport','0')::bigint,
+               COALESCE((b.field_meta->f.field)->>'device','')))
+     AND (f.field <> 'isChecked' OR $base_version <
+          COALESCE((b.field_meta->'isChecked')->>'v','0')::int)
+),
+conflicts AS (
+  INSERT INTO entity_conflicts (household_id, entity_type, entity_id, field,
+                                local_value, server_value, resolution,
+                                winner_device_id, winner_lamport, op_id, device_id)
+  SELECT $household_id, $entity_type, $entity_id, l.field,
+         l.local_value, l.server_value, $resolution,
+         l.winner_device_id, l.winner_lamport, $op_id, $device_id
+    FROM lost AS l
+  RETURNING id
 ),
 logged AS (
   INSERT INTO sync_changes (household_id, entity_type, entity_id, op_id,
                              version, lamport, device_id, actor_id, payload, deleted)
   SELECT $household_id, $entity_type, a.id, $op_id, a.version, $op_lamport,
-         $device_id, $actor_id, to_jsonb(a), false
-    FROM applied a                            -- MUST select FROM the CTE
+         $device_id, $actor_id, to_jsonb(a), (a.deleted_at IS NOT NULL)
+    FROM applied AS a                     -- MUST select FROM the CTE
   RETURNING seq
 )
 INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
-                             entity_type, entity_id, op_type, lamport, payload, result)
+                             entity_type, entity_id, op_type, lamport,
+                             payload, result, outcome)
 SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, a.id,
-       $op_type, $op_lamport, $payload, to_jsonb(a)
-  FROM applied a
+       $op_type, $op_lamport, $payload,
+       -- The FULL per-operation response envelope, so a replay is identical.
+       jsonb_build_object(
+         'entity',    to_jsonb(a),
+         'conflicts', COALESCE((SELECT jsonb_agg(to_jsonb(c) - 'id')
+                                   FROM conflicts AS c), '[]'::jsonb)
+       ),
+       'applied'
+  FROM applied AS a
 RETURNING op_id;
 ```
 
@@ -1815,6 +1950,35 @@ zero-row compare-and-swap on that item is the *specified outcome*, not a
 conflict: count it, write no change-log row for it, do not re-apply it, and
 report the skipped count. For every other operation type, zero rows mean a
 genuine conflict, as described above.
+
+**The row-level CAS and the per-field gates are different things.** The
+`WHERE version = $base_version` clause gates the *row* — it decides whether
+this operation is still the one that should write at all. The `CASE`
+expressions gate the *fields* — an operation that wins the row may still lose
+individual fields to a concurrent write. A `CASE` that wrote the incoming
+value unconditionally would apply a losing field and report no conflict, which
+is exactly the silent discard that FR-23 forbids.
+
+**`field_meta` must be maintained by the same statement.** Every per-field rule
+in §11 reads `field_meta[f].lamport` or `field_meta[f].v`, so an apply that
+does not write `field_meta` leaves the next operation with nothing to compare
+against — the second concurrent edit would find no metadata and would win
+unconditionally. The `field_meta` assignment merges one entry per field the
+operation **won**, carrying the new row `version`, the operation's lamport, and
+its device.
+
+**The conflict record is written by the same statement, from the pre-image.**
+The `before` CTE reads the row from the statement's snapshot — the state before
+the update — so `lost.server_value` is the value that won, and
+`lost.local_value` is what the operation asked for. Writing the conflict in a
+separate statement would race with the write it describes.
+
+**The tombstone and the archive mark are set by their own operations**, and
+cleared by their own operations (`item.undelete` clears `deleted_at`,
+`item.unarchive` clears `archived_at`). The change-log's `deleted` flag is
+**derived from the row** — `(a.deleted_at IS NOT NULL)` — rather than hardcoded,
+so a tombstone is always logged as a deletion and an archive is never
+mistaken for one.
 
 **Implementation subtleties that will bite an implementer.**
 
