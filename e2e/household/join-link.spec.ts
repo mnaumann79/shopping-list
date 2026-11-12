@@ -1,6 +1,5 @@
 import { expect, test } from "@playwright/test";
 import {
-  clickAndWaitForRequest,
   generateJoinLink,
   joinPath,
   joinToken,
@@ -10,6 +9,7 @@ import {
   PASSWORD,
   queryRows,
   signUp,
+  submitForm,
   uniqueEmail,
 } from "./helpers";
 
@@ -22,14 +22,14 @@ test.describe("Shareable join link flow", () => {
     await page.goto("/household/settings");
 
     await expect(page.getByRole("button", { name: "Generate join link" })).toBeVisible();
-    await clickAndWaitForRequest(page, "Generate join link", "/api/households/join-links");
+    await submitForm(page, "Generate join link", "/api/households/join-links");
 
     await expect(page.locator("input[readonly]")).toBeVisible();
   });
 
   test("generated link has /join?token= format", async ({ page }) => {
     await page.goto("/household/settings");
-    await clickAndWaitForRequest(page, "Generate join link", "/api/households/join-links");
+    await submitForm(page, "Generate join link", "/api/households/join-links");
 
     const link = await page.locator("input[readonly]").inputValue();
 
@@ -82,7 +82,7 @@ test.describe("Shareable join link flow", () => {
       await fresh.getByLabel("Name", { exact: true }).fill("Joiner");
       await fresh.getByLabel("Email", { exact: true }).fill(email);
       await fresh.getByLabel("Password", { exact: true }).fill(PASSWORD);
-      await clickAndWaitForRequest(fresh, "Sign up", "/api/auth/sign-up/email");
+      await submitForm(fresh, "Sign up", "/api/auth/sign-up/email");
 
       // The sign-up page sends the new user back to the join link, which
       // now has a session and joins them.
@@ -151,11 +151,11 @@ test.describe("Shareable join link flow", () => {
     await page.goto("/household/settings");
     const linkInput = page.locator("input[readonly]");
 
-    await clickAndWaitForRequest(page, "Generate join link", "/api/households/join-links");
+    await submitForm(page, "Generate join link", "/api/households/join-links");
     await expect(linkInput).toHaveValue(/\/join\?token=[0-9a-f]{64}$/);
     const first = await linkInput.inputValue();
 
-    await clickAndWaitForRequest(page, "Generate join link", "/api/households/join-links");
+    await submitForm(page, "Generate join link", "/api/households/join-links");
     await expect(async () => {
       expect(await linkInput.inputValue()).not.toBe(first);
     }).toPass({ timeout: 30_000 });

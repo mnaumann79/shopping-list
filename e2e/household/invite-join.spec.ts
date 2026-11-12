@@ -1,11 +1,13 @@
 import { expect, test } from "@playwright/test";
 import {
-  clickAndWaitForRequest,
   inviteFromSettings,
+  INVITE_TIMEOUT,
+  listHouseholds,
   listMembers,
   newUserContext,
   PASSWORD,
   signUp,
+  submitForm,
   uniqueEmail,
 } from "./helpers";
 
@@ -20,9 +22,13 @@ test.describe("Email invite flow", () => {
     await page.goto("/household/settings");
     await expect(page.getByRole("button", { name: "Send invite" })).toBeVisible();
     await page.getByPlaceholder("name@example.com").fill(email);
-    await clickAndWaitForRequest(page, "Send invite", "/api/households/invite");
+    await submitForm(page, "Send invite", "/api/households/invite");
 
-    await expect(page.getByText(`Invitation sent to ${email}`)).toBeVisible();
+    // The app answers only after the invitation mail has been sent, so the
+    // toast waits for the mail call rather than for the click.
+    await expect(page.getByText(`Invitation sent to ${email}`)).toBeVisible({
+      timeout: INVITE_TIMEOUT,
+    });
   });
 
   test("invitation record is created in DB after invite sent", async ({ page }) => {
@@ -98,7 +104,7 @@ test.describe("Email invite flow", () => {
       await fresh.getByLabel("Name", { exact: true }).fill("Invitee");
       await expect(fresh.getByLabel("Email", { exact: true })).toHaveValue(email);
       await fresh.getByLabel("Password", { exact: true }).fill(PASSWORD);
-      await clickAndWaitForRequest(fresh, "Sign up", "/api/auth/sign-up/email");
+      await submitForm(fresh, "Sign up", "/api/auth/sign-up/email");
 
       // The invitation id survives the round trip through sign-up, so the
       // new account lands in the household instead of the onboarding page.
@@ -127,7 +133,14 @@ test.describe("Email invite flow", () => {
 
     await page.goto("/household/settings");
 
-    const memberList = page.getByRole("heading", { name: "Members" }).locator("..");
-    await expect(memberList.getByText(email)).toBeVisible();
+    // The card title is a div, so the card is found by its title slot rather
+    // than by a heading role.
+    const membersCard = page
+      .locator('[data-slot="card"]')
+      .filter({ has: page.locator('[data-slot="card-title"]', { hasText: "Members" }) });
+
+    const member = membersCard.locator("li").filter({ hasText: email });
+    await expect(member).toBeVisible();
+    await expect(member.getByText("member", { exact: true })).toBeVisible();
   });
 });
