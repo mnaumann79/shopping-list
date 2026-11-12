@@ -24,13 +24,6 @@ vi.mock("@/db", () => ({
 
 import { auth } from "@/lib/auth";
 import { POST } from "@/app/api/items/clear-completed/route";
-import { NextRequest } from "next/server";
-
-function makeRequest(): NextRequest {
-  return new NextRequest("http://localhost:3000/api/items/clear-completed", {
-    method: "POST",
-  });
-}
 
 describe("POST /api/items/clear-completed", () => {
   beforeEach(() => {
@@ -40,7 +33,7 @@ describe("POST /api/items/clear-completed", () => {
   it("returns 401 when no session", async () => {
     vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
 
-    const res = await POST(makeRequest());
+    const res = await POST();
 
     expect(res.status).toBe(401);
   });
@@ -51,7 +44,7 @@ describe("POST /api/items/clear-completed", () => {
       user: { id: "u1" },
     } as never);
 
-    const res = await POST(makeRequest());
+    const res = await POST();
 
     expect(res.status).toBe(400);
   });
@@ -101,7 +94,7 @@ describe("POST /api/items/clear-completed", () => {
     const set = vi.fn().mockReturnValue({ where: updateWhere });
     vi.mocked(db.update).mockReturnValue({ set } as never);
 
-    const res = await POST(makeRequest());
+    const res = await POST();
 
     expect(res.status).toBe(200);
     const json = await res.json();
@@ -158,7 +151,7 @@ describe("POST /api/items/clear-completed", () => {
       set: vi.fn().mockReturnValue({ where: updateWhere }),
     } as never);
 
-    const res = await POST(makeRequest());
+    const res = await POST();
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ clearedItems: [] });
