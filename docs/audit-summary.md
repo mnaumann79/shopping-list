@@ -9,9 +9,9 @@ found, and what happens next. It is a summary, not a specification —
 | --- | --- |
 | **Scope** | Technical and functional audit of `mnaumann79/shopping-list`, plus an offline-first recovery plan |
 | **Date** | 2026-11-12 |
-| **Branch** | `docs/offline-first-recovery-plan` |
-| **Pull request** | [#1](https://github.com/mnaumann79/shopping-list/pull/1) — open, documentation-only, **not merged** |
-| **Implementation** | **Not started.** No boards, no tasks, no code, no migrations touched. |
+| **Branch** | `docs/offline-first-sync-statement-fixes` |
+| **Pull request** | [#1](https://github.com/mnaumann79/shopping-list/pull/1) — **merged**. [#2](https://github.com/mnaumann79/shopping-list/pull/2) — open, documentation-only, **not merged** |
+| **Implementation** | **Phase 0 in progress** — a reliable baseline: CI, a green test suite, a safe migration runner. No feature code yet; the offline-first rebuild has not started. |
 
 ---
 
@@ -179,19 +179,27 @@ Full detail in `docs/project.md`. In brief:
   so durability comes from IndexedDB, not a background task.
 - **Real-PostgreSQL integration tests**, because a mocked database cannot
   verify tenant isolation, constraints, or migrations.
+- **Self-hosted Supabase for the platform**, and **Supabase Auth** for
+  identity. This is the product owner's decision, and it is recorded as
+  ADR-16 and ADR-17. It buys three things: the instance is the platform the
+  owner wants to run; the apply path becomes an ordinary interactive
+  transaction instead of Neon's HTTP batch (ADR-14); and the identity id is a
+  `uuid` owned by the platform, which is what makes `auth.uid()` — and
+  therefore **real** row-level security — possible.
 
-Fifteen architectural decisions with their rationale and rejected alternatives
-are recorded in `docs/project.md` §18.
+Seventeen architectural decisions with their rationale and rejected
+alternatives are recorded in `docs/project.md` §18.
 
 ---
 
 ## 6. The roadmap
 
-Full detail in `docs/plan.md`. Eight dependency-aware phases:
+Full detail in `docs/plan.md`. Nine dependency-aware phases:
 
 | Phase | Objective | Weeks |
 | --- | --- | --- |
 | **0 — Reliable Baseline** | Make lint, type-check, tests and CI green so anything can be verified | 1 |
+| **0b — Supabase Migration** | Move the hosting, the database and the authentication; put row-level security behind the scope helper | 2 |
 | **1 — Security & Data-Integrity Repairs** | Close the verified authorization and integrity defects on the current architecture | 1 |
 | **2 — Architecture Contracts** | Freeze the interface contracts; prove the atomicity approach | 1 |
 | **3 — Server Sync Core** | Change log, idempotency ledger, apply engine, `/api/sync` | 2 |
@@ -204,6 +212,12 @@ Phases 3 and 4 run in parallel once Phase 2 has frozen the contracts. Every
 phase produces a demonstrably working increment, and a file-ownership matrix
 prevents concurrent tasks from sharing writable paths.
 
+**Phase 0b is the cutover, and it is the one phase that touches live data.**
+Its rollback is a configuration change rather than a restore, because the
+old database is not modified during the window — and that property is only
+true if the steps are followed. §13.2a is the procedure; §13.2c explains why
+no existing user is asked to reset their password.
+
 **A repeatable demonstration is required before the work is done**: two
 devices make conflicting offline changes, reconnect, and converge correctly
 with the losing edit surfaced rather than discarded.
@@ -214,17 +228,29 @@ with the losing edit surfaced rather than discarded.
 
 | | |
 | --- | --- |
-| **Specification** | `docs/project.md` — ~3,180 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 15 ADRs, 38 acceptance criteria. |
-| **Roadmap** | `docs/plan.md` — ~770 lines. 8 phases, ownership matrix, merge order, 8 open decisions. |
-| **Review** | 8 rounds, by three specialists. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
-| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 149 assertions about their outcomes pass.** |
+| **Specification** | `docs/project.md` — ~3,860 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 17 ADRs, 38 acceptance criteria. |
+| **Roadmap** | `docs/plan.md` — ~880 lines. 9 phases, ownership matrix, merge order, 8 open decisions plus 3 in Phase 0b. |
+| **Review** | 8 rounds, by three specialists, plus 4 further verification rounds. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
+| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 161 assertions about their outcomes pass** — extracted from the document by content, so the text that is verified is the text that is specified. |
 
-**Deliberate changes to the original plan, made on review:** RLS removed from
-the isolation strategy (unreliable on the Neon HTTP driver — fail-open returns
-every row, fail-closed returns none); "Keep mine" made an explicit **override**
-rather than a race; tombstones made **never hard-deleted**; the change-log
-payload made **camelCase** to match the wire contract; and a **pair tombstone**
-added so that a removal's ordering key survives.
+**Deliberate changes to the original plan, made on review:** "Keep mine" made
+an explicit **override** rather than a race; tombstones made **never
+hard-deleted**; the change-log payload made **camelCase** to match the wire
+contract; and a **pair tombstone** added so that a removal's ordering key
+survives.
+
+**One change was reversed by the stack move.** The original plan **excluded**
+PostgreSQL row-level security, because on the Neon HTTP driver every statement
+was its own request with no session state: a policy could not be keyed
+reliably to the caller, and a policy written fail-open returns every row
+while one written fail-closed returns none — the *appearance* of defence in
+depth, behaving unpredictably. That reasoning was correct, and it is
+**answered rather than ignored**: the hosting moves to a self-hosted Supabase
+instance, where Supabase Auth issues a signed JWT and the claims are set
+**inside the transaction that runs the query**, so there is no window in which
+a policy is evaluated without the caller being known. RLS is now the second
+of three isolation layers, and it closes the "no database-level tenant
+isolation" defect (S-5) at the database rather than only in the application.
 
 ---
 
@@ -244,16 +270,45 @@ The other four — sync cadence (D-3), delete-recoverability (D-4), sign-out
 behaviour with unsynchronised changes (D-5), and device management (D-6) —
 have later deadlines and are listed in `docs/plan.md` §7.
 
+**Three more gate Phase 0b**, and they are listed in `docs/plan.md`'s Phase
+0b section:
+
+| | Decision | Recommendation | Why it is yours |
+| --- | --- | --- | --- |
+| **D-8** | Does Supabase require email confirmation on sign-up? | **No**, initially | An unconfirmed account can reach no data: every household-scoped table is behind row-level security and a membership row is required. Turning it on later is one setting. |
+| **D-9** | How long is the rollback window after the cutover? | **14 days** | It has to cover "the user did not notice until next week". A longer window means the old authentication library stays a dependency longer. |
+| **D-10** | Are the legacy authentication tables dropped, or left in place? | **Dropped** | A table named `user` sitting next to `auth.users` is a trap for the next developer. Dropping is irreversible, but the data is redundant once every account has been migrated. |
+
 ---
 
 ## 9. What has *not* been done
 
-- No application code was changed.
-- No database schema or migration was changed.
-- No implementation board or task was created.
-- Nothing was deployed, and no production system or credential was accessed.
-- The pull request is **open and unmerged** — merging is the product owner's
-  decision.
+**The audit itself changed nothing:** no application code, no database schema
+or migration, no production system, no credential. That is still true of the
+audit's findings.
+
+**Since then, the work has started, and this is where it stands:**
+
+- **Phase 0 is in progress** — a reliable baseline, not a feature. A CI
+  workflow, a green test suite, a migration runner that refuses to run against
+  a production host, and a test configuration that works from a clean
+  checkout.
+- **Phase 0b is planned, not started.** The Supabase migration has a written
+  procedure, a rehearsal, and eleven tasks with owners — but **the cutover
+  has not happened and no production data has moved.** The instance has been
+  verified, not switched to.
+- **No feature work has started.** The offline-first rebuild — IndexedDB, the
+  sync engine, the conflict resolution, the offline UX — is untouched.
+- **Nothing has been deployed**, and no production system or credential has
+  been accessed.
+- **Both pull requests are open and unmerged** — merging is the product
+  owner's decision, and so is the cutover.
+
+**One thing has been done that deserves to be called out:** the §10.8 SQL was
+executed against a real PostgreSQL with the specification's own DDL, and its
+outcomes verified — 161 assertions across 33 scenario groups. That is
+**verification, not implementation**: no production code contains that SQL
+yet, and it will not until Phase 3.
 
 ---
 
@@ -270,10 +325,13 @@ createdb shopping_test && psql shopping_test -f db/init.sql
 # src/db/index.ts reads DATABASE_URL at import time, so the build alone is
 # not enough — the server process needs it too.
 export DATABASE_URL=postgresql://…/shopping_test
-export DB_DRIVER=node-postgres          # the local pg driver, not Neon HTTP
 export BETTER_AUTH_SECRET=…
 export BETTER_AUTH_URL=http://127.0.0.1:3000
 export NEXT_PUBLIC_APP_URL=http://127.0.0.1:3000
+
+# DB_DRIVER was in this list when the audit ran - the Neon HTTP driver had to
+# be switched off for a local Postgres. It is removed by Phase 0b (ADR-16):
+# there is one driver now.
 
 pnpm build && pnpm start
 
