@@ -19,10 +19,6 @@ interface Org {
   name: string;
 }
 
-function truncate(str: string, max = 20) {
-  return str.length > max ? str.slice(0, max) + "…" : str;
-}
-
 function getInitials(name: string) {
   return name
     .split(/\s+/)
@@ -33,14 +29,16 @@ function getInitials(name: string) {
 
 export function HouseholdSwitcher() {
   const router = useRouter();
-  const { data: session } = authClient.useSession();
+  const { data: session, isPending } = authClient.useSession();
   const [orgs, setOrgs] = useState<Org[]>([]);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     authClient.organization.list().then((result) => {
       if (result.data) {
         setOrgs(result.data as Org[]);
       }
+      setLoaded(true);
     });
   }, []);
 
@@ -53,6 +51,12 @@ export function HouseholdSwitcher() {
     router.refresh();
   }
 
+  // The household list arrives after the first render, so show nothing until
+  // it does - "No household" would be wrong in the meantime.
+  if (!loaded || isPending) {
+    return null;
+  }
+
   if (!activeOrg) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -63,14 +67,14 @@ export function HouseholdSwitcher() {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger className="inline-flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        <Avatar className="h-6 w-6">
+      <DropdownMenuTrigger className="inline-flex min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <Avatar className="h-6 w-6 shrink-0">
           <AvatarFallback className="text-xs">
             {getInitials(activeOrg.name)}
           </AvatarFallback>
         </Avatar>
-        <span>{truncate(activeOrg.name)}</span>
-        <ChevronDown className="h-4 w-4 opacity-50" />
+        <span className="truncate">{activeOrg.name}</span>
+        <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start">
         <DropdownMenuLabel className="text-xs text-muted-foreground font-normal">
@@ -82,7 +86,7 @@ export function HouseholdSwitcher() {
               {getInitials(activeOrg.name)}
             </AvatarFallback>
           </Avatar>
-          <span className="font-medium">{truncate(activeOrg.name)}</span>
+          <span className="font-medium">{activeOrg.name}</span>
         </DropdownMenuItem>
         {otherOrgs.length > 0 && (
           <>
@@ -97,7 +101,7 @@ export function HouseholdSwitcher() {
                     {getInitials(org.name)}
                   </AvatarFallback>
                 </Avatar>
-                {truncate(org.name)}
+                {org.name}
               </DropdownMenuItem>
             ))}
           </>

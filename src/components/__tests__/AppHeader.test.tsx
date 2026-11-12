@@ -14,6 +14,12 @@ vi.mock('@/lib/auth-client', () => ({
   },
 }))
 
+// The switcher is a separate component with its own data fetching; stub it
+// so this test stays about the header.
+vi.mock('@/components/household-switcher', () => ({
+  HouseholdSwitcher: () => <div data-testid="household-switcher" />,
+}));
+
 vi.mock('@/components/DarkModeToggle', () => ({
   DarkModeToggle: () => <div data-testid="dark-mode-toggle" />,
 }))
