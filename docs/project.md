@@ -1130,7 +1130,7 @@ union of the fields touched by the row's outstanding operations.
 | `field_meta` | `jsonb` not null default `'{}'` | Per-field write metadata. **An entry exists only for a field that a write actually touched** — a row that has only ever had its name changed has a `field_meta` with one key, not eight. The tracked set is exactly: `name`, `quantity`, `note`, `categoryId`, `storeIds`, `isChecked`, `deletedAt`, `archivedAt`. Each entry is `{ v, lamport, device }`, where **`v` is the row `version` that the write produced** — so `field_meta[f].v` is directly comparable with the row's current `version`, and a client can tell whether a given field has moved since its base version. `device` is the id of the device that wrote it, which is what §11's check-wins rule reads (`field_meta["isChecked"].device`). Enables per-field conflict resolution without a separate table. **It also carries the ordering key for the tombstone:** `field_meta["deletedAt"].lamport` records the effective lamport of the delete that set `deleted_at`, so `item.undelete` can tell whether a *newer* delete exists (§11). |
 | `updated_by_id` | `text` nullable → `user(id)` `ON DELETE SET NULL` | Who last changed the row. Named to match the existing `created_by_id` convention, and carries the same foreign key so the column cannot hold a user id that does not exist. |
 | `lamport` | `bigint` not null default 0 | Highest Lamport value applied to this row. |
-| `last_op_id` | `uuid` nullable | The `opId` of the operation that last wrote this row. Set by the compare-and-swap in the same batch. The change-log append and the idempotency record are guarded on `last_op_id = $opId`, which is what proves that *this* operation is the one whose write landed — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
+| `last_op_id` | `uuid` nullable | The `opId` of the operation that last wrote this row. Set by the compare-and-swap in the same batch. **It is corroborating, not the guard.** The guard is that the compare-and-swap matched **exactly one row** (§10.8). `last_op_id` additionally identifies *which* operation wrote the row, which matters for an operation that touches **several rows under one `opId`** (`item.bulkArchive`). It must not be used as the replay guard: after an operation has been applied, `last_op_id = $opId` is still true, so a replay would pass that predicate. — without it, a losing operation's change-log insert matches the **winner's** row and appends a second entry for one logical change, breaking the change log's total order. |
 
 **One meaning of "now" per table.** The existing `items.created_at`,
 `items.updated_at` and `items.archived_at` are `timestamp` (no time zone), while
@@ -1475,7 +1475,7 @@ so the client never has to special-case one of them:
     { "seq": 1043, "entityType": "item", "entity": { /* EntitySnapshot — see below */ },
       "deleted": false, "version": 13, "updatedBy": "user_x", "updatedAt": "…" }
   ],
-  "nextSeq": 1043,             // the highest seq SCANNED for this household, not the highest applied
+  "nextSeq": 1043,             // the highest seq DELIVERED in this response
   "hasMore": false,            // true when more changes remain beyond nextSeq
   "serverClock": 91,
   "epoch": "uuid",              // the household's sync epoch — changes when a full resync occurred
@@ -1518,15 +1518,20 @@ client can filter without inspecting the snapshot.
 **The pull cursor.** `sync_changes.seq` is a *global* `bigserial`, filtered
 per household — so there is no "the household's next sequence number". A
 household's changes are interleaved with every other household's in the
-global sequence. `nextSeq` is therefore **the highest `seq` the server scanned
-for this household**, not the highest one applied: the server scans
-`WHERE household_id = $1 AND seq > $lastSeq ORDER BY seq LIMIT $page`, and
-returns that scan's upper bound. The client then repeats with
-`lastSeq = nextSeq` until the response carries `hasMore: false`. Advancing
-`lastSeq` past a `seq` belonging to *another* household is harmless — it is
-simply skipped on the next scan — but advancing past one belonging to *this*
-household that has not yet committed is not, which is exactly what the
-per-household advisory lock prevents (§10.8).
+global sequence. `nextSeq` is **the highest `seq` delivered in this response** — the maximum of
+the rows actually returned — and it must never be set to a value higher than
+that. The server scans `WHERE household_id = $1 AND seq > $lastSeq ORDER BY seq
+LIMIT $page` and returns those rows; the cursor advances to the highest one it
+returned, and `hasMore` says whether the page was full. The client then
+repeats with `lastSeq = nextSeq` until `hasMore` is false.
+
+Advancing the cursor past a `seq` the client never received would silently
+skip those changes forever, so the cursor is derived from the **delivered**
+rows, never from the scan's upper bound or from the last row in the global
+sequence. Advancing `lastSeq` past a `seq` belonging to *another* household is
+harmless — it is simply skipped on the next scan — but advancing past one
+belonging to *this* household that has not yet committed is not, which is
+exactly what the per-household advisory lock prevents (§10.8).
 
 The household's Lamport clock, its change-log retention floor, and its sync
 epoch live in `household_sync_state` (§9.2). `serverClock` is that household's
@@ -1546,20 +1551,31 @@ treated as a transient failure and retried, never as a rejection.
 | `CONFLICT_RETRY_EXHAUSTED` | The operation kept losing the race; it was retried the maximum number of times | No | **Yes** — the change is blocked, not dropped |
 | `DUPLICATE_NAME` | A category or store with that name already exists | No | **Yes** |
 | `DUPLICATE_ENTITY_OPERATION` | The request contains two operations for the same entity | No | **Yes** — the client should coalesce (§10.1) |
+| `DUPLICATE_OPERATION` | The request contains the same `opId` twice | No | **Yes** — the client should never send a duplicate |
+| `DUPLICATE_ID` | A create used a client-supplied id that already exists, and the idempotency ledger does not hold this `opId` | No | **Yes** — the id collided with a different operation |
 | `ENTITY_NOT_FOUND` | The entity does not exist **in the requested household**, or is tombstoned | No | **Yes** |
 | `ENTITY_EXISTS` | The entity already exists — a create for an id that is taken | No | **Yes** |
 | `CATEGORY_IN_USE` | The category is still referenced by items | No | **Yes** — naming the blocking items |
 | `NOT_AUTHORIZED` | The actor is not permitted to perform this operation | No | **Yes** |
 | `SESSION_EXPIRED` | The session is no longer valid | After re-authentication | **Yes** — "Sign in to sync" |
 
-**One operation per entity per request.** A request may not contain two
-operations for the same entity: the apply is one statement per operation, and
-one statement cannot carry both. The **client coalesces** — it collapses its
-outbox to the final local state per entity before sending, so a user who adds
-an item and then renames it sends one `item.create` with the final name, not
-two operations. The **server rejects** a request that contains two operations
-for the same entity, with `DUPLICATE_ENTITY_OPERATION` for the second one. The
-request continues; the other operations are unaffected.
+**One operation per entity per request, and one operation per `opId` per
+request.** The apply is one statement per operation, and one statement cannot
+carry two operations for the same entity — so a request may not contain them.
+The **client coalesces** — it collapses its outbox to the final local state
+per entity before sending, so a user who adds an item and then renames it
+sends one `item.create` with the final name, not two operations. The **server
+rejects** a request that contains two operations for the same entity, with
+`DUPLICATE_ENTITY_OPERATION` for the second one. The request continues; the
+other operations are unaffected.
+
+Nor may a request contain the **same `opId` twice**. The `sync_operations`
+insert would violate the primary key on the second one, and in PostgreSQL a
+raised error **aborts the whole transaction** — undoing every operation in the
+request that had already succeeded. The duplicate is therefore caught in the
+**pre-batch validation**, alongside the other checks, and reported as
+`DUPLICATE_OPERATION` for the second occurrence. The first occurrence proceeds
+normally.
 
 **Cross-household entity ids are `ENTITY_NOT_FOUND`, not 403.** Every
 `entityId` in a request resolves **within the requested household**. An id
@@ -1591,7 +1607,7 @@ exactly one of these strings, and §11's conflict rules are keyed to them.
 
 | `type` | Entity | Payload | Conflict rule (§11) |
 | --- | --- | --- | --- |
-| `item.create` | item | `name`, `quantity`, `note`, `categoryId`, `storeIds` | Server accepts the client id; idempotent on `opId`. |
+| `item.create` | item | `name`, `quantity`, `note`, `categoryId`, `storeIds` | The server accepts the client id, and the insert uses **`ON CONFLICT (id) DO NOTHING RETURNING id`**. Zero rows returned means the id was already taken: that is `duplicate` if the idempotency ledger holds this `opId`, and `DUPLICATE_ID` otherwise. The change-log row is built from the **inserted** row, never from the pre-existing item — otherwise a collision would log a change that did not happen. |
 | `item.update` | item | any of `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`; the losing value is reported as a conflict. |
 | `item.override` | item | `field`, `value`, `serverValue` | **Bypasses LWW** for the named field and applies unconditionally. This is the "Keep mine" action (§11.2) — a user decision, not a race. |
 | `item.check` | item | `isChecked` (boolean) | **Check-wins** (§11). |
@@ -1980,6 +1996,31 @@ cleared by their own operations (`item.undelete` clears `deleted_at`,
 so a tombstone is always logged as a deletion and an archive is never
 mistaken for one.
 
+**A create is a different statement shape.** `item.create` inserts a
+client-supplied id, so the id can already exist:
+
+```sql
+WITH created AS (
+  INSERT INTO items (id, organization_id, name, quantity, note, category_id,
+                     created_by_id, version, lamport, last_op_id)
+  VALUES ($entity_id, $household_id, $payload->>'name', $payload->>'quantity',
+          $payload->>'note', ($payload->>'categoryId')::uuid,
+          $actor_id, 1, $op_lamport, $op_id)
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id, organization_id, name, quantity, note, category_id,
+            is_checked, archived_at, deleted_at, field_meta, version,
+            lamport, last_op_id, updated_by_id, updated_at, created_at
+)
+-- ... then the same change-log and idempotency inserts, selecting FROM created
+```
+
+Zero rows means the id was already taken. That is `duplicate` if the
+idempotency ledger holds this `opId` — a replay — and `DUPLICATE_ID`
+otherwise. **The change-log row is built from the inserted row, never from the
+pre-existing item**: selecting the existing row instead would log a change
+that did not happen, and would report the operation as applied when nothing was
+written.
+
 **Implementation subtleties that will bite an implementer.**
 
 1. **Drizzle has no builder for `WITH … UPDATE … RETURNING`.** Use the `sql`
@@ -1989,11 +2030,22 @@ mistaken for one.
    `applied` CTE may be optimised away, the update never happens, and the
    batch commits an empty change log. The `logged` CTE above is included for
    the same reason.
-3. **`last_op_id` is what proves the write landed.** The `sync_changes` insert
-   and the `sync_operations` insert are both guarded on the row having
-   `last_op_id = $op_id`. Without it, the losing operation's change-log insert
-   matches the *winner's* row and appends a second entry for one logical
-   change (§11, ADR-14).
+3. **The guard is that the compare-and-swap matched exactly one row.** The
+   `sync_changes` and `sync_operations` inserts both select `FROM applied`,
+   and `applied` yields a row only when the `UPDATE … WHERE version =
+   $base_version` matched. That is the whole guard: a replayed operation
+   matches zero rows, so it writes no change-log row and no second ledger
+   entry.
+
+   `last_op_id` is **corroborating, not the guard** — after an operation has
+   been applied, `last_op_id = $op_id` is still true, so using it as the
+   predicate would let a replay through. It is kept because it identifies
+   *which* operation wrote a row, which matters for an operation that touches
+   several rows under one `opId` (`item.bulkArchive`).
+
+   `last_op_id` is nonetheless what prevents a *losing* operation's change-log
+   insert from matching the *winner's* row: the losing operation's `applied`
+   CTE is empty, so it writes nothing at all (§11, ADR-14).
 4. **Zero rows is a success, not an error.** The batch statement has three
    outcomes, and they must be kept distinct:
 
