@@ -1226,6 +1226,7 @@ CREATE TABLE devices (
   id           uuid NOT NULL,
   household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
   name         text NOT NULL,
+  epoch        uuid,                      -- the epoch this device last synced against
   last_seen_at timestamptz NOT NULL DEFAULT now(),
   created_at   timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (household_id, id)
@@ -1694,6 +1695,14 @@ sole mechanism.
 | `lastSeq` older than retention | Response carries `fullResyncRequired: true` → the client requests a full snapshot, rebuilds its local tables, and **replays its outbox afterwards**. |
 | Household never synced on this device | The client shows `This household hasn't been downloaded on this device yet. Connect to download.` It does **not** show an empty list, which would be indistinguishable from "the list is empty". |
 
+**The epoch a device last synced against is recorded in `devices.epoch`.**
+When it differs from `household_sync_state.epoch`, that device receives
+`fullResyncRequired: true` **regardless of its `lastSeq`**, and `devices.epoch`
+is set to the household's epoch when the device completes the resync. A device
+with no row, or a `NULL` epoch, has never synced and receives the full
+snapshot. This is what makes a *server-side history reset* detectable by a
+client whose `lastSeq` still looks plausible.
+
 ### 10.7 Change application on the client
 
 The client applies a sync response in two phases, in this order:
@@ -1799,6 +1808,14 @@ authorization and duplicate-name checks happen before the batch; a failed
 compare-and-swap updates zero rows; and creates use `ON CONFLICT DO NOTHING`
 rather than letting a unique violation abort the transaction (§10.1).
 
+**Zero rows mean different things for different operations.** For
+`item.archive` and `item.bulkArchive`, §11's rule is that an item whose
+`version` exceeds the version the operation carries is **skipped** — so a
+zero-row compare-and-swap on that item is the *specified outcome*, not a
+conflict: count it, write no change-log row for it, do not re-apply it, and
+report the skipped count. For every other operation type, zero rows mean a
+genuine conflict, as described above.
+
 **Implementation subtleties that will bite an implementer.**
 
 1. **Drizzle has no builder for `WITH … UPDATE … RETURNING`.** Use the `sql`
@@ -1819,7 +1836,7 @@ rather than letting a unique violation abort the transaction (§10.1).
    | Outcome | Meaning | Action |
    | --- | --- | --- |
    | **One row** | The compare-and-swap won. | Applied. |
-   | **Zero rows** | Either the compare-and-swap was **lost**, or the operation was **already applied** by a concurrent request carrying the same `opId`. | **Consult the idempotency ledger first** (§10.3). If `sync_operations` already holds this `opId`, the operation is a **duplicate** — return the cached result envelope and mark it `duplicate`. Only if the `opId` is absent is it a genuine lost race: re-read the row **in a fresh round trip**, re-run §11's per-field decision against the fresh state, and re-apply with the new `baseVersion`. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
+   | **Zero rows** | Either the compare-and-swap was **lost**, or the operation was **already applied** by a concurrent request carrying the same `opId`. | Re-read the row **in a fresh round trip** and consult the ledger first. If `sync_operations` holds a row for this `opId`, the operation was applied concurrently — report `duplicate` and replay its cached `result`. Otherwise it is a genuine conflict: re-run §11's per-field decision against the fresh state and re-apply with the new `baseVersion`. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
    | **The statement raised** | A genuine database error. | Retry the whole batch. |
 
    An empty result set must **not** be treated as a transport failure. The
