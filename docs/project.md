@@ -3873,7 +3873,7 @@ The recovery is complete when **all** of the following are demonstrably true.
 | # | Criterion |
 | --- | --- |
 | AC-20 | `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:integration`, `pnpm build`, and `pnpm test:e2e` all pass on every pull request. |
-| AC-21 | The 18 remaining placeholder E2E specs (`test.fixme`, all of them in `e2e/household/**`) are either implemented or deleted — a green run must not be a hollow green. |
+| AC-21 | Every `test.fixme` placeholder under `e2e/` is implemented (not deleted) and passing — a green run must not be a hollow green. |
 | AC-22 | No test asserts anything about a mocked database's `where()` clause. Database-facing tests run against real PostgreSQL. |
 | AC-23 | Every invariant INV-01 … INV-12 has at least one named automated test, and the test name cites the invariant. |
 | AC-24 | Lighthouse performance score ≥ 90 and LCP ≤ 2500 ms, measured by the existing harness. |
