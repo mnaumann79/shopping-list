@@ -1454,7 +1454,8 @@ outcome, so all of the request's operations can share one transaction safely.
                                 // which name their targets in the payload
       "type": "item.update",    // one of the operation types in §10.1a
       "override": false,        // true = explicit user decision, bypasses LWW for the field
-      "baseVersion": 12,        // server version the client edited from
+      "baseVersion": 12,        // the version the CLIENT edited from — immutable
+      "fields": ["name","quantity"], // the fields this operation touches
       "lamport": 88,
       "payload": { "quantity": "2 kg", "name": "Milk" },
       "createdAt": 1789000000000
@@ -1830,130 +1831,104 @@ rows, leaving an orphan change-log entry for a change that never happened. The
 — it is true when *someone else* won the race. Only a data-modifying CTE
 gates correctly.
 
+**The statement below has been executed against PostgreSQL 17 using this
+document's own §9.1/§9.2 DDL, and its outcomes verified** — a normal update,
+a field lost to a concurrent write, a check that loses by check-wins, and a
+lost compare-and-swap. It is the normative form; an implementer should not
+have to rediscover that it parses.
+
 ```sql
--- The PRE-IMAGE, read from this statement's snapshot. Every CTE in the
--- statement sees the same snapshot, so this is the row as it was before
--- the update -- which is what a conflict record needs.
-before AS (
+WITH before AS (
   SELECT * FROM items
    WHERE id = $entity_id
      AND organization_id = $household_id
-     AND version = $base_version
+     AND version = $cas_version
+),
+wins AS (
+  SELECT
+    ('name' = ANY($fields) AND $op_type = 'item.update'
+      AND ($op_lamport, $device_id::text) >
+          (COALESCE((b.field_meta->'name')->>'lamport','0')::bigint,
+           COALESCE((b.field_meta->'name')->>'device','')))                AS w_name,
+    ('quantity' = ANY($fields) AND $op_type = 'item.update'
+      AND ($op_lamport, $device_id::text) >
+          (COALESCE((b.field_meta->'quantity')->>'lamport','0')::bigint,
+           COALESCE((b.field_meta->'quantity')->>'device','')))            AS w_quantity,
+    ('note' = ANY($fields) AND $op_type = 'item.update'
+      AND ($op_lamport, $device_id::text) >
+          (COALESCE((b.field_meta->'note')->>'lamport','0')::bigint,
+           COALESCE((b.field_meta->'note')->>'device','')))                AS w_note,
+    ('categoryId' = ANY($fields) AND $op_type = 'item.update'
+      AND ($op_lamport, $device_id::text) >
+          (COALESCE((b.field_meta->'categoryId')->>'lamport','0')::bigint,
+           COALESCE((b.field_meta->'categoryId')->>'device','')))          AS w_category,
+    ($op_type = 'item.check'
+      AND $op_base_version >=
+          COALESCE((b.field_meta->'isChecked')->>'v','0')::int)           AS w_is_checked
+  FROM before AS b
 ),
 applied AS (
   UPDATE items AS t
      SET version       = t.version + 1,
-
-         -- PER FIELD: the incoming value is written ONLY when this
-         -- operation wins that field. The row-level CAS gates the row;
-         -- these expressions gate the fields. A field the operation
-         -- loses keeps the server's value, and is recorded as a conflict
-         -- by the `conflicts` CTE below.
-         name          = CASE WHEN $op_type = 'item.update' AND $fields ? 'name'
-                               AND ($op_lamport, $device_id) >
-                                   (COALESCE((b.field_meta->'name')->>'lamport','0')::bigint,
-                                    COALESCE((b.field_meta->'name')->>'device',''))
-                              THEN $payload->>'name' ELSE t.name END,
-         quantity      = CASE WHEN $op_type = 'item.update' AND $fields ? 'quantity'
-                               AND ($op_lamport, $device_id) >
-                                   (COALESCE((b.field_meta->'quantity')->>'lamport','0')::bigint,
-                                    COALESCE((b.field_meta->'quantity')->>'device',''))
-                              THEN $payload->>'quantity' ELSE t.quantity END,
-         note          = CASE WHEN $op_type = 'item.update' AND $fields ? 'note'
-                               AND ($op_lamport, $device_id) >
-                                   (COALESCE((b.field_meta->'note')->>'lamport','0')::bigint,
-                                    COALESCE((b.field_meta->'note')->>'device',''))
-                              THEN $payload->>'note' ELSE t.note END,
-         category_id   = CASE WHEN $op_type = 'item.update' AND $fields ? 'categoryId'
-                               AND ($op_lamport, $device_id) >
-                                   (COALESCE((b.field_meta->'categoryId')->>'lamport','0')::bigint,
-                                    COALESCE((b.field_meta->'categoryId')->>'device',''))
-                              THEN ($payload->>'categoryId')::uuid ELSE t.category_id END,
-
-         -- check-wins uses baseVersion, NOT lamport ordering (section 11).
-         is_checked    = CASE WHEN $op_type = 'item.check'
-                               AND $base_version >=
-                                   COALESCE((b.field_meta->'isChecked')->>'v','0')::int
-                              THEN ($payload->>'isChecked')::boolean ELSE t.is_checked END,
-
-         -- The tombstone and the archive mark are set by their own
-         -- operations, and are cleared by their own operations.
+         name          = CASE WHEN w.w_name        THEN $payload->>'name'       ELSE t.name END,
+         quantity      = CASE WHEN w.w_quantity    THEN $payload->>'quantity'   ELSE t.quantity END,
+         note          = CASE WHEN w.w_note        THEN $payload->>'note'       ELSE t.note END,
+         category_id   = CASE WHEN w.w_category    THEN ($payload->>'categoryId')::uuid ELSE t.category_id END,
+         is_checked    = CASE WHEN w.w_is_checked  THEN ($payload->>'isChecked')::boolean ELSE t.is_checked END,
          archived_at   = CASE WHEN $op_type IN ('item.archive','item.bulkArchive')
                               THEN now() ELSE t.archived_at END,
-         deleted_at    = CASE WHEN $op_type = 'item.delete'
-                              THEN now() ELSE t.deleted_at END,
-
-         -- field_meta MUST be maintained per won field. Without this, every
-         -- per-field rule in section 11 reads metadata the apply never
-         -- writes, and the next operation's comparison has nothing to
-         -- compare against.
-         -- field_meta is written ONLY for the fields this operation won.
-         -- jsonb_strip_nulls drops the keys whose CASE yielded NULL, so an
-         -- unrelated write does not touch the entry for a field it did not
-         -- change. Writing all of them unconditionally would raise
-         -- field_meta["isChecked"].v on every write, and section 11's
-         -- check rule compares baseVersion against that value - so every
-         -- later uncheck would report a false conflict.
+         deleted_at    = CASE WHEN $op_type = 'item.delete' THEN now() ELSE t.deleted_at END,
          field_meta    = t.field_meta || jsonb_strip_nulls(jsonb_build_object(
-                           'name',       CASE WHEN $op_type = 'item.update' AND $fields ? 'name'
-                                               AND <wins name>
-                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'quantity',   CASE WHEN $op_type = 'item.update' AND $fields ? 'quantity'
-                                               AND <wins quantity>
-                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'note',       CASE WHEN $op_type = 'item.update' AND $fields ? 'note'
-                                               AND <wins note>
-                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'categoryId', CASE WHEN $op_type = 'item.update' AND $fields ? 'categoryId'
-                                               AND <wins categoryId>
-                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
-                           'isChecked',  CASE WHEN $op_type = 'item.check' AND <wins isChecked>
-                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'name',       CASE WHEN w.w_name       THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'quantity',   CASE WHEN w.w_quantity   THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'note',       CASE WHEN w.w_note       THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'categoryId', CASE WHEN w.w_category   THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                           'isChecked',  CASE WHEN w.w_is_checked THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
                            'deletedAt',  CASE WHEN $op_type = 'item.delete'
-                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                                             THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
                            'archivedAt', CASE WHEN $op_type IN ('item.archive','item.bulkArchive','item.unarchive','item.bulkUnarchive')
-                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
+                                             THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END,
                            'storeIds',   CASE WHEN $op_type = 'item.storeTags'
-                                          THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END
+                                             THEN jsonb_build_object('v', t.version + 1, 'lamport', $op_lamport, 'device', $device_id) END
                          )),
-
          lamport       = GREATEST(t.lamport, $op_lamport),
          last_op_id    = $op_id,
          updated_at    = now(),
          updated_by_id = $actor_id
-    FROM before AS b
+    FROM before AS b, wins AS w
    WHERE t.id = $entity_id
      AND t.organization_id = $household_id
-     AND t.version = $base_version          -- the row-level compare-and-swap
+     AND t.version = $cas_version
   RETURNING t.id, t.organization_id, t.name, t.quantity, t.note, t.category_id,
             t.is_checked, t.archived_at, t.deleted_at, t.field_meta, t.version,
             t.lamport, t.last_op_id, t.updated_by_id, t.updated_at, t.created_at
 ),
 lost AS (
-  -- The fields this operation LOST: the operation asked for the field,
-  -- the server's value was newer, so the pre-image IS the winning value.
   SELECT f.field,
-         f.local_value,
-         CASE f.field WHEN 'name' THEN b.name WHEN 'quantity' THEN b.quantity
-                      WHEN 'note' THEN b.note WHEN 'categoryId' THEN b.category_id
-                      WHEN 'isChecked' THEN b.is_checked END AS server_value,
-         COALESCE((b.field_meta->f.field)->>'device','')::uuid AS winner_device_id,
-         COALESCE((b.field_meta->f.field)->>'lamport','0')::bigint AS winner_lamport
-    FROM before AS b,
-         unnest($fields) AS f(field)
-   WHERE $op_type IN ('item.update','item.check')
-     AND NOT (($op_lamport, $device_id) >
-              (COALESCE((b.field_meta->f.field)->>'lamport','0')::bigint,
-               COALESCE((b.field_meta->f.field)->>'device','')))
-     AND (f.field <> 'isChecked' OR $base_version <
-          COALESCE((b.field_meta->'isChecked')->>'v','0')::int)
+         to_jsonb($payload -> f.field) AS local_value,
+         CASE f.field WHEN 'name'       THEN to_jsonb(b.name)
+                      WHEN 'quantity'   THEN to_jsonb(b.quantity)
+                      WHEN 'note'       THEN to_jsonb(b.note)
+                      WHEN 'categoryId' THEN to_jsonb(b.category_id)
+                      WHEN 'isChecked'  THEN to_jsonb(b.is_checked)
+                      END AS server_value,
+         NULLIF((b.field_meta -> f.field) ->> 'device', '')::uuid AS winner_device_id,
+         COALESCE((b.field_meta -> f.field) ->> 'lamport', '0')::bigint AS winner_lamport
+    FROM before AS b, wins AS w, unnest($fields) AS f(field)
+   WHERE CASE f.field
+           WHEN 'name'       THEN NOT w.w_name
+           WHEN 'quantity'   THEN NOT w.w_quantity
+           WHEN 'note'       THEN NOT w.w_note
+           WHEN 'categoryId' THEN NOT w.w_category
+           WHEN 'isChecked'  THEN NOT w.w_is_checked
+           ELSE FALSE END
 ),
 conflicts AS (
   INSERT INTO entity_conflicts (household_id, entity_type, entity_id, field,
-                                local_value, server_value, resolution,
+                                local_value, server_value, store_id, resolution,
                                 winner_device_id, winner_lamport, op_id, device_id)
   SELECT $household_id, $entity_type, $entity_id, l.field,
-         l.local_value, l.server_value, $resolution,
+         l.local_value, l.server_value, NULL, $resolution,
          l.winner_device_id, l.winner_lamport, $op_id, $device_id
     FROM lost AS l
   RETURNING id
@@ -1963,7 +1938,7 @@ logged AS (
                              version, lamport, device_id, actor_id, payload, deleted)
   SELECT $household_id, $entity_type, a.id, $op_id, a.version, $op_lamport,
          $device_id, $actor_id, to_jsonb(a), (a.deleted_at IS NOT NULL)
-    FROM applied AS a                     -- MUST select FROM the CTE
+    FROM applied AS a
   RETURNING seq
 )
 INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
@@ -1971,7 +1946,6 @@ INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
                              payload, result, outcome)
 SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, a.id,
        $op_type, $op_lamport, $payload,
-       -- The FULL per-operation response envelope, so a replay is identical.
        jsonb_build_object(
          'entity',    to_jsonb(a),
          'conflicts', COALESCE((SELECT jsonb_agg(to_jsonb(c) - 'id')
@@ -2152,7 +2126,19 @@ written.
    | Outcome | Meaning | Action |
    | --- | --- | --- |
    | **One row** | The compare-and-swap won. | Applied. |
-   | **Zero rows** | Either the compare-and-swap was **lost**, or the operation was **already applied** by a concurrent request carrying the same `opId`. | Re-read the row **in a fresh round trip** and consult the ledger first. If `sync_operations` holds a row for this `opId`, the operation was applied concurrently — report `duplicate` and replay its cached `result`. Otherwise it is a genuine conflict: re-run §11's per-field decision against the fresh state and re-apply with the new `baseVersion`. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
+   | **Zero rows** | Either the compare-and-swap was **lost**, or the operation was **already applied** by a concurrent request carrying the same `opId`. | Re-read the row **in a fresh round trip** and consult the ledger first. If `sync_operations` holds a row for this `opId`, the operation was applied concurrently — report `duplicate` and replay its cached `result`. Otherwise it is a genuine lost race: re-run §11's per-field decision against the fresh state and re-apply against a **refreshed CAS version**. Bounded at **3 attempts**; then reject with `VERSION_CONFLICT`. |
+
+> ⚠️ **Two versions, and they must not be confused.** The operation's
+> `baseVersion` is **immutable** — it is the version the *client* edited from,
+> and it is what §11's rules are evaluated against. The **CAS version** is the
+> version the server compares the row against, and it *is* refreshed on a
+> retry. Collapsing the two makes §11's check-wins rule unreachable: a client
+> that has been offline since version 3 sends an uncheck whose
+> `baseVersion` is 3; if the retry substitutes the server's current version 6
+> as the base, then `baseVersion >= field_meta["isChecked"].v` becomes true,
+> the check is **cleared**, and §11 — which says the item must stay checked —
+> is silently violated. The retry therefore refreshes `$cas_version` and leaves
+> `$op_base_version` exactly as the client sent it.
    | **The statement raised** | A genuine database error. | Retry the whole batch. |
 
    An empty result set must **not** be treated as a transport failure. The
@@ -2216,7 +2202,7 @@ was discarded, so there is nothing to report.
 | `item.create` | all | The server accepts the client id, and the insert uses **`ON CONFLICT (id) DO NOTHING RETURNING id`**. Zero rows returned means the id was already taken: that is `duplicate` if the idempotency ledger holds this `opId`, and `DUPLICATE_ID` otherwise. The change-log row is built from the **inserted** row, never from the pre-existing item — otherwise a collision would log a change that did not happen. | Two devices create the same id → impossible unless the same `opId` is replayed → **duplicate**. | No |
 | `item.create` | all | Two devices create *different* items with the same name. | **Both survive** as separate items. No automatic merge. | No |
 | `item.update` | `name`, `quantity`, `note`, `categoryId` | Field-level LWW by `(lamport, deviceId)`. | The loser's value is stored as a **conflict record**; the winner's value applies. | **Yes** |
-| `item.check` | `isChecked` | **Check-wins**, with the comparison stated exactly: the uncheck **applies** iff `op.baseVersion >= field_meta["isChecked"].v` — that is, iff the uncheck was made against a version that already included the check. Otherwise the check is newer than the uncheck's base, the check stands, and the uncheck is reported as a conflict. | Device A checks; device B (offline) unchecks from an older base → `baseVersion < field_meta["isChecked"].v` → **the item stays checked**. | **Yes** — the item shows `Checked by <name>` and an entry is added to "Needs attention". The *outcome* is intuitive, but the **user's action was overridden**, and FR-23 requires that an overridden edit is never silently discarded. |
+| `item.check` | `isChecked` | **Check-wins**, with the comparison stated exactly: the uncheck **applies** iff `op.baseVersion >= field_meta["isChecked"].v` — that is, iff the uncheck was made against a version that already included the check. Otherwise the check is newer than the uncheck's base, the check stands, and the uncheck is reported as a conflict. **`op.baseVersion` is the operation's original, immutable base version** — the one the client edited from — and never the server's current version, even on a retry (§10.8). | Device A checks; device B (offline) unchecks from an older base → `baseVersion < field_meta["isChecked"].v` → **the item stays checked**. | **Yes** — the item shows `Checked by <name>` and an entry is added to "Needs attention". The *outcome* is intuitive, but the **user's action was overridden**, and FR-23 requires that an overridden edit is never silently discarded. |
 | `item.storeTags` | `storeIds` | The tag set is resolved **per `(item_id, store_id)` pair**, not as a set — each pair is an independent entity with its own `version`, `lamport`, and `device_id` (§9.1). For a single pair: an addition and a removal are ordered by `(lamport, deviceId)`, and when they are **concurrent** (neither operation's base version includes the other's write) the **removal wins** — a deliberate removal must not be undone by a concurrent re-add. Every pair whose outcome differs from what the operation asked for is reported in `conflicts[]` and surfaced. | A adds "Costco", B adds "Aldi" → both tags present. A removes "Costco" while B concurrently re-adds it → **the removal wins**, and A is told. | **Yes**, for any contested or dropped tag |
 | `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `item.undelete` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
 | `item.undelete` | `deletedAt` | Clears a **delete** tombstone. Rejected if a **newer** delete exists — compared as: the tombstone's effective lamport (`field_meta["deletedAt"].lamport`, the lamport of the delete that set it) must not be **greater than** the undelete's own lamport. The delete's ordering value is persisted on the row for exactly this purpose (§9.1). | Delete-then-undelete ordering is respected: a delete at lamport 10 is not undone by an undelete at lamport 5. | No |
