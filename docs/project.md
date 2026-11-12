@@ -1760,6 +1760,21 @@ and subsequent elements are one statement per operation, in the order the
 client sent them. All of them commit or none do (§10.1 — one HTTP request, one
 transaction, all of the request's operations).
 
+**Lock order is fixed: household first, then entity rows.** The per-household
+advisory lock is always taken before any row lock, and the rows a batch
+touches are locked in a deterministic order (by entity id). Because every
+request for a household takes the same first lock, two batches for the same
+household cannot deadlock against each other — one simply waits. A fixed
+entity-row order keeps the same guarantee if a future version ever batches
+across households.
+
+`hashtextextended(household_id, 0)` is the interim choice: a 64-bit hash, so
+an accidental collision between two households — and therefore an unnecessary
+serialisation, or a lock on the wrong household — is vanishingly unlikely. If
+a household's rows ever need to be locked in a different order, a dedicated
+per-household lock table keyed on a `uuid` replaces it without touching the
+protocol.
+
 Because they share one transaction, **no statement in the batch may raise.**
 Every failure mode must be a defined non-error outcome: validation,
 authorization and duplicate-name checks happen before the batch; a failed
