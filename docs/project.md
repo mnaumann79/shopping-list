@@ -744,10 +744,10 @@ double-tapping, and both must be recoverable without navigating away.
 | Check or uncheck an item | 5 seconds | An inline "Undone" affordance appears on the row itself, with a text alternative for screen readers. |
 | Add an item | 5 seconds | The new row offers an inline undo before the outbox entry is created. |
 | Delete an item | Until the row is dismissed | The row is removed and replaced by an inline "Item deleted · Undo" strip. The undo **re-queues the delete as a restore operation** (a tombstone is cleared), so it works identically offline. |
-| Clear completed (bulk) | Until the confirmation is dismissed | The same inline strip, undoing the whole bulk action as a bulk restore. |
+| Clear completed (bulk) | Until the confirmation is dismissed | The same inline strip, undoing the whole bulk action as an `item.bulkUnarchive` operation. |
 
 **Undo is an operation, not a UI trick.** An undo of a delete is an
-`item.restore` operation, and an undo of a bulk clear is an `item.bulkRestore`.
+`item.undelete` operation, and an undo of a bulk clear is an `item.bulkUnarchive`.
 That means undo works offline, syncs correctly, and conflicts with a
 concurrent delete under the normal §11 rules. A purely client-side undo would
 diverge from the server the moment the shopper went offline.
@@ -771,18 +771,33 @@ Before the local database is opened, the app knows nothing about pending work.
 The chip shows a neutral loading state until the first read completes, then
 renders one of the nine states in §6.1.
 
-**(c) The empty state must distinguish three cases.** Today's single message —
-"Your list is empty. Add your first item below." (`ShoppingList.tsx:550`) — is
-wrong in two of the three:
+**(c) The empty state must distinguish four cases, in a fixed precedence.**
+Today's single message — "Your list is empty. Add your first item below."
+(`ShoppingList.tsx:550`) — is wrong in three of the four.
 
-| Case | Message |
-| --- | --- |
-| The household has no items | `Your list is empty. Add your first item below.` |
-| The household has never been downloaded on this device | `This household hasn't been downloaded on this device yet. Connect to download it.` (§10.6) |
-| The local read or the bootstrap failed | `Couldn't load your list.` with a **Retry** action. |
+**Precedence: failed → never-downloaded → genuinely-empty → reading.** A
+shopper must only ever see the empty-list message when we *know* the list is
+empty.
+
+| Order | Case | What the shopper sees |
+| --- | --- | --- |
+| A | **Reading the local store** (transient, ~50 ms) | **No message at all** — just the skeleton rows. Never a spinner over the list, and never the empty-list copy. |
+| B | **The household has never been downloaded on this device** | `This household hasn't been downloaded on this device yet. Connect to download it.` with a **[ Download now ]** action — enabled only while online; offline the button reads `Waiting for a connection`. (§10.6) |
+| C | **The list is genuinely empty** (bootstrap completed, zero active items) | `Your list is empty. Add your first item below.` — today's copy, unchanged. |
+| D | **The bootstrap failed** | `We couldn't load your list. Check your connection and try again.` with a **[ Try again ]** action. It must **never** fall through to case C. |
+
+**Auto-focus: desktop only.** On desktop the name field may take focus. On
+mobile it must **not** — the software keyboard covers half the screen in an
+aisle, which is exactly when the shopper most needs to see the list.
 
 Showing "your list is empty" when the truth is "we have not loaded your list"
-is the worst of the three: the shopper concludes they have nothing to buy.
+is the worst of the four: the shopper concludes they have nothing to buy.
+Case D must not fall through to case C for the same reason — a failed load
+that renders as "your list is empty" is actively misleading.
+
+**Which case applies is decided by the per-household bootstrap state** in the
+`meta` store (§8.2): `pending` → case B, `failed` → case D, `done` with zero
+items → case C.
 
 ### 6.5 Explicitly forbidden UX
 
@@ -954,7 +969,7 @@ db.version(1).stores({
   outbox:     "opId, householdId, state, createdAt",
   conflicts:  "id, householdId, entityId, createdAt",
   households: "id",
-  meta:       "key",
+  meta:       "key, householdId",
 });
 ```
 
@@ -962,6 +977,25 @@ db.version(1).stores({
 **only store not partitioned by `householdId`** — it is the index of partitions,
 not a partition. It is what makes offline household switching (§12.4) and the
 "not downloaded on this device" state (§10.6) possible at all.
+
+`meta` is keyed by `(key, householdId)` and holds **per-household** state, so
+two households on one device never share a bootstrap state. The keys it must
+carry:
+
+| Key | Value | Used by |
+| --- | --- | --- |
+| `bootstrap:${householdId}` | `pending`, `done`, or `failed` | §6.4 (empty states) — the client shows *not downloaded* when `pending`, *couldn't load* when `failed`, and the empty-list message only when `done` |
+| `bootstrapAt:${householdId}` | epoch ms of the last successful bootstrap | Diagnostics; also the age of the local copy |
+| `schemaVersion` | integer | The local schema version (§8.4) |
+| `appVersion` | string | The running application version |
+| `deviceId` | string | The per-install device identifier (§14, SEC-08) |
+| `identity` | `{ id, name, email }` | The signed-in identity, for rendering the header offline. **The session token is never stored here** (§12.1) |
+
+**This is the mechanism that makes the empty states distinguishable.** Without
+per-household bootstrap state, an empty local store looks identical whether the
+household has never been downloaded, the bootstrap failed, or the household
+genuinely has no items — and the client would have to guess. §6.4(c) depends on
+this key existing.
 
 ### 8.2 Record shapes
 
@@ -990,17 +1024,7 @@ type OutboxOp = {
   householdId: string;
   entityType: "item" | "category" | "store";
   entityId: string;
-  type:
-    | "create"
-    | "update"
-    | "delete"
-    | "undelete"
-    | "check"
-    | "setStoreTags"
-    | "archive"
-    | "unarchive"
-    | "bulkArchive"
-    | "override";
+  type: SyncOperationType;   // the ONE union — §10.1a, exported from src/shared/sync.ts
   baseVersion: number;       // server version the client believed it was editing
   lamport: number;           // client's Lamport counter for this household
   payload: OutboxPayload;    // typed per operation type — see below
@@ -1011,15 +1035,19 @@ type OutboxOp = {
 };
 ```
 
-**The operation type is not a free-form string.** §11 resolves `check` and
-`setStoreTags` by different rules from a plain `update`, so the type must be
-distinguishable — a single `update` cannot carry that.
+**There is exactly ONE operation-type union in the system.** It is
+`SyncOperationType`, defined in `src/shared/sync.ts` and enumerated in §10.1a.
+The local outbox uses the same namespaced values (`item.update`,
+`item.undelete`, …) as the wire — there is no second, shorter local union to
+translate from. Two lists of operation names is exactly how the vocabulary
+drifted apart in the first place.
 
-**`undelete` and `unarchive` are different operations.** `undelete` clears a
-*delete* tombstone; `unarchive` restores an *archived* item from History (the
-existing "re-add from History" flow). They have the same visible effect but
-different semantics, and an implementer who conflates them will resurrect a
-deleted item.
+**`item.undelete` and `item.unarchive` are different operations.**
+`item.undelete` clears a *delete* tombstone (`deleted_at`); `item.unarchive`
+clears an *archive* mark (`archived_at`) and is what the existing "re-add from
+History" flow (`POST /api/items/[id]/re-add`) sends. They have the same visible
+effect but different semantics, and an implementer who conflates them will
+resurrect a deleted item.
 
 **The payload is a discriminated union, not `Record<string, unknown>`.** An
 untyped payload is how an implementer ends up sending `storeIds` on an
@@ -1028,34 +1056,20 @@ operation that ignores them:
 ```ts
 type OutboxPayload =
   | { name: string; quantity?: string | null; note?: string | null;
-      categoryId?: string | null; storeIds?: string[] }              // create
+      categoryId?: string | null; storeIds?: string[] }              // item.create
   | { name?: string; quantity?: string | null; note?: string | null;
-      categoryId?: string | null }                                   // update
-  | { isChecked: boolean }                                          // check
-  | { storeIds: string[] }                                          // setStoreTags
-  | { fields: string[] }                                            // delete / undelete
-  | { baseVersion: number }                                         // archive / bulkArchive
-  | { field: string; value: unknown; serverValue: unknown }         // override (Keep mine)
+      categoryId?: string | null }                                   // item.update
+  | { isChecked: boolean }                                          // item.check
+  | { storeIds: string[] }                                          // item.storeTags
+  | { fields: string[] }                                            // item.delete / item.undelete
+  | { baseVersion: number }                                         // item.archive / item.bulkArchive
+  | { field: string; value: unknown; serverValue: unknown }         // item.override (Keep mine)
   ;
 ```
 
-**The local operation name and the wire operation name are not the same
-thing.** The local union is short and ergonomic; the wire `type` is namespaced
-by entity so that a client reading an unfamiliar type can tell whether it
-understands it (§10.1a). The mapping is fixed and must not be improvised:
-
-| Local `OutboxOp.type` | Wire `type` (§10.1a) | Notes |
-| --- | --- | --- |
-| `create` | `item.create` / `category.create` / `store.create` | Chosen by `entityType`. |
-| `update` | `item.update` / `category.rename` / `store.rename` | A rename is an update of the `name` field. |
-| `check` | `item.check` | |
-| `setStoreTags` | `item.storeTags` | |
-| `delete` | `item.delete` / `category.delete` / `store.delete` | Chosen by `entityType`. Deleting a store removes its item tags; the items survive. |
-| `undelete` | `item.restore` | Clears a *delete* tombstone. |
-| `unarchive` | `item.unarchive` | Restores an *archived* item from History. |
-| `archive` | `item.archive` | |
-| `bulkArchive` | `item.bulkArchive` | |
-| `override` | `item.override` | The "Keep mine" action (§11.2). |
+The payload union is **keyed by the same `SyncOperationType`**, so
+`OutboxPayload` is a discriminated union over `type` — a `item.check` payload
+cannot carry `storeIds`.
 
 **`pendingFields` is what makes §10.7 implementable.** A single `pending`
 boolean cannot tell the client *which* fields a pending operation touched, so
@@ -1121,7 +1135,27 @@ The current code conflates the two (defect B-11); 📋 **SPEC** separates them.
 
 **`stores`, `categories`** — additive only:
 `version integer not null default 1`, `field_meta jsonb not null default '{}'`,
-`updated_by text nullable`, `last_op_id uuid nullable`.
+`updated_by text nullable`, `last_op_id uuid nullable`, `lamport bigint not null default 0`,
+and `deleted_at timestamptz nullable` — a store or a category is deleted with a
+tombstone exactly like an item, so that a stale device cannot resurrect it and
+so that `category.delete` and `store.delete` have the same semantics as
+`item.delete` (§11).
+
+**`item_stores`** — the item-to-store tag table needs to carry conflict
+metadata, because `storeIds` is **not** a column on `items` and `field_meta`
+holds one entry per *field*, not per tag. The add-wins rule (§11,
+`item.storeTags`) therefore has no schema home today. Two options exist:
+
+| Option | Verdict |
+| --- | --- |
+| Version the `item_stores` rows | **Chosen.** Preserves the relational model we are keeping, and gives each tag its own version, Lamport value, and writing device — which is exactly what a per-tag add-wins rule needs. |
+| Make `storeIds` a real `jsonb` column on `items` | Rejected. It would replace a normalised join table with a denormalised blob, duplicating data the database already models well. |
+
+The chosen option adds to `item_stores`:
+`PRIMARY KEY (item_id, store_id)` — **the table currently has no primary key
+at all**, so duplicate tag rows are possible today — plus
+`version integer not null default 1`, `lamport bigint not null default 0`, and
+`device_id text not null` (the device that last added the tag).
 
 ### 9.2 New tables
 
@@ -1144,6 +1178,10 @@ CREATE TABLE sync_changes (
 CREATE INDEX sync_changes_household_seq ON sync_changes (household_id, seq);
 
 -- Idempotency ledger. The primary key IS the idempotency guarantee.
+-- NEVER PRUNED: it must outlive the change log, because a replayed operation
+-- whose change-log row has been pruned must still be recognised as a
+-- duplicate and replayed with its cached result. Pruning this table would
+-- silently re-apply an operation that had already been applied.
 CREATE TABLE sync_operations (
   op_id        uuid PRIMARY KEY,
   household_id text NOT NULL REFERENCES organization(id) ON DELETE CASCADE,
@@ -1154,7 +1192,8 @@ CREATE TABLE sync_operations (
   op_type      text NOT NULL,
   lamport      bigint NOT NULL,
   payload      jsonb NOT NULL,
-  result       jsonb NOT NULL,            -- cached response for replay
+  result       jsonb NOT NULL,            -- the FULL per-op response envelope, cached for replay
+  outcome      text NOT NULL,             -- 'applied' | 'partial' | 'rejected' | 'duplicate'
   applied_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX sync_operations_household ON sync_operations (household_id, applied_at);
@@ -1168,6 +1207,16 @@ CREATE TABLE devices (
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 
+-- Per-household sync state: the Lamport clock, the change-log retention
+-- floor, and the sync epoch. None of these fit on any other table.
+CREATE TABLE household_sync_state (
+  household_id      text PRIMARY KEY REFERENCES organization(id) ON DELETE CASCADE,
+  epoch             uuid NOT NULL,          -- regenerated when a full resync occurs
+  min_retained_seq  bigint NOT NULL DEFAULT 0,  -- the change-log floor for this household
+  lamport           bigint NOT NULL DEFAULT 0,  -- the household's Lamport clock
+  updated_at        timestamptz NOT NULL DEFAULT now()
+);
+
 -- Conflicts the server resolved, surfaced to the losing device.
 CREATE TABLE entity_conflicts (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1177,13 +1226,24 @@ CREATE TABLE entity_conflicts (
   field        text NOT NULL,
   local_value  jsonb,
   server_value jsonb,
-  winner       text NOT NULL,             -- 'server' | 'client'
+  resolution   text NOT NULL,             -- 'lww' | 'check_wins' | 'delete_wins' |
+                                           -- 'add_wins' | 'override' | 'rejected'
+  winner_device_id uuid,                  -- the device whose value won (NULL for a server-side rejection)
+  winner_lamport  bigint,                 -- the Lamport value of the winning write
   op_id        uuid NOT NULL,
   device_id    text NOT NULL,
   resolved_at  timestamptz,
   created_at   timestamptz NOT NULL DEFAULT now()
 );
 ```
+
+`winner` as a `'server' | 'client'` pair is not expressive enough: a conflict
+can be resolved by last-write-wins, by check-wins, by delete-wins, by
+add-wins, by an explicit override, or by a server-side rejection — and the
+winner is a **device**, not a side. The `resolution` enum names the rule that
+was applied, and `winner_device_id` plus `winner_lamport` identify whose value
+won and at what ordering value. The conflict's `id` is returned to the client
+so the two sides can refer to the same conflict.
 
 ### 9.3 Rationale for a server-side change log
 
@@ -1216,8 +1276,11 @@ that has been offline longer than the change-log window cannot carry stale
 "live" state into the new world, because its entire local view — including any
 item it believed was deleted — is replaced by the server's. Local
 unsynchronised operations are preserved and replayed *after* the snapshot
-(INV-11, SC-17); the server rejects any replayed operation against a
-tombstoned entity, so a replay cannot resurrect an item either.
+(INV-11, SC-17); the server rejects any replayed **`item.update`,
+`item.check`, or `item.storeTags`** operation against a tombstoned entity, so
+a replay cannot resurrect an item. `item.undelete` is deliberately *not*
+rejected — it is the operation that clears a tombstone — and is rejected only
+when a **newer** delete exists (§11).
 
 ### 9.4 Migration safety
 
@@ -1281,7 +1344,13 @@ so the client never has to special-case one of them:
     { "opId": "…", "entityType": "item", "entityId": "…",
       "code": "VERSION_CONFLICT", "reason": "quantity was changed on another device",
       "conflicts": [
-        { "field": "quantity", "localValue": "2 kg", "serverValue": "3 kg", "winner": "server" }
+        { "id": "uuid",              // the conflict's id, so both sides can name it
+          "field": "quantity",
+          "localValue": "2 kg",
+          "serverValue": "3 kg",
+          "resolution": "lww",      // which rule decided it — see §11
+          "winnerDeviceId": "uuid",
+          "winnerLamport": 91 }
       ] }
   ],
   "applied": [
@@ -1296,9 +1365,17 @@ so the client never has to special-case one of them:
   ],
   "nextSeq": 1043,
   "serverClock": 91,
+  "epoch": "uuid",              // the household's sync epoch — changes when a full resync occurred
+  "minRetainedSeq": 900,        // the change-log floor; a client below it must full-resync
   "fullResyncRequired": false
 }
 ```
+
+The household's Lamport clock, its change-log retention floor, and its sync
+epoch live in `household_sync_state` (§9.2). `serverClock` is that household's
+clock — the client merges it into its own (§10.3). `epoch` changes whenever a
+full resync occurs, so a client can tell "the server reset my household's
+history" from "I am merely behind".
 
 **The losing path carries its conflict detail.** This is the point most easily
 got wrong: an operation that *loses* a field is not "applied" — it is rejected
@@ -1327,10 +1404,11 @@ exactly one of these strings, and §11's conflict rules are keyed to them.
 | `item.check` | item | `isChecked` (boolean) | **Check-wins** (§11). |
 | `item.storeTags` | item | `storeIds` (array) | **Add-wins** for concurrent additions; a removal applies only against a base that contained the tag. |
 | `item.delete` | item | — | **Delete-wins**, terminal tombstone. |
-| `item.restore` | item | — | Clears a tombstone; rejected if a newer delete exists. |
-| `item.unarchive` | item | — | Restores an **archived** item from History to the active list. Distinct from `item.restore`, which clears a *delete* tombstone. |
-| `item.archive` | item | `baseVersion` (on the op) | **Archive-wins**, but skips items whose `version` exceeds the op's base. |
-| `item.bulkArchive` | item | `baseVersion` | The bulk form of `item.archive`; reports how many items it skipped. |
+| `item.undelete` | item | — | Clears a **delete** tombstone (`deleted_at`); rejected if a newer delete exists. |
+| `item.unarchive` | item | — | Clears an **archive** mark (`archived_at`) and returns the item to the active list. This is the "re-add from History" operation. |
+| `item.bulkUnarchive` | item | `versions: { [itemId]: version }` | The bulk form of `item.unarchive` — used to undo a bulk "Archive checked items". |
+| `item.archive` | item | `versions: { [itemId]: version }` | **Archive-wins**, but skips items whose `version` exceeds the version the op carries for that item. |
+| `item.bulkArchive` | item | `versions: { [itemId]: version }` | The bulk form of `item.archive`; reports how many items it skipped. |
 | `category.create` | category | `name` | Unique `(household_id, name)`; a duplicate is rejected with `DUPLICATE_NAME`. |
 | `category.rename` | category | `name` | Field-level LWW. |
 | `category.delete` | category | — | Rejected if any item still references it. |
@@ -1414,6 +1492,14 @@ pulled changes second, subject to the pending-field rule in §10.7.
 4. The client crashes mid-request → on restart the outbox still holds every
    un-acknowledged op → they are re-sent → duplicates → resolved.
 
+**The cached `result` is the full per-operation response envelope**, including
+the `conflicts[]` array. This is what makes a replay *identical* rather than
+merely equivalent: if a losing operation is re-sent after a timeout, the
+replayed response must still carry the server's value, or the client never
+learns what it lost. Storing only the applied entity would leave a re-sent
+losing operation with no way to show the "Keep mine / Use theirs / Dismiss"
+card.
+
 **Clock merge.** The client sets `lamport = max(localLamport, serverClock) + 1`
 for every operation it creates after a sync, and the server sets
 `row.lamport = max(row.lamport, op.lamport)` when applying. A Lamport counter
@@ -1488,6 +1574,89 @@ the local value it just wrote.
 
 ---
 
+### 10.8 The apply batch in SQL
+
+The apply is **one** statement, not two. This matters: a plain `INSERT` in a
+second statement runs even when the compare-and-swap matched zero rows,
+leaving an orphan change-log entry for a change that never happened. The
+`EXISTS (SELECT 1 FROM items WHERE version = base + 1)` variant is also wrong
+— it is true when *someone else* won the race. Only a data-modifying CTE
+gates correctly.
+
+```sql
+WITH applied AS (
+  UPDATE items
+     SET version      = version + 1,
+         name         = CASE WHEN $op_type = 'item.update' AND $fields ? 'name'
+                             THEN $payload->>'name' ELSE name END,
+         -- ... one CASE per mutable field, driven by the operation's field set ...
+         lamport    = GREATEST(lamport, $op_lamport),
+         last_op_id = $op_id,
+         updated_at = now(),
+         updated_by = $actor_id
+   WHERE id = $entity_id
+     AND organization_id = $household_id
+     AND version = $base_version          -- the compare-and-swap
+  RETURNING id, version, name, quantity, note, category_id, is_checked, ...
+),
+logged AS (
+  INSERT INTO sync_changes (household_id, entity_type, entity_id, op_id,
+                             version, lamport, device_id, actor_id, payload, deleted)
+  SELECT $household_id, $entity_type, a.id, $op_id, a.version, $op_lamport,
+         $device_id, $actor_id, to_jsonb(a), false
+    FROM applied a                            -- MUST select FROM the CTE
+  RETURNING seq
+)
+INSERT INTO sync_operations (op_id, household_id, device_id, actor_id,
+                             entity_type, entity_id, op_type, lamport, payload, result)
+SELECT $op_id, $household_id, $device_id, $actor_id, $entity_type, a.id,
+       $op_type, $op_lamport, $payload, to_jsonb(a)
+  FROM applied a
+RETURNING op_id;
+```
+
+The whole statement is the batch's second element, preceded by
+`SELECT pg_advisory_xact_lock(hashtextextended($household_id, 0))`.
+
+**Implementation subtleties that will bite an implementer.**
+
+1. **Drizzle has no builder for `WITH … UPDATE … RETURNING`.** Use the `sql`
+   template literal and pass the resulting `SQL` object to `db.batch()`.
+2. **A data-modifying CTE that is not referenced by the main query still
+   executes.** The outer `INSERT` must `SELECT … FROM applied` — otherwise the
+   `applied` CTE may be optimised away, the update never happens, and the
+   batch commits an empty change log. The `logged` CTE above is included for
+   the same reason.
+3. **`last_op_id` is what proves the write landed.** The `sync_changes` insert
+   and the `sync_operations` insert are both guarded on the row having
+   `last_op_id = $op_id`. Without it, the losing operation's change-log insert
+   matches the *winner's* row and appends a second entry for one logical
+   change (§11, ADR-14).
+4. **If the compare-and-swap matched zero rows**, `applied` is empty, both
+   inserts select from an empty set, and nothing is written — not even an
+   idempotency record. The server detects this and re-reads the row to
+   classify the outcome as a conflict (§11), then re-applies with a fresh
+   `baseVersion` if the operation is still valid.
+5. **`db.batch()` accepts `SQL` objects**, not Drizzle query builders, for
+   raw statements. The advisory lock and the CTE above are both `sql`
+   templates.
+
+**`last_op_id` — three constraints, because it is redundant with mechanisms
+that already exist.** It is *additional* to the idempotency ledger (ADR-06)
+and to `field_meta[f].device`, not a replacement for either.
+
+- It is **additive to, never a substitute for,** the version compare-and-swap.
+  If `last_op_id` replaced `version = $base_version`, concurrency detection
+  would be lost: a losing operation would overwrite the winner's row.
+- It carries **no foreign key** to `sync_operations`. An FK would make that
+  ledger un-prunable, so the idempotency history could never be trimmed.
+- It is **not** the "written by a different device?" signal. §11's check-wins
+  rule needs the **per-field** `field_meta.isChecked.device`, because two
+  devices can write different fields of the same row. A per-row column cannot
+  answer that question.
+
+---
+
 ## 11. Conflict resolution matrix
 
 **Conflict resolution is per operation type, not blanket last-write-wins.**
@@ -1508,12 +1677,18 @@ The **Operation** column uses the authoritative `type` values enumerated in
 | `item.check` | `isChecked` | **Check-wins.** An uncheck whose `baseVersion` predates a *different* device's check does **not** clear the check. An uncheck based on a version that already includes the check does clear it. | Device A checks; device B (offline) unchecks → **item stays checked**. | **Yes** — the item shows `Checked by <name>` and an entry is added to "Needs attention". The *outcome* is intuitive, but the **user's action was overridden**, and FR-23 requires that an overridden edit is never silently discarded. |
 | `item.storeTags` | `storeIds` | **Add-wins** for concurrent additions. A removal applies only if the removal's `baseVersion` already contained the tag. | A adds "Costco", B adds "Aldi" → both tags present. | No |
 | `item.delete` | `deletedAt` | **Delete-wins, terminal.** Only a strictly later `restore` operation clears it. | Device A deletes, device B edits → **item stays deleted**. B's edit is not silently lost; it is recorded as a conflict against a deleted entity. | **Yes** |
-| `item.restore` (re-add) | `deletedAt`, `archivedAt` | Clears the tombstone. Rejected if a *newer* delete exists. | Restore-then-delete ordering is respected. | No |
-| `item.archive` (clear completed) | `archivedAt` | **Archive-wins** over concurrent edits to other fields, but the op carries a `baseVersion` and **skips any item whose `version` exceeds it** — i.e. items changed on another device since the clear was initiated are not archived. | A clears completed offline; B unchecks an item and changes its quantity → B's item is **not** archived. | **Yes**, the count of skipped items is reported |
-| `item.bulkArchive` (clear completed, bulk) | `archivedAt` | The bulk form of `item.archive`: the same base-version skip rule, applied across every checked item. The response reports how many items were skipped and why. | A clears completed offline; B changes an item's quantity → that item is **skipped**, not archived, and A is told how many were skipped. | **Yes**, the skipped count is reported |
+| `item.undelete` | `deletedAt` | Clears a **delete** tombstone. Rejected if a *newer* delete exists. | Restore-then-delete ordering is respected. | No |
+| `item.unarchive` | `archivedAt` | Clears an **archive** mark and returns the item to the active list. Distinct from `item.undelete`, which clears a *delete* tombstone — conflating them resurrects a deleted item. | Re-adding an archived item on two devices → the item is unarchived once; the second is a no-op. | No |
+| `item.bulkUnarchive` | `archivedAt` | The bulk form of `item.unarchive`, carrying a `baseVersion`. Skips items changed since the base, exactly as `item.bulkArchive` does. | Undoing a bulk archive does not resurrect an item another device changed in the meantime. | No |
+| `item.archive` (clear completed) | `archivedAt` | **Archive-wins** over concurrent edits to other fields, but the op carries a **version per candidate item** and **skips any item whose `version` exceeds it** — i.e. items changed on another device since the clear was initiated are not archived. | A clears completed offline; B unchecks an item and changes its quantity → B's item is **not** archived. | **Yes**, the count of skipped items is reported |
+| `item.bulkArchive` (clear completed, bulk) | `archivedAt` | The bulk form of `item.archive`: the same per-item version skip rule, applied across every checked item. The response reports how many items were skipped and why. | A clears completed offline; B changes an item's quantity → that item is **skipped**, not archived, and A is told how many were skipped. | **Yes**, the skipped count is reported |
 | `category.create` | all | Unique `(household_id, name)`. On conflict, the second op is rejected with `DUPLICATE_NAME` and surfaced. | — | **Yes** |
 | `category.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
 | `store.rename` | `name` | Field-level LWW. | Winner applies; loser recorded. | **Yes** |
+| `store.create` | all | Duplicate names are rejected with `DUPLICATE_NAME`. The store is created with the client's id. | Two devices create the same store name → one succeeds, one is rejected and surfaced. | **Yes** |
+| `store.delete` | all | Removes the store's item tags. The items themselves survive, untagged. A concurrent `item.storeTags` on the same store loses to the delete. | A tags an item to a store while B deletes the store → the store is gone and the item keeps no tag for it. | No (the outcome is intuitive) |
+| `category.delete` | all | Rejected with `CATEGORY_IN_USE` while any item still references the category. The client is told which items block it. | Two devices delete categories → one succeeds; the other is rejected and surfaced. | **Yes** |
+| `item.override` | the contested field | **Bypasses the LWW comparison** for the named field and applies unconditionally. This is the "Keep mine" action (§11.2) — a user decision, not a race. The value it replaced is written to `entity_conflicts` so the *other* device learns that its edit was overridden. | Device B's edit is overridden by device A's "Keep mine" → B is told, on its next sync, that its value was replaced. | **Yes**, on both sides |
 
 ### 11.1 Why these rules
 
@@ -1597,6 +1772,15 @@ operation carrying `override: true`, which bypasses the last-write-wins
 comparison for the contested field and is applied unconditionally. It is
 recorded like any other operation, so it syncs and can itself be overridden by
 a later explicit user decision.
+
+**The override is not silent on the other device.** An override discards the
+value it replaced. If that happened on the other member's device, their edit
+would vanish with no record — an INV-04 violation on their side, not ours. The
+server therefore writes an `entity_conflicts` row when it applies an override,
+naming the field, the discarded value, and the value that replaced it. That
+record is pulled by the other device on its next sync and surfaces there as a
+"Needs attention" entry. The device that pressed the button sees its own
+action reflected; the other device learns it happened.
 
 **"Use theirs"** accepts the server value and discards the local one.
 **"Dismiss"** leaves the conflict unresolved but removes it from the panel;
@@ -1759,7 +1943,7 @@ user-data risk of option C does not exist in option B.
 | SEC-09 | The `ADMIN_EMAIL` mechanism MUST be replaced by a role on the `member` table (or a dedicated `platform_admin` table) before the admin endpoints are exposed further. |
 | SEC-10 | Rate limiting MUST be applied to sign-up, sign-in, invitation, and join-link endpoints. |
 | SEC-11 | Invitation and join-link tokens MUST have a short expiry and MUST be revocable. Today `createJoinLink` deletes all prior links (S-2); 📋 **SPEC**: multiple concurrent links are permitted, each revocable individually. |
-| SEC-12 | The `items.name`, `quantity`, and `note` fields contain user content. 📋 **SPEC**: they are never written to logs, never included in analytics, and never sent to the email provider. |
+| SEC-12 | The `items.name`, `quantity`, and `note` fields contain user content. 📋 **SPEC**: they are never written to logs, never included in analytics, and never sent to the email provider. **This covers the tables added by §9.2 that carry the same content:** `sync_changes.payload` holds a full entity snapshot — including item text — and `sync_operations.payload` holds the operation's own fields. Both are written to the database and are not logged. |
 
 ### 14.1 Privacy position
 
@@ -1974,7 +2158,7 @@ The existing `perf-audit.yml` schedule is kept.
 | **ADR-02** | **The shopping surface becomes a client render from IndexedDB; app pages become static shells; auth redirects move to the client.** | The server-side session check in the page layout is a network round trip that cannot succeed offline, and server-rendered data is incompatible with "IndexedDB is the source of truth". Because the shells contain no user data, moving the redirect client-side leaks nothing; all API calls remain server-authorized. | *Keep SSR and reconcile with local data* — two sources of truth and a hydration race. *Cache the SSR'd HTML per user* — breaks cross-user cache sharing and still fails offline when the session check runs. |
 | **ADR-03** | **IndexedDB via Dexie.** | The only storage that satisfies "persistent local database" with structured data and transactional writes. Dexie adds versioned schema migrations, which the requirements demand, and a reactive query hook, which removes a hand-rolled store layer. | `localStorage` (synchronous, 5 MB, string-only), `idb` (no migrations), SQLite/WASM (large payload, no benefit at this scale). |
 | **ADR-04** | **One `POST /api/sync` endpoint that pushes and pulls.** | One round trip per cycle; simpler retry semantics; the response is a consistent snapshot. | Separate push/pull endpoints — two round trips, two failure modes, and a harder-to-reason-about interleaving. |
-| **ADR-05** | **Server-side change log (`sync_changes`) as the source of truth for incremental sync, with the apply path serialized per household so that `seq` allocation order equals commit order.** | A monotonic `bigserial` gives a total order that `updated_at` cannot, survives clock skew, supports one indexed range scan per pull, and doubles as an audit trail. **The serialisation is not optional:** `seq` is allocated at INSERT time and `created_at default now()` is transaction-start time, so two concurrent devices can allocate `seq` 100 and 200 and commit in the opposite order. A client pulling `seq > lastSeq` can then advance past 100 before 100 commits and **never receive that change** — silent loss from the log that is the source of truth. Taking a per-household transaction-scoped advisory lock as the first statement of the apply batch makes allocation order and commit order the same order. | Deriving changes from `items.updated_at` — ambiguous ordering, no per-field history, breaks on equal timestamps. Polling the full table — O(n) per sync, and would not survive a long offline period cleanly. Relying on `bigserial` alone without per-household serialisation — commits can invert, and a change can be skipped forever by a pulling client. |
+| **ADR-05** | **Server-side change log (`sync_changes`) as the source of truth for incremental sync, with the apply path serialized per household so that `seq` allocation order equals commit order.** | A monotonic `bigserial` gives a total order that `updated_at` cannot, survives clock skew, supports one indexed range scan per pull, and doubles as an audit trail. **The serialisation is not optional:** `seq` is allocated at INSERT time and `created_at default now()` is transaction-start time, so two concurrent devices can allocate `seq` 100 and 200 and commit in the opposite order. A client pulling `seq > lastSeq` can then advance past 100 before 100 commits and **never receive that change** — silent loss from the log that is the source of truth. Taking a per-household transaction-scoped advisory lock — `pg_advisory_xact_lock(hashtextextended(household_id, 0))` — as the first statement of the apply batch makes allocation order and commit order the same order. The hash is `hashtextextended` (64-bit, PostgreSQL 11+) rather than `hashtext` (32-bit), because a 32-bit hash makes an accidental collision between two households — and therefore an unnecessary serialisation or, worse, a lock on the wrong household — far more likely than it should be. | Deriving changes from `items.updated_at` — ambiguous ordering, no per-field history, breaks on equal timestamps. Polling the full table — O(n) per sync, and would not survive a long offline period cleanly. Relying on `bigserial` alone without per-household serialisation — commits can invert, and a change can be skipped forever by a pulling client. |
 | **ADR-06** | **Idempotency keyed on a client-generated `opId`**, recorded in a dedicated `sync_operations` table. | The primary key *is* the guarantee. Replay returns the cached result. Handles every duplication scenario uniformly (retry, timeout, crash-restart, batch replay). | `If-Match`/ETag on entities — does not cover a queued operation that was never acknowledged, and does not cover batch-level retries. |
 | **ADR-07** | **Per-field conflict resolution with per-field version metadata in `field_meta jsonb`.** | Satisfies "conflict resolution per operation type rather than simplistic last-write-wins" without a separate version table, a CRDT, or a per-field row. JSONB keeps the whole row in one heap tuple, avoiding a second table and a join on the hot path. | Entity-level LWW — loses a concurrent quantity edit when a check arrives, which is exactly the scenario the brief calls out. A CRDT — unjustifiable complexity at household scale. |
 | **ADR-08** | **Client-generated UUIDv7 primary keys; the server accepts client ids.** | An offline client must know a record's id before the server has seen it. UUIDv7 is time-ordered (good index locality) and fits the existing `uuid` column type. | Server-generated ids — the client cannot reference a record it created offline. ULID — needs a `text`/custom column and a lexicographic-sort assumption; UUIDv7 is a standard UUID. |
@@ -1983,7 +2167,7 @@ The existing `perf-audit.yml` schedule is kept.
 | **ADR-11** | **Keep Next.js, Better Auth, Drizzle, and PostgreSQL.** | They are used well and are not the problem. The problem is the data-ownership model, not the tools. | A different framework — large, risky, and buys nothing for this problem. |
 | **ADR-12** | **Server-side authorization is authoritative and role-checked. Tenant isolation is enforced by a single application-layer scope helper, NOT by PostgreSQL row-level security.** | The current join-link gap (S-1) is a UI-only check, so isolation must be enforced on the server. **RLS is deliberately excluded.** On the Neon HTTP driver, each statement is an independent request with no session state: a policy would need `current_setting('app.current_household')`, which can only be set inside a transaction and cannot be relied upon to persist across the separate queries a request makes. A policy written fail-open silently returns every row; one written fail-closed silently returns none. Either way RLS would give the *appearance* of defence in depth while behaving unpredictably — worse than not having it, because it suppresses the care the application-layer check actually needs. A single scope helper that every query must pass through, plus an integration test that asserts a cross-household read returns 404, is honest and testable. | *RLS as a second layer* — unreliable on the retained driver (see rationale); it would create false confidence rather than real isolation. *UI-only checks* — already proven insufficient. |
 | **ADR-13** | **Integration tests run against a real PostgreSQL, not a mocked `db`.** | The current fake `db` ignores `where()` clauses, so the codebase's tenant-isolation predicates are entirely untested. The `DB_DRIVER` switch already exists (`src/db/index.ts:16-19`). | Continuing to mock the database — it cannot verify isolation, constraints, or migrations. |
-| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap that also stamps the row with the id of the operation that wrote it.** The batch's first statement takes a per-household transaction-scoped advisory lock; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`) **and sets `last_op_id = $opId`**; the change-log append and the idempotency record are then guarded on `last_op_id = $opId`. | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Four constraints force this shape. (1) The Neon HTTP driver throws on `db.transaction()`, so the apply must use `db.batch()`, which maps to Neon's atomic HTTP batch transaction. (2) A batch executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. (4) **The change-log append must be guarded on the operation, not on the version.** Two different operations can both read `version = 12`; the winner writes `version = 13`, and the loser's compare-and-swap updates zero rows — but a change-log insert written as `INSERT … SELECT … FROM items WHERE id = $1 AND version = 13` matches the **winner's** row and appends a second entry for one logical change, so the change log stops being a faithful total order and the pulled `changes[]` contains the same entity twice. There is no shortcut via a unique constraint: `UNIQUE (op_id, entity_id)` does not help, because the two racing operations have *different* `opId`s. The row itself must carry the id of the operation that wrote it — hence `last_op_id` (§9.1). | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. Guarding the change-log insert on `version` alone — a losing operation appends a duplicate entry for the winner's write. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. The Neon WebSocket driver (interactive transactions) remains the fallback if the batch approach proves insufficient in Phase 2. |
+| **ADR-14** | **The sync apply path is a single per-household-serialised batch containing a compare-and-swap that also stamps the row with the id of the operation that wrote it.** The batch's first statement takes a per-household transaction-scoped advisory lock — `pg_advisory_xact_lock(hashtextextended(household_id, 0))`, 64-bit — which is held to commit because a Neon HTTP batch is one transaction on one connection; the second is a data-modifying CTE that performs the compare-and-swap (`UPDATE … WHERE id = ? AND version = ?`) **and sets `last_op_id = $opId`**; the change-log append and the idempotency record are then guarded on `last_op_id = $opId`. | Applying an operation, appending to the change log, and recording the idempotency key must be all-or-nothing (INV-12). Four constraints force this shape. (1) The Neon HTTP driver throws on `db.transaction()`, so the apply must use `db.batch()`, which maps to Neon's atomic HTTP batch transaction. (2) A batch executes **pre-built** statements, so the read that conflict resolution depends on cannot sit inside it — the compare-and-swap moves the check into the write, so a concurrent modification yields zero rows updated and the operation is retried against fresh state. (3) `seq` allocation must not invert against commit order (ADR-05), which the per-household advisory lock guarantees. (4) **The change-log append must be guarded on the operation, not on the version.** Two different operations can both read `version = 12`; the winner writes `version = 13`, and the loser's compare-and-swap updates zero rows — but a change-log insert written as `INSERT … SELECT … FROM items WHERE id = $1 AND version = 13` matches the **winner's** row and appends a second entry for one logical change, so the change log stops being a faithful total order and the pulled `changes[]` contains the same entity twice. There is no shortcut via a unique constraint: `UNIQUE (op_id, entity_id)` does not help, because the two racing operations have *different* `opId`s. The row itself must carry the id of the operation that wrote it — hence `last_op_id` (§9.1). | The current non-transactional store-tag replacement (B-13) — a mid-flight failure loses the item's store tags. A blind read-decide-write without a compare-and-swap — two concurrent operations can both read the same `version` and both believe they won. Guarding the change-log insert on `version` alone — a losing operation appends a duplicate entry for the winner's write. `db.batch()` without the per-household lock — allocation and commit order can invert and a change can be skipped forever. The Neon WebSocket driver (interactive transactions) remains the fallback if the batch approach proves insufficient in Phase 2. |
 | **ADR-15** | **Service worker caches the static shell and hashed assets only — never an API response.** | The shell is identical for all users (no user data), so it caches safely and enables offline boot. API responses are per-user and per-household; caching them risks cross-account data leakage on a shared device. | Caching API responses — data-leak risk on shared devices and stale-data bugs. |
 
 ---
