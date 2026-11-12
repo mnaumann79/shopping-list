@@ -1,4 +1,4 @@
-import { render, screen, waitFor, act } from '@testing-library/react'
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach } from 'vitest'
 
 const mockPush = vi.fn()
@@ -18,6 +18,20 @@ vi.mock('@/components/DarkModeToggle', () => ({
   DarkModeToggle: () => <div data-testid="dark-mode-toggle" />,
 }))
 
+// The dropdown menu is a thin wrapper around Base UI. Stubbing it keeps this
+// test about AppHeader's own behaviour - what the Log out item does - and
+// leaves the real menu to the end-to-end specs.
+vi.mock('@/components/ui/dropdown-menu', () => ({
+  DropdownMenu: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DropdownMenuTrigger: ({ children, ...props }: { children: React.ReactNode; [key: string]: unknown }) => (
+    <button {...props}>{children}</button>
+  ),
+  DropdownMenuContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DropdownMenuItem: ({ children, onClick }: { children: React.ReactNode; onClick?: () => void }) => (
+    <button onClick={onClick}>{children}</button>
+  ),
+}))
+
 vi.mock('next/link', () => ({
   default: ({ href, children, ...props }: { href: string; children: React.ReactNode; [key: string]: unknown }) => (
     <a href={href} {...props}>{children}</a>
@@ -25,6 +39,7 @@ vi.mock('next/link', () => ({
 }))
 
 import { AppHeader } from '../AppHeader'
+import { authClient } from '@/lib/auth-client'
 
 describe('AppHeader', () => {
   beforeEach(() => {
@@ -69,15 +84,19 @@ describe('AppHeader', () => {
     expect(settingsLink).toBeUndefined()
   })
 
-  it.skip('logout dropdown calls signOut and navigates', async () => {
-    // Skipped: Base UI's DropdownMenu uses PointerEvents that don't fire reliably via
-    // fireEvent.click in JSDOM. DropdownMenu is now lazy-loaded (React.lazy), which
-    // also prevents vi.mock from intercepting dynamic imports. Manual verification only.
+  it('logout dropdown calls signOut and navigates', async () => {
     await act(async () => {
       render(<AppHeader userName="John Doe" />)
     })
+
+    // Open the account menu and pick Log out.
+    fireEvent.click(screen.getByLabelText('Account menu'))
+    fireEvent.click(screen.getByRole('button', { name: 'Log out' }))
+
     await waitFor(() => {
-      expect(screen.getByLabelText('Account menu')).toBeInTheDocument()
+      expect(authClient.signOut).toHaveBeenCalled()
     })
+    expect(mockPush).toHaveBeenCalledWith('/sign-in')
+    expect(mockRefresh).toHaveBeenCalled()
   })
 })
