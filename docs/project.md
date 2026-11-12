@@ -999,7 +999,8 @@ type OutboxOp = {
     | "setStoreTags"
     | "archive"
     | "unarchive"
-    | "bulkArchive";
+    | "bulkArchive"
+    | "override";
   baseVersion: number;       // server version the client believed it was editing
   lamport: number;           // client's Lamport counter for this household
   payload: OutboxPayload;    // typed per operation type — see below
@@ -1037,6 +1038,24 @@ type OutboxPayload =
   | { field: string; value: unknown; serverValue: unknown }         // override (Keep mine)
   ;
 ```
+
+**The local operation name and the wire operation name are not the same
+thing.** The local union is short and ergonomic; the wire `type` is namespaced
+by entity so that a client reading an unfamiliar type can tell whether it
+understands it (§10.1a). The mapping is fixed and must not be improvised:
+
+| Local `OutboxOp.type` | Wire `type` (§10.1a) | Notes |
+| --- | --- | --- |
+| `create` | `item.create` / `category.create` / `store.create` | Chosen by `entityType`. |
+| `update` | `item.update` / `category.rename` / `store.rename` | A rename is an update of the `name` field. |
+| `check` | `item.check` | |
+| `setStoreTags` | `item.storeTags` | |
+| `delete` | `item.delete` / `category.delete` / `store.delete` | Chosen by `entityType`. Deleting a store removes its item tags; the items survive. |
+| `undelete` | `item.restore` | Clears a *delete* tombstone. |
+| `unarchive` | `item.unarchive` | Restores an *archived* item from History. |
+| `archive` | `item.archive` | |
+| `bulkArchive` | `item.bulkArchive` | |
+| `override` | `item.override` | The "Keep mine" action (§11.2). |
 
 **`pendingFields` is what makes §10.7 implementable.** A single `pending`
 boolean cannot tell the client *which* fields a pending operation touched, so
@@ -1309,6 +1328,7 @@ exactly one of these strings, and §11's conflict rules are keyed to them.
 | `item.storeTags` | item | `storeIds` (array) | **Add-wins** for concurrent additions; a removal applies only against a base that contained the tag. |
 | `item.delete` | item | — | **Delete-wins**, terminal tombstone. |
 | `item.restore` | item | — | Clears a tombstone; rejected if a newer delete exists. |
+| `item.unarchive` | item | — | Restores an **archived** item from History to the active list. Distinct from `item.restore`, which clears a *delete* tombstone. |
 | `item.archive` | item | `baseVersion` (on the op) | **Archive-wins**, but skips items whose `version` exceeds the op's base. |
 | `item.bulkArchive` | item | `baseVersion` | The bulk form of `item.archive`; reports how many items it skipped. |
 | `category.create` | category | `name` | Unique `(household_id, name)`; a duplicate is rejected with `DUPLICATE_NAME`. |
@@ -1932,7 +1952,7 @@ The existing `perf-audit.yml` schedule is kept.
 | Realtime push (WebSockets / SSE) | Household scale does not justify the infrastructure. The sync engine's polling interval (30 s) plus a `visibilitychange` trigger is sufficient. The sync protocol is designed so that a push transport could be added later without changing the data model. |
 | Barcode scanning, voice input, recipe integration, price tracking | Product scope, already deferred in the existing roadmap. |
 | Item attribution ("who added this") | Deferred; the server already records `created_by` and `updated_by`, so surfacing it later is cheap. |
-| Rich conflict UI beyond the "Needs attention" card | Sufficient for the household scale. |
+| Rich conflict UI beyond the three "Needs attention" card types (§11.2) | Sufficient for the household scale. |
 | Replacing Better Auth | High risk, low value. |
 | Multi-region / offline write conflicts across thousands of households | Out of scale. |
 
