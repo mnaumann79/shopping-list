@@ -1,25 +1,12 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { appOrigin, PASSWORD } from "../support/helpers";
 
 /**
  * Helpers for the AUTH-01…04 specs.
  *
- * They live in this directory on purpose: `e2e/support/` is reserved for the
- * household half of task 0.7, so the two halves cannot collide.
+ * The helpers that more than one suite needs live in `e2e/support/helpers.ts`;
+ * the ones that only make sense for the auth specs stay here.
  */
-
-export const PASSWORD = "TestPassword123!";
-
-// An address can only be registered once, so every user gets its own.
-export function uniqueEmail(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-}
-
-// The origin the app runs on. Better Auth refuses API calls that carry a
-// session cookie without an Origin header, and the request fixture always
-// carries one.
-export function appOrigin(): string {
-  return new URL(test.info().project.use.baseURL ?? "http://localhost:3000").origin;
-}
 
 /**
  * Registers a user and gives them a household, over the Better Auth API.
@@ -51,19 +38,6 @@ export async function registerUser(
   expect(created.ok(), `Could not create the household: ${createdBody}`).toBeTruthy();
 }
 
-// A click before React hydrates is swallowed, so wait for the request the
-// handler sends and click again when nothing went out.
-export async function submitForm(page: Page, buttonName: string, endpoint: string): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const sent = page
-      .waitForRequest((request) => request.url().includes(endpoint), { timeout: 5_000 })
-      .then(() => true, () => false);
-    await page.getByRole("button", { name: buttonName }).click();
-    if (await sent) return;
-  }
-  throw new Error(`The "${buttonName}" form sent no request to ${endpoint}`);
-}
-
 // Collects the requests a page sends to one endpoint, so a spec can assert
 // that a form did not submit at all.
 export function trackRequests(page: Page, endpoint: string): string[] {
@@ -79,7 +53,7 @@ export function trackRequests(page: Page, endpoint: string): string[] {
  *
  * The menu is a Base UI dropdown: it opens on pointerdown, and a click that
  * lands before React has hydrated the header is swallowed, so the menu never
- * opens. Click again when the menu did not open.
+ * opens. Click again when that happens.
  */
 export async function openAccountMenu(page: Page): Promise<void> {
   const trigger = page.getByRole("button", { name: "Account menu" });
@@ -91,4 +65,23 @@ export async function openAccountMenu(page: Page): Promise<void> {
     }
     await expect(item).toBeVisible({ timeout: 3_000 });
   }).toPass({ timeout: 15_000 });
+}
+
+/**
+ * Gives the browser a session of its own, apart from the shared one.
+ *
+ * The shared storage state holds one session for every browser project.
+ * Signing out revokes the session on the server, so a spec that signs out of
+ * the shared session would take it away from every other spec. A spec that
+ * needs to sign out registers its own user and copies that session into the
+ * browser.
+ */
+export async function startOwnSession(
+  page: Page,
+  request: APIRequestContext,
+  options: { email: string; householdName?: string },
+): Promise<void> {
+  await registerUser(request, options);
+  const state = await request.storageState();
+  await page.context().addCookies(state.cookies);
 }
