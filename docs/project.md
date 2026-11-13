@@ -1656,12 +1656,38 @@ just created — and everything else needs a membership. A removed creator
 therefore cannot delete the household: the `SELECT` policy does not grant
 `DELETE`, and the member policy does not let them through.
 
+**The bootstrap read asks the membership table, not the households table.**
+That is not a style choice. PostgreSQL applies a table's `SELECT` policies to
+the rows an `INSERT ... RETURNING` returns, and the row the application had
+just written had to pass them. It could not: the bootstrap policy used to
+ask `app_household_bootstrap(id, auth.uid())`, and that function is a
+SECURITY DEFINER query over the `households` table — the very table the
+statement was writing into, so it could not see the row being written. The
+insert was refused with *new row violates row-level security policy for table
+"households"*, and **the application could not create a household at all**.
+
+The question the policy means to ask is about the *membership*: the household
+has no members yet, so its creator may read it back. That is a question
+about another table, and another table can answer it:
+
 ```sql
+CREATE FUNCTION app_household_has_no_members(p_household_id uuid)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $fn$
+  SELECT NOT EXISTS (
+    SELECT 1 FROM household_members
+     WHERE household_id = p_household_id
+  );
+$fn$;
+
 CREATE POLICY households_bootstrap_insert ON households
   FOR INSERT WITH CHECK (created_by = auth.uid());
 
 CREATE POLICY households_bootstrap_select ON households
-  FOR SELECT USING (app_household_bootstrap(id, auth.uid()));
+  FOR SELECT USING (created_by = auth.uid() AND app_household_has_no_members(id));
 
 CREATE POLICY households_member ON households
   USING      (app_household_role(id, auth.uid()) IS NOT NULL
@@ -1669,6 +1695,18 @@ CREATE POLICY households_member ON households
   WITH CHECK (app_household_role(id, auth.uid()) IS NOT NULL
               AND app_household_scope(id));
 ```
+
+**The function is SECURITY DEFINER, and that is what keeps the security
+meaning.** "No members" has to mean *no members at all*. A membership
+sub-query written into the policy instead would be filtered by the membership
+table's own row-level security: a caller who is not a member sees no
+membership rows, so `NOT EXISTS` would hold for a household that has members
+— and a creator who had been removed from their household would keep reading
+it. Measured on the local stack, as the application role: with the
+sub-query shape the removed creator still saw the household; with the
+function they do not. What is unchanged: the creator cannot read a household
+they did not create, and a household that still has members is readable only
+by its members.
 
 **The `item_stores` policy reaches through both ends of the pair.** The join
 table carries no household id, so the item and the store must both belong to

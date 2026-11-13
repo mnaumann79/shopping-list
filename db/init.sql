@@ -415,21 +415,47 @@ AS $fn$
     true);
 $fn$;
 
+-- Whether a household has no members yet.
+--
+-- This is the question the bootstrap SELECT policy asks, and it has to be
+-- asked of the membership table rather than of the households table: a
+-- function over the table the statement is writing into cannot see the row
+-- being written, so an INSERT ... RETURNING of a household was refused by
+-- its own policies. See migration 0009.
+--
+-- It is SECURITY DEFINER so that it reads every membership row and not only
+-- the caller's: "no members" has to mean no members at all, or a creator who
+-- had been removed from their household would keep reading it.
+CREATE OR REPLACE FUNCTION app_household_has_no_members(p_household_id uuid)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $fn$
+  SELECT NOT EXISTS (
+    SELECT 1 FROM household_members
+     WHERE household_id = p_household_id
+  );
+$fn$;
+
 -- PUBLIC gets no execute right on these: they answer "what role does this
--- user have in this household", "did this user create it", and "which
--- household is this transaction about", and that is nobody's business but the
--- household's. The app role has them; the inherited authenticated role has
--- them as well, so a PostgREST connection that assumes that role still
--- evaluates the policies.
+-- user have in this household", "did this user create it", "which
+-- household is this transaction about", and "does this household have no
+-- members yet", and that is nobody's business but the household's. The app
+-- role has them; the inherited authenticated role has them as well, so a
+-- PostgREST connection that assumes that role still evaluates the policies.
 REVOKE ALL ON FUNCTION app_household_role(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_household_bootstrap(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_household_scope(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app_household_has_no_members(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app_household_role(uuid, uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION app_household_bootstrap(uuid, uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION app_household_scope(uuid) TO authenticated;
+GRANT EXECUTE ON FUNCTION app_household_has_no_members(uuid) TO authenticated;
 GRANT EXECUTE ON FUNCTION app_household_role(uuid, uuid) TO app;
 GRANT EXECUTE ON FUNCTION app_household_bootstrap(uuid, uuid) TO app;
 GRANT EXECUTE ON FUNCTION app_household_scope(uuid) TO app;
+GRANT EXECUTE ON FUNCTION app_household_has_no_members(uuid) TO app;
 
 -- Every table that carries a household id. That includes the five sync
 -- tables: the app role has CRUD on every table in this schema, so a table
@@ -566,12 +592,18 @@ CREATE POLICY household_members_isolation ON household_members
 -- needs a membership: a creator whose membership was removed has lost the
 -- household, and a policy that kept the creator exception would let them
 -- delete it, and with it everything in it.
+--
+-- The bootstrap read asks the membership table whether the household has no
+-- members yet, not the households table: PostgreSQL applies the SELECT
+-- policies to the rows an INSERT ... RETURNING returns, and a function over
+-- the table the statement is writing into cannot see the row being written.
+-- See migration 0009.
 
 CREATE POLICY households_bootstrap_insert ON households
   FOR INSERT WITH CHECK (created_by = auth.uid());
 
 CREATE POLICY households_bootstrap_select ON households
-  FOR SELECT USING (app_household_bootstrap(id, auth.uid()));
+  FOR SELECT USING (created_by = auth.uid() AND app_household_has_no_members(id));
 
 CREATE POLICY households_member ON households
   USING      (app_household_role(id, auth.uid()) IS NOT NULL
