@@ -3832,25 +3832,35 @@ decommissioned (step 8).
 #### What a full set of counters means
 
 The counters are held in memory and capped at a thousand per map, and `admit`
-checks the client map first. While the client map is full, a **new** client
-key is refused — even for an address that already has a counter of its own —
-and while the email map is full, a **new** address is refused. The counters
-for keys that already exist in their own map keep working: a user who has
-already failed once is not locked out by somebody else's flood, and the
-target of a flood keeps its quota.
+checks the client map first.
+
+**The client map being full refuses new client identities.** A caller that
+already has a counter in the client map keeps working: its key is found, its
+own quota is what answers, and a flood of other identities does not touch it.
+And because the client map is read first, a new client identity is refused
+even when the address it is trying already has a counter of its own.
+
+**The email map being full refuses new addresses.** An address that already
+has a counter keeps working, and it keeps its own quota, so the flood buys
+no extra guesses against it. The counters for keys that already exist in
+their own map keep working: a user who has already failed once is not locked
+out by somebody else's flood, and the target of a flood keeps its quota.
+
+**Neither refusal reaches every caller.** What a flood costs is the keys the
+map has never seen: the callers that are new, and the addresses that are new.
 
 The two maps fill differently. The client map holds one counter per identity,
 so it takes **a thousand** distinct client identities to fill, each making at
 least one failure. The email map holds one counter per address, so a hundred
 identities can fill it by spending their quota of ten on ten distinct
-addresses each — but the client map is checked first, so the refusal that
-reaches every caller is the one the thousand identities buy. With no proxy in
-front, every caller on the same machine shares one key — the socket's
-address — so one identity's quota of ten failures is not enough to fill
-either map. The literal `"unknown"` is the fallback for a request that
-carries no header at all, which is how the route's own unit tests call it.
-The trade-off is deliberate: the smaller failure is the one that cannot be
-repeated at will against one address.
+addresses each. The client map binds first: a flood of a hundred identities
+refuses every new address, and it takes a thousand to refuse the callers the
+map has not met either. With no proxy in front, every caller on the same
+machine shares one key — the socket's address — so one identity's quota of
+ten failures is not enough to fill either map. The literal `"unknown"` is
+the fallback for a request that carries no header at all, which is how the
+route's own unit tests call it. The trade-off is deliberate: the smaller
+failure is the one that cannot be repeated at will against one address.
 
 #### What the rehearsal found
 

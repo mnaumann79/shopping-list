@@ -42,11 +42,11 @@ export const SESSION_COOKIE = "sb-household-auth-token";
  *
  * The transitional route counts its failures against the client, and it
  * takes the client's address from `x-forwarded-for` — the header a
- * deployment behind a proxy fills in. With no proxy in front, every request
- * would carry the route's own fallback, the literal "unknown", and all the
- * profiles would share one budget. Each context gets an address of its own
- * instead, so the limiter is exercised the way a deployment exercises it:
- * one budget per client.
+ * deployment behind a proxy fills in. Next.js fills a missing header from
+ * the socket's address and keeps one the caller supplied, so with no proxy
+ * in front every context would share one budget. Each context gets an
+ * address of its own instead, so the limiter is exercised the way a
+ * deployment exercises it: one budget per client.
  */
 let contexts = 0;
 

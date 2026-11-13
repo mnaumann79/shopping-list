@@ -145,10 +145,18 @@ function unauthorized(): Response {
  * the nearest hop's observation. A proxy that appends puts its own entry
  * last, so a client cannot choose the key by setting the header itself.
  *
- * Where there is no proxy the header is absent and every caller shares one
+ * Next.js fills a missing `x-forwarded-for` from the socket's address and
+ * keeps a value the caller supplied. So with no proxy in front the key is
+ * the socket's address and every caller on the same machine shares one
  * bucket, which is the strict direction: one noisy caller then costs the
  * others their client quota, but the per-address quota still protects the
  * passwords.
+ *
+ * The case to know about is a client that reaches the server directly: it
+ * can send its own header, Next.js keeps it, and it can rotate the value to
+ * escape the client quota. The per-address quota is what protects the
+ * passwords there. The deployment is safe because Vercel overwrites the
+ * header before Next.js ever sees it (§13.2a).
  */
 function clientKey(req: NextRequest): string {
   const entries = req.headers
