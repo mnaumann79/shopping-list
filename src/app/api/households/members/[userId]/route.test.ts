@@ -222,6 +222,19 @@ describe("DELETE /api/households/members/:userId", () => {
     expect(db.delete).toHaveBeenCalled();
   });
 
+  test("an owner removes an admin", async () => {
+    // Removing an admin is the reversible one: the owner can invite them
+    // back as an admin.
+    signedIn(OWNER_ID);
+    callerIs("owner");
+    targetIs("admin");
+
+    const res = await remove(ADMIN_ID);
+
+    expect(res.status).toBe(204);
+    expect(db.delete).toHaveBeenCalled();
+  });
+
   test("returns 404 when the member is not in the household", async () => {
     signedIn(OWNER_ID);
     callerIs("owner");

@@ -158,17 +158,21 @@ export async function findJoinLink(token: string) {
 /**
  * Removes a member from the household.
  *
- * Only an owner or an admin may do it, and the check is on the server. The
- * caller cannot remove themselves through it: an owner who leaves leaves the
- * household without an owner.
+ * The rules, all on the server:
  *
- * And the privileged rows are the owner's to give and to take away: an admin
- * may remove a plain member, but the owner's row is only the owner's to
- * remove — §12.5 gives the role table "remove a member: owner or admin" and
- * "change a member's role: owner", and nothing can put an owner back
- * (an invitation never grants the owner role, and only the creator's
- * bootstrap makes one), so an admin who could remove the owner would leave a
- * household nobody could repair.
+ * - An owner or an admin may remove a plain member.
+ * - Only the owner may remove an admin, and only the owner may remove the
+ *   owner. Removing an owner is the irreversible one: nothing can grant the
+ *   owner role again (an invitation grants `admin` or `member`, and only the
+ *   creator's bootstrap makes an owner), while removing an admin is not —
+ *   the owner can invite them back as an admin. The delete policy is
+ *   deliberately coarser than this: it admits any admin to delete any row
+ *   of the household, so the fine rule lives here, in the application
+ *   layer, where §12.5 puts it.
+ * - Nobody may remove themselves. The owner cannot be recreated, and the
+ *   membership policy admits no self-delete either, so the guard and the
+ *   policy agree rather than the guard being a rule the database does not
+ *   share.
  */
 export async function removeMember(scope: Scope, userId: string): Promise<void> {
   const callerRole = await requireHouseholdRole(scope, ADMIN_ROLES);
