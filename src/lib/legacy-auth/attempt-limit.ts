@@ -1,8 +1,8 @@
 /**
  * The admission limit for the transitional sign-in.
  *
- * The route is unauthenticated and every failed attempt costs a scrypt and
- * a lookup of the GoTrue accounts, so without a limit an attacker could
+ * The route is unauthenticated and every attempt costs a scrypt and a
+ * lookup of the GoTrue accounts, so without a limit an attacker could
  * make the server do that work on demand — and guess legacy passwords
  * without being throttled.
  *
@@ -17,7 +17,8 @@
  * The counts are in memory: the route goes with the legacy code in fourteen
  * days, and nothing here outlives the process. A deployment that fronts
  * the application with a rate limiter does not need this, but the route
- * cannot count on one: the guard in the root `middleware.ts` does not run
+ * cannot count on one: the application has no edge rate limiter — the root
+ * middleware is an optimistic redirect for pages, and it limits nothing
  * (§12.1b).
  */
 
@@ -30,7 +31,13 @@ const MAX_PER_CLIENT = 10;
 /** The failures one address may make in the window. */
 const MAX_PER_EMAIL = 5;
 
-/** How many counters are kept before the expired ones are dropped. */
+/**
+ * How many counters are kept.
+ *
+ * A hard cap: a caller that keeps trying new addresses cannot make the
+ * map grow, and the oldest window goes when the cap is reached. The maps
+ * are separate, so evicting an address never frees a client's quota.
+ */
 const MAX_KEYS = 1000;
 
 type Counter = {
@@ -53,12 +60,16 @@ const emails = new Map<string, Counter>();
  * updated yet, which is what a check-then-record would let them do.
  */
 export function admit(client: string, email: string): boolean {
+  // The client's quota is checked first, and an address counter is not
+  // created for a caller that is already refused: a blocked caller must not
+  // be able to make the map grow by trying new addresses.
   const clientCounter = counter(clients, client);
-  const emailCounter = counter(emails, email);
 
   if (clientCounter.failures + clientCounter.inFlight >= MAX_PER_CLIENT) {
     return false;
   }
+
+  const emailCounter = counter(emails, email);
 
   if (emailCounter.failures + emailCounter.inFlight >= MAX_PER_EMAIL) {
     return false;
@@ -84,14 +95,23 @@ export function settle(client: string, email: string, succeeded: boolean): void 
 function counter(counters: Map<string, Counter>, key: string): Counter {
   const existing = counters.get(key);
 
-  if (!existing || Date.now() - existing.startedAt > WINDOW_MS) {
-    const fresh: Counter = { failures: 0, startedAt: Date.now(), inFlight: 0 };
-    counters.set(key, fresh);
-    prune(counters);
-    return fresh;
+  if (existing && Date.now() - existing.startedAt <= WINDOW_MS) {
+    return existing;
   }
 
-  return existing;
+  // The map is a hard cap. The entries are inserted in the order their
+  // windows started, so the oldest is the first to go — and the expired
+  // ones are the oldest, so they are cleaned up on the way.
+  if (counters.size >= MAX_KEYS) {
+    const oldest = counters.keys().next();
+    if (!oldest.done) {
+      counters.delete(oldest.value);
+    }
+  }
+
+  const fresh: Counter = { failures: 0, startedAt: Date.now(), inFlight: 0 };
+  counters.set(key, fresh);
+  return fresh;
 }
 
 /** Settles one counter: the reservation is released, and the failure counted. */
@@ -118,16 +138,11 @@ function release(
   }
 }
 
-/** Drops the counters that are out of date, so the map cannot grow for ever. */
-function prune(counters: Map<string, Counter>): void {
-  if (counters.size <= MAX_KEYS) {
-    return;
-  }
-
-  const now = Date.now();
-  for (const [key, existing] of counters) {
-    if (now - existing.startedAt > WINDOW_MS) {
-      counters.delete(key);
-    }
-  }
+/**
+ * How many counters are live.
+ *
+ * The maps are a hard cap, and this is how a test sees that they are.
+ */
+export function liveCounters(): number {
+  return clients.size + emails.size;
 }

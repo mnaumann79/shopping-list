@@ -141,9 +141,21 @@ function unauthorized(): Response {
  * The client the attempt belongs to.
  *
  * The address the request came from, as the proxy in front of the
- * application reports it. It is a hint, not an identity: the limit counts
- * the address too, so a caller that changes it still meets the limit.
+ * application reports it: the **rightmost** `x-forwarded-for` entry, which is
+ * the nearest hop's observation. A proxy that appends puts its own entry
+ * last, so a client cannot choose the key by setting the header itself.
+ *
+ * Where there is no proxy the header is absent and every caller shares one
+ * bucket, which is the strict direction: one noisy caller then costs the
+ * others their client quota, but the per-address quota still protects the
+ * passwords.
  */
 function clientKey(req: NextRequest): string {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const entries = req.headers
+    .get("x-forwarded-for")
+    ?.split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  return entries?.at(-1) ?? "unknown";
 }
