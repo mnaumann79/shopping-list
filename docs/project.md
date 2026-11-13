@@ -1601,6 +1601,26 @@ know — and write themselves in as its owner, which is a privilege escalation
 with a POST. The only self-write the policy allows is the bootstrap: the
 caller created the household, and it has no members yet.
 
+**These are the policies the migration has to implement, and the difference
+between them and a simplification of them is not a matter of taste.** Measured
+on the local stack as the application role: a policy set with the membership
+branch but without the scope clause lets a transaction scoped to household A
+read household B's items — one row — and delete household B, cascade and all;
+a policy set without the membership branch lets a caller who is a member of
+nothing write themselves into any household as its owner. With the policies
+above, the scoped read returns zero rows, the scoped delete returns zero
+households, and the self-write is refused — while the legitimate flows still
+work: the owner sees every member and the owner's removal of a member reaches
+the database, a plain member still sees only their own row and removes
+nothing, and the creator still bootstraps their own household.
+
+**What a member sees.** The members list shows every member to an owner or an
+admin, and to a plain member it shows the caller's own row and nothing else.
+That is the policy's deliberate consequence of the recursion trap, not an
+oversight: the branch that would show a plain member everybody's row would
+read the membership table from inside its own policy. A plain member has no
+member-management capability in §12.5, so the list has little to tell them.
+
 **Every policy honours the household the transaction is scoped to.** The
 scope helper sets `request.jwt.claims` **and** `app.current_household`,
 transaction-locally, in the one transaction — the claims first, then the
