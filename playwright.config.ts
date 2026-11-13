@@ -16,10 +16,11 @@ const authFile = path.join(__dirname, "playwright/.auth/user.json");
 //
 // The transitional route counts its failures against the client, and it takes
 // the client's address from `x-forwarded-for` — the header a deployment behind
-// a proxy fills in. With no proxy in front, every request would carry the
-// route's own fallback, the literal "unknown", and every profile would share
-// one budget. Each profile gets an address of its own instead, so the limiter
-// is exercised the way a deployment exercises it: one budget per client.
+// a proxy fills in. Next.js fills a missing header from the socket's address
+// and keeps one the caller supplied, so with no proxy in front every profile
+// would share one budget. Each profile gets an address of its own instead, so
+// the limiter is exercised the way a deployment exercises it: one budget per
+// client.
 const client = (octet: number) => ({
   extraHTTPHeaders: { "x-forwarded-for": `10.0.0.${octet}` },
 });
