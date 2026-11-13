@@ -1,0 +1,219 @@
+name: e2e
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One run per ref. A new push cancels the run it replaces.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write # needed to open / comment on the journey-failure issue
+
+jobs:
+  playwright:
+    name: playwright, reporting only
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    # The job reports; it never refuses a merge.
+    #
+    # Two things make it non-gating, and both are needed. `continue-on-error`
+    # keeps the workflow run green while the journey is broken, and the job
+    # is not among the required checks — only "lint, type-check, unit tests,
+    # build" is — so nothing waits for it either way.
+    #
+    # The signal is therefore not the check itself: it is the annotations the
+    # Playwright reporter leaves on the pull request, the report artifact,
+    # and the issue this job opens when the suite fails.
+    #
+    # It starts red. The application cannot create a household yet
+    # (P0S-T16), and the suite is right about it; the job goes green when
+    # P0S-T30 lands. Landing it now is what puts the broken journey on the
+    # record instead of leaving it to be found by hand.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        # NODE_ENV is overridden for the install only: pnpm skips
+        # devDependencies when NODE_ENV=production, and the test runner
+        # lives there.
+        env:
+          NODE_ENV: development
+        run: pnpm install --frozen-lockfile
+
+      # The browsers the suite needs: Chromium, Firefox and WebKit. The
+      # iPhone 13 profile runs on WebKit. `--with-deps` installs the system
+      # libraries they need — libgles2, libx264 and the rest — which the
+      # runner does not have; without them WebKit does not launch at all.
+      - name: Install the browsers
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
+
+      # The CLI version is pinned so the local stack does not change shape
+      # under the job. It is the version the config in supabase/ was written
+      # for.
+      - uses: supabase/setup-cli@v1
+        with:
+          version: v3.1.0
+
+      # The local stack: the database, and GoTrue, which owns the `auth`
+      # schema every policy keys on.
+      #
+      # Kong is NOT excluded, unlike in the integration job: the Supabase
+      # client the application uses addresses the gateway, and the gateway
+      # is what serves `/auth/v1`. Without it the browser could sign nobody
+      # in.
+      - name: Start the local stack
+        run: |
+          supabase start \
+            --exclude studio,edge-runtime,logflare,vector,imgproxy,storage-api,realtime,postgrest,postgres-meta,supavisor,mailpit
+
+      # The stack's own configuration: the API URL the application points at
+      # and the two keys. They are not secrets — the stack mints them for
+      # containers that live for the length of one job, and nobody outside
+      # the job can reach them.
+      #
+      # The CLI has renamed the keys once (ANON_KEY became PUBLISHABLE_KEY),
+      # so both names are read and the step refuses to go on without them.
+      - name: Read the stack's configuration
+        id: stack
+        run: |
+          supabase status --output env > /tmp/stack.env
+          cat /tmp/stack.env
+          {
+            echo "url=$(grep -E '^API_URL=' /tmp/stack.env | cut -d= -f2- | tr -d '"')"
+            echo "anon=$(grep -E '^(ANON_KEY|PUBLISHABLE_KEY)=' /tmp/stack.env | cut -d= -f2- | tr -d '"')"
+            echo "service=$(grep -E '^(SERVICE_ROLE_KEY|SECRET_KEY)=' /tmp/stack.env | cut -d= -f2- | tr -d '"')"
+          } >> "$GITHUB_OUTPUT"
+          for value in url anon service; do
+            if [ -z "${!value}" ]; then
+              echo "::error::the local stack's $value was not read from 'supabase status --output env'"
+              exit 1
+            fi
+          done
+
+      - name: Install psql
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+
+      - name: Apply the migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: pnpm db:migrate
+
+      - name: Give the app role its password
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql "postgresql://postgres@127.0.0.1:54322/postgres" -v ON_ERROR_STOP=1 -f scripts/ci/app-role.sql
+
+      # The suite runs against the application, and the application connects
+      # as the non-owner role, so the policies apply to it — which is the
+      # point: the household cannot be created, and the suite says so.
+      #
+      # The Supabase values come from the stack above. The transitional route
+      # the specs sign in through needs the service-role key, because it
+      # provisions and re-keys GoTrue accounts.
+      - name: Run the browser suite
+        id: suite
+        env:
+          DATABASE_URL: postgresql://app:app@127.0.0.1:54322/postgres
+          NEXT_PUBLIC_SUPABASE_URL: ${{ steps.stack.outputs.url }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ steps.stack.outputs.anon }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ steps.stack.outputs.service }}
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+          BETTER_AUTH_URL: http://localhost:3000
+          RESEND_API_KEY: ci-dummy-not-used
+          RESEND_FROM_EMAIL: noreply@example.com
+          PLAYWRIGHT_BASE_URL: http://localhost:3000
+        run: pnpm test:e2e
+
+      - name: Upload the Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # A red run has to be noticed by a person, not just recorded: the same
+      # shape of issue the perf-audit workflow opens when its audit fails.
+      # The label is created if it is not there yet, so the job does not
+      # depend on somebody having prepared the repository for it.
+      - name: Open or update the journey-failure issue
+        if: ${{ always() && steps.suite.conclusion == 'failure' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- e2e-bot -->';
+            const label = 'e2e-failure';
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch {
+              await github.rest.issues.createLabel({
+                owner,
+                repo,
+                name: label,
+                color: 'B60205',
+                description: 'The browser suite failed in CI',
+              });
+            }
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: 'open',
+              labels: label,
+              per_page: 1,
+            });
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              'The browser suite failed. Latest run: ' + runUrl,
+              '',
+              'Download the `playwright-report` artifact from the run for the traces and the screenshots.',
+              '',
+              'This job does not gate a merge. It is here so that a broken journey is noticed.',
+              '',
+              'See `docs/project.md` §12.1a and the e2e workflow for what the suite covers.',
+            ].join('\n');
+
+            if (issues.length > 0) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issues[0].number,
+                body,
+              });
+              core.info(`Commented on existing ${label} issue #${issues[0].number}`);
+            } else {
+              const { data: created } = await github.rest.issues.create({
+                owner,
+                repo,
+                title: 'The browser suite failed in CI',
+                body,
+                labels: [label],
+              });
+              core.info(`Opened ${label} issue #${created.number}`);
+            }

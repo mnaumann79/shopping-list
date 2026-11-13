@@ -30,7 +30,16 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  reporter: "html",
+  // In CI the report has to be read by somebody who is not at the console:
+  // the `github` reporter annotates the pull request with the failures, and
+  // the HTML report is written out for the artifact. The `open: "never"`
+  // stops it from trying to open a browser on a runner.
+  reporter: process.env.CI
+    ? [
+        ["github"],
+        ["html", { open: "never" }],
+      ]
+    : "html",
   workers: 1,
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000",
