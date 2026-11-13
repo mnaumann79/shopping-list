@@ -3747,6 +3747,10 @@ Auth to Supabase Auth (ADR-16, ADR-17). The two happen in one window,
 because the auth change rewrites the identity columns the data move has to
 map anyway.
 
+**The checklist for the person performing the cutover is
+[`docs/cutover-checklist.md`](./cutover-checklist.md).** This section is the
+procedure; that is the list.
+
 #### The cutover, in order
 
 | # | Step | When | Reversible? |
