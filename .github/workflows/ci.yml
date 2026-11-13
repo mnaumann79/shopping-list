@@ -37,9 +37,6 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/shopping_test
-      # The local driver talks to the service container; the Neon HTTP driver
-      # only works against Neon.
-      DB_DRIVER: node-postgres
       BETTER_AUTH_SECRET: ci-secret
       BETTER_AUTH_URL: http://localhost:3000
       NEXT_PUBLIC_APP_URL: http://localhost:3000
