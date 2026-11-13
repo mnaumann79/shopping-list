@@ -13,11 +13,19 @@
 -- which defines the legacy `account` table's own `password` column — a
 -- column of the old authentication, not a credential.
 --
--- Two spellings of the same thing are covered, because PostgreSQL accepts
--- both: `ALTER ROLE` and `ALTER USER`, `CREATE ROLE` and `CREATE USER`. And
--- the literal is what makes the match specific: a role *named*
+-- Four spellings of the same thing are covered, because PostgreSQL accepts
+-- all of them:
+--
+--   ALTER ROLE app PASSWORD 'secret'      CREATE ROLE app PASSWORD 'secret'
+--   ALTER USER app PASSWORD 'secret'      CREATE USER app PASSWORD 'secret'
+--   SET PASSWORD 'secret'
+--
+-- and three spellings of the literal: the plain quote, the escape-string
+-- form `E'secret'`, and the dollar-quoted form `$$secret$$`.
+--
+-- The literal is what makes the match specific: a role *named*
 -- `password_reader` is not a credential, and `password` followed by a quote
--- is.
+-- or a dollar sign is.
 --
 -- It is read-only, and it only makes sense on an instance: a database built
 -- by `scripts/db-migrate.mjs` has its own ledger (`db_migrate.applied`),
@@ -35,10 +43,17 @@ BEGIN
     RETURN;
   END IF;
 
-  SELECT string_agg(name, ', ' ORDER BY version) INTO offending
+  -- The name is what a reader recognises, but it is nullable, and an
+  -- aggregate over nulls skips them: a matching row with no name would be
+  -- dropped, and if every matching row were unnamed the aggregate would be
+  -- null — and the check would pass. The version is the fallback.
+  SELECT string_agg(
+           coalesce(nullif(name, ''), nullif(version, ''), '<unnamed row>'),
+           ', ' ORDER BY version
+         ) INTO offending
     FROM supabase_migrations.schema_migrations
-   WHERE array_to_string(statements, ' ') ~* '(alter|create)[[:space:]]+(role|user)[[:space:]][^;]*password[[:space:]]*'''
-      OR array_to_string(statements, ' ') ~* 'set[[:space:]]+password[[:space:]]*''';
+   WHERE array_to_string(statements, ' ') ~* '(alter|create)[[:space:]]+(role|user)[[:space:]][^;]*password[[:space:]]*(e)?(''|\$)'
+      OR array_to_string(statements, ' ') ~* 'set[[:space:]]+password[[:space:]]*(e)?(''|\$)';
 
   IF offending IS NOT NULL THEN
     RAISE EXCEPTION
