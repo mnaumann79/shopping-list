@@ -6,7 +6,6 @@
 -- The auth schema and GoTrue's users table: on the Supabase instance GoTrue
 -- owns both and this file adds nothing. On a plain PostgreSQL they are the
 -- smallest thing the foreign keys can point at.
-<<<<<<< HEAD
 --
 -- The block is skipped where the schema already exists, because there the
 -- postgres role has USAGE on it but not CREATE, and a "CREATE TABLE IF NOT
@@ -20,12 +19,28 @@ BEGIN
     );
   END IF;
 END $$;
-=======
-CREATE SCHEMA IF NOT EXISTS "auth";
-CREATE TABLE IF NOT EXISTS "auth"."users" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL
-);
->>>>>>> origin/main
+
+-- auth.uid() reads the caller's id from request.jwt.claims.
+--
+-- On the instance GoTrue owns this function and this statement does nothing.
+-- On a plain PostgreSQL it is created with the same definition Supabase uses,
+-- so that the policies below resolve the caller there too.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'auth' AND p.proname = 'uid' AND p.pronargs = 0
+  ) THEN
+    CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $fn$
+      SELECT COALESCE(
+        NULLIF(current_setting('request.jwt.claim.sub', true), ''),
+        (NULLIF(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+      )::uuid
+    $fn$;
+  END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS "account" (
 	"id" text PRIMARY KEY NOT NULL,
 	"account_id" text NOT NULL,
@@ -255,26 +270,15 @@ ALTER TABLE "household_members" ADD CONSTRAINT "household_members_household_id_h
 ALTER TABLE "household_members" ADD CONSTRAINT "household_members_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "household_invitations" ADD CONSTRAINT "household_invitations_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "household_invitations" ADD CONSTRAINT "household_invitations_invited_by_users_id_fk" FOREIGN KEY ("invited_by") REFERENCES "auth"."users"("id") ON DELETE cascade ON UPDATE no action;
-<<<<<<< HEAD
 ALTER TABLE "household_join_links" ADD CONSTRAINT "household_join_links_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "household_join_links" ADD CONSTRAINT "household_join_links_created_by_id_users_id_fk" FOREIGN KEY ("created_by_id") REFERENCES "auth"."users"("id") ON DELETE no action ON UPDATE no action;
 ALTER TABLE "categories" ADD CONSTRAINT "categories_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
-=======
-ALTER TABLE "household_join_links" ADD CONSTRAINT "household_join_links_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
-ALTER TABLE "household_join_links" ADD CONSTRAINT "household_join_links_created_by_id_user_id_fk" FOREIGN KEY ("created_by_id") REFERENCES "public"."user"("id") ON DELETE no action ON UPDATE no action;
-ALTER TABLE "categories" ADD CONSTRAINT "categories_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
->>>>>>> origin/main
 ALTER TABLE "item_stores" ADD CONSTRAINT "item_stores_item_id_items_id_fk" FOREIGN KEY ("item_id") REFERENCES "public"."items"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "item_stores" ADD CONSTRAINT "item_stores_store_id_stores_id_fk" FOREIGN KEY ("store_id") REFERENCES "public"."stores"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "items" ADD CONSTRAINT "items_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "items" ADD CONSTRAINT "items_category_id_categories_id_fk" FOREIGN KEY ("category_id") REFERENCES "public"."categories"("id") ON DELETE set null ON UPDATE no action;
-<<<<<<< HEAD
 ALTER TABLE "items" ADD CONSTRAINT "items_created_by_id_users_id_fk" FOREIGN KEY ("created_by_id") REFERENCES "auth"."users"("id") ON DELETE set null ON UPDATE no action;
 ALTER TABLE "stores" ADD CONSTRAINT "stores_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
-=======
-ALTER TABLE "items" ADD CONSTRAINT "items_created_by_id_user_id_fk" FOREIGN KEY ("created_by_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
-ALTER TABLE "stores" ADD CONSTRAINT "stores_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
->>>>>>> origin/main
 ALTER TABLE "sync_changes" ADD CONSTRAINT "sync_changes_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "sync_changes" ADD CONSTRAINT "sync_changes_actor_id_users_id_fk" FOREIGN KEY ("actor_id") REFERENCES "auth"."users"("id") ON DELETE restrict ON UPDATE no action;
 ALTER TABLE "sync_operations" ADD CONSTRAINT "sync_operations_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
@@ -282,3 +286,143 @@ ALTER TABLE "sync_operations" ADD CONSTRAINT "sync_operations_actor_id_users_id_
 ALTER TABLE "devices" ADD CONSTRAINT "devices_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "household_sync_state" ADD CONSTRAINT "household_sync_state_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "entity_conflicts" ADD CONSTRAINT "entity_conflicts_household_id_households_id_fk" FOREIGN KEY ("household_id") REFERENCES "public"."households"("id") ON DELETE cascade ON UPDATE no action;
+
+-- The role the application connects as, and the role it inherits.
+--
+-- The roles are cluster-wide, not per database, so they are created where
+-- they are missing - exactly as the migration does - and a flat snapshot that
+-- did not create them would leave a database the application cannot connect
+-- to. The app role is not a superuser, does not bypass row-level security,
+-- and owns nothing: the tables belong to the role that migrated them, and an
+-- owner bypasses every policy below.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app') THEN
+    CREATE ROLE app LOGIN;
+  END IF;
+
+  -- A plain PostgreSQL has no Supabase roles. On the instance Supabase owns
+  -- them, and `authenticated` already has USAGE on the auth schema and
+  -- EXECUTE on auth.uid().
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated NOLOGIN;
+  END IF;
+END $$;
+
+-- The privileges `authenticated` needs on the auth schema, granted only
+-- where the migrating role owns that schema.
+--
+-- On the instance the auth schema belongs to supabase_admin, and the grant
+-- is refused with "permission denied for schema auth" - there `authenticated`
+-- already has what it needs, because Supabase granted it. On a plain
+-- PostgreSQL the migrating role owns the schema and the grant is the one that
+-- gives `authenticated` - and through it the app role - the USAGE and the
+-- EXECUTE that the policies below call.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_namespace n
+    JOIN pg_roles r ON r.oid = n.nspowner
+    WHERE n.nspname = 'auth' AND r.rolname = current_user
+  ) THEN
+    GRANT USAGE ON SCHEMA auth TO authenticated;
+    GRANT EXECUTE ON FUNCTION auth.uid() TO authenticated;
+  END IF;
+END $$;
+
+-- The app role inherits the authenticated role, and with it the USAGE on the
+-- auth schema and the EXECUTE on auth.uid() that the policies call.
+GRANT authenticated TO app;
+
+GRANT USAGE ON SCHEMA public TO app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app;
+
+-- The tables the next migration creates are the application's tables too.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO app;
+
+-- Row-level security (section 9.2b). Every household-scoped table carries a
+-- policy that resolves the caller's membership, and the application connects
+-- as a role that is not the table owner - because an owner bypasses RLS by
+-- default, and a policy that is bypassed is not a policy.
+--
+-- The five sync tables (sync_changes, sync_operations, devices,
+-- household_sync_state, entity_conflicts) are not here yet: they arrive with
+-- task 3.2, and their policies arrive with them.
+
+ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE stores ENABLE ROW LEVEL SECURITY;
+ALTER TABLE household_join_links ENABLE ROW LEVEL SECURITY;
+ALTER TABLE household_invitations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE household_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE households ENABLE ROW LEVEL SECURITY;
+ALTER TABLE item_stores ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY items_household_isolation ON items
+  USING      (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()))
+  WITH CHECK (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()));
+
+CREATE POLICY categories_household_isolation ON categories
+  USING      (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()))
+  WITH CHECK (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()));
+
+CREATE POLICY stores_household_isolation ON stores
+  USING      (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()))
+  WITH CHECK (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()));
+
+CREATE POLICY household_join_links_household_isolation ON household_join_links
+  USING      (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()))
+  WITH CHECK (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()));
+
+CREATE POLICY household_invitations_household_isolation ON household_invitations
+  USING      (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()))
+  WITH CHECK (household_id IN (SELECT household_id FROM household_members
+                               WHERE user_id = auth.uid()));
+
+-- The membership table's own policy, and the one that makes the sub-queries
+-- above terminate: it keys on auth.uid() alone, so it never reads the table
+-- it is a policy of. A policy here that read household_members would recurse,
+-- and PostgreSQL would give up on it.
+CREATE POLICY household_members_self ON household_members
+  USING (user_id = auth.uid());
+
+-- The households table carries the household's name and its creator, and a
+-- membership is what makes it visible. The creator is in the USING as well,
+-- because the row is written before the membership row exists - the
+-- application creates the household and joins it to it in one transaction,
+-- and INSERT ... RETURNING has to be able to read the row back.
+CREATE POLICY households_membership ON households
+  USING      (id IN (SELECT household_id FROM household_members
+                     WHERE user_id = auth.uid())
+              OR created_by = auth.uid())
+  WITH CHECK (created_by = auth.uid());
+
+-- The item-to-store tags carry no household id of their own, so the policy
+-- reaches through both ends of the pair: a tag is visible when its item and
+-- its store are both the caller's. The sub-queries stop at the membership
+-- table, so this does not recurse either.
+CREATE POLICY item_stores_household_isolation ON item_stores
+  USING      (item_id IN (SELECT id FROM items
+                           WHERE household_id IN (SELECT household_id FROM household_members
+                                                 WHERE user_id = auth.uid()))
+              AND store_id IN (SELECT id FROM stores
+                               WHERE household_id IN (SELECT household_id FROM household_members
+                                                     WHERE user_id = auth.uid())))
+  WITH CHECK (item_id IN (SELECT id FROM items
+                           WHERE household_id IN (SELECT household_id FROM household_members
+                                                 WHERE user_id = auth.uid()))
+              AND store_id IN (SELECT id FROM stores
+                               WHERE household_id IN (SELECT household_id FROM household_members
+                                                     WHERE user_id = auth.uid())));
