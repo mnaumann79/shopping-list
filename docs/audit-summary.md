@@ -51,7 +51,7 @@ create that writes its tags, and a create whose id is already taken. **201 asser
 pass.**
 
 *Those were the audit's numbers, and they have since grown: the fixture now
-covers **forty-two scenarios in eleven groups** with **248 assertions**, after
+covers **forty-five scenarios in eleven groups** with **271 assertions**, after
 a review found three operation types the fixture never exercised — `item.delete`,
 `item.unarchive` and `item.bulkUnarchive` — and two assertions that could not
 have failed. The audit's own text is left as it was written.* The same round produced one schema change: a **tombstone on the tag
@@ -322,7 +322,7 @@ audit's findings.
 
 **One thing has been done that deserves to be called out:** the §10.8 SQL was
 executed against a real PostgreSQL with the specification's own DDL, and its
-outcomes verified — 248 assertions across 42 scenarios in 11 groups. That is
+outcomes verified — 271 assertions across 45 scenarios in 11 groups. That is
 **verification, not implementation**: no production code contains that SQL
 yet, and it will not until Phase 3.
 
