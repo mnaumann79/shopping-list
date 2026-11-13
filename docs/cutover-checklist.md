@@ -72,7 +72,8 @@ The times are relative to the maintenance window (**T−0**).
       run; a dry run that nobody read is a rehearsal that found nothing
       because nobody looked.
 - [ ] **The summary is attached to the pull request, not the raw output.**
-      The raw output names the households, and this repository is public.
+      The rehearsal prints counts only — the ids are in the mapping table —
+      and this repository is public.
 
 ### T−1 day — the guard that ships
 
