@@ -19,8 +19,14 @@ export const BASE_URL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:300
  */
 export const SIGN_UP_ENDPOINT = "/auth/v1/signup";
 
-/** The GoTrue endpoint the browser client signs in against. */
-export const SIGN_IN_ENDPOINT = "/auth/v1/token";
+/**
+ * The endpoint the sign-in form sends to.
+ *
+ * The form posts to the application's transitional route, and the route signs
+ * in on the server's side, so the request the specs wait for goes through the
+ * application rather than to the auth server.
+ */
+export const SIGN_IN_ENDPOINT = "/api/auth/legacy-signin";
 
 /**
  * The cookie the Supabase session lives in.
@@ -32,6 +38,24 @@ export const SIGN_IN_ENDPOINT = "/auth/v1/token";
 export const SESSION_COOKIE = "sb-household-auth-token";
 
 /**
+ * The address a browser context presents to the application.
+ *
+ * The transitional route counts its failures against the client, and it
+ * takes the client's address from `x-forwarded-for` — the header a
+ * deployment behind a proxy fills in. With no proxy in front, every request
+ * would carry the route's own fallback, the literal "unknown", and all the
+ * profiles would share one budget. Each context gets an address of its own
+ * instead, so the limiter is exercised the way a deployment exercises it:
+ * one budget per client.
+ */
+let contexts = 0;
+
+export function clientKey(): string {
+  contexts += 1;
+  return `10.0.${Math.floor(contexts / 256) % 256}.${contexts % 256}`;
+}
+
+/**
  * A browser context that is signed out.
  *
  * `browser.newContext()` inherits the project's storageState — the setup
@@ -41,6 +65,7 @@ export async function newSignedOutContext(browser: Browser) {
   const context = await browser.newContext({
     baseURL: BASE_URL,
     storageState: { cookies: [], origins: [] },
+    extraHTTPHeaders: { "x-forwarded-for": clientKey() },
   });
 
   return { context, page: await context.newPage() };
