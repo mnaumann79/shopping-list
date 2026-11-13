@@ -3806,31 +3806,49 @@ sees it. Vercel forwards the client's own value only with the Enterprise
 plan's Trusted Proxy feature; if that is ever enabled, the key becomes the
 client's to choose, and the route has to be revisited.
 
-**With no proxy in front — the local run and the CI job — the header is
-absent.** The key is then the literal `"unknown"`, and every caller shares
-one bucket. That is the strict direction: one noisy caller costs the others
-their client quota, while the per-address quota still protects the
-passwords. The end-to-end tests give each browser profile an address of its
-own, so the limiter is exercised the way a deployment exercises it.
+**With no proxy in front — the local run and the CI job — Next.js fills the
+header from the socket address.** A missing `x-forwarded-for` becomes the
+socket's remote address (Next.js 16.2.11,
+`next/dist/server/base-server.js`), and a value the caller supplied is kept
+as it is. So the key is the socket's address, and every caller on the same
+machine shares one bucket: the strict direction, where one noisy caller
+costs the others their client quota while the per-address quota still
+protects the passwords. But a client that reaches the server **directly**
+can send its own `x-forwarded-for` and rotate it, so the per-client quota
+does not hold there — the per-address quota is what protects the passwords.
+The end-to-end tests give each browser profile an address of its own, so the
+limiter is exercised the way a deployment exercises it.
 
-**The one deployment that would break this** is a proxy that forwards the
-client's `x-forwarded-for` unchanged — neither appending to it nor replacing
-it. Then the rightmost entry is the client's own and the client picks its
-own key. If the cutover puts the application behind such a proxy, the client
-key has to be revisited: while the transitional route is there, and before it
-is decommissioned (step 8).
+**A deployment that is reachable without the platform rewriting the header
+breaks this.** The route trusts the rightmost entry, and Next.js keeps a
+value the caller supplied, so where the caller can reach the server directly
+— a host of its own, or a proxy that forwards the client's value unchanged
+— the client chooses its own key and can rotate it to escape the per-client
+quota. The per-address quota still protects the passwords. If the
+application ever moves to such a deployment, the client key has to be
+revisited: while the transitional route is there, and before it is
+decommissioned (step 8).
 
 #### What a full set of counters means
 
-The counters are held in memory and capped at a thousand per map. A map that
-holds a thousand counters with failures refuses the addresses it has no room
-for, with the same 429 every other refusal gives — and the counters that
-already exist keep working, so a flood does not lock out the addresses it
-has already counted. Filling it takes about a hundred distinct client
-identities, each spending its own quota of ten failures on ten distinct
-addresses; with no proxy in front, one identity's ten failures are not
-enough to fill anything. The trade-off is deliberate: the smaller failure is
-the one that cannot be repeated at will against one address.
+The counters are held in memory and capped at a thousand per map, and `admit`
+checks the client map first. While the client map is full, a **new** client
+key is refused — even for an address that already has a counter of its own —
+and while the email map is full, a **new** address is refused. The counters
+for keys that already exist in their own map keep working: a user who has
+already failed once is not locked out by somebody else's flood, and the
+target of a flood keeps its quota.
+
+The two maps fill differently. The client map holds one counter per identity,
+so it takes **a thousand** distinct client identities to fill, each making at
+least one failure. The email map holds one counter per address, so a hundred
+identities can fill it by spending their quota of ten on ten distinct
+addresses each — but the client map is checked first, so the refusal that
+reaches every caller is the one the thousand identities buy. With no proxy in
+front, every caller shares the key `"unknown"`, so one identity's quota of
+ten failures is not enough to fill either map. The trade-off is deliberate:
+the smaller failure is the one that cannot be repeated at will against one
+address.
 
 #### What the rehearsal found
 
