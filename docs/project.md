@@ -1715,16 +1715,40 @@ schema, because that is where `auth.uid()` lives:
 GRANT authenticated TO app;
 ```
 
-**`GRANT USAGE ON SCHEMA auth TO app` does not work here, and it fails
-quietly.** The `auth` schema belongs to `supabase_admin`, and the
-instance's `postgres` role is not a superuser, so the grant is refused with
-the warning *"no privileges were granted for \"auth\""* — and grants nothing
-at all. The role membership is what works: it carries `USAGE` on the schema
-and `EXECUTE` on `auth.uid()`. `authenticated` does not have `BYPASSRLS`, so
-inheriting it does not weaken the policies. The CI job asserts
-`has_function_privilege('app', 'auth.uid()', 'EXECUTE')` and fails when the
-grant is missing, because the failure otherwise shows up at runtime, on
-every request, as *"permission denied for schema auth"*.
+**A grant on the `auth` schema grants nothing here, and it says so
+quietly.** The `auth` schema belongs to `supabase_admin`, and the migrating
+role has no grant option on it. A grant issued by hand — to `authenticated`
+or straight to `app` — is **accepted**: the statement succeeds, and
+PostgreSQL declines the grant in a warning, so nothing is granted at all.
+Measured on the development instance (`eaawnwfrkvjbdigyasbk`, PostgreSQL
+17.11):
+
+```console
+GRANT USAGE ON SCHEMA auth TO authenticated;
+WARNING:  no privileges were granted for "auth"
+GRANT
+```
+
+`auth.uid()` answers *"no privileges were granted for \"uid\""*, and a
+privilege the grantee does not already hold answers the same way — so the
+warning is the only signal that the grant did nothing. The error *"permission
+denied for schema auth"* belongs to a different statement, creating an
+object in the schema, which the migrations never attempt; against
+`auth.users` the error is *"must be owner of table users"*.
+
+**The migrations do not even attempt it.** The two grants sit behind a guard
+— the migrating role must own the `auth` schema — and on an instance the
+schema belongs to `supabase_admin`, so the block is skipped: no statement
+runs, no warning is emitted, nothing fails. The role membership is what
+works, and it works because `authenticated` already holds `USAGE` on the
+schema and `EXECUTE` on `auth.uid()`, granted by Supabase. `authenticated`
+does not have `BYPASSRLS`, so inheriting it does not weaken the policies.
+
+The CI job asserts `has_function_privilege('app', 'auth.uid()', 'EXECUTE')`
+and fails when the grant is missing, because the failure otherwise shows up
+at runtime, on every request, as *"permission denied for schema auth"*. The
+account is in `db/migrations/0008_auth_schema_grant_account.sql`, which also
+says why 0005's own comment was not corrected in place.
 
 **What RLS does and does not replace.** It replaces nothing in §12.5 and
 §12.6 — the application-layer scope helper stays, because it is what

@@ -1,0 +1,53 @@
+-- What a hosted instance does with the `auth`-schema grants, measured.
+--
+-- The comment in 0005 says the grants "are refused with 'permission denied
+-- for schema auth'". Measured on the development instance
+-- (eaawnwfrkvjbdigyasbk, PostgreSQL 17.11) that is not what happens, and the
+-- difference matters: a grant that fails is a loud failure, and a grant that
+-- is accepted and grants nothing is a silent one.
+--
+-- The measurements, taken as the migrating role on that instance:
+--
+--   GRANT USAGE ON SCHEMA auth TO authenticated;
+--     WARNING:  no privileges were granted for "auth"
+--     GRANT
+--
+--   GRANT EXECUTE ON FUNCTION auth.uid() TO authenticated;
+--     WARNING:  no privileges were granted for "uid"
+--     GRANT
+--
+--   GRANT CREATE ON SCHEMA auth TO app;
+--     WARNING:  no privileges were granted for "auth"
+--     GRANT
+--
+-- So the statement succeeds and the grant is declined: PostgreSQL says so in
+-- a warning, and the command still carries the GRANT tag. Nothing is
+-- granted. The error "permission denied for schema auth" belongs to a
+-- different statement - creating an object in the schema:
+--
+--   CREATE TABLE auth.probe(id int);
+--     ERROR:  permission denied for schema auth
+--
+-- and altering GoTrue's table is refused with its own message:
+--
+--   ALTER TABLE auth.users ADD COLUMN probe int;
+--     ERROR:  must be owner of table users
+--
+-- None of that is what 0005 does on an instance. The two grants sit behind a
+-- guard - the migrating role must own the `auth` schema - and on an instance
+-- the schema belongs to supabase_admin, so the block does nothing at all.
+-- The migration neither warns nor fails: it has nothing to do. The
+-- privileges reach the app role through `GRANT authenticated TO app`, because
+-- `authenticated` already holds USAGE on the schema and EXECUTE on
+-- auth.uid(), granted by Supabase.
+--
+-- Why this file exists rather than a corrected comment in 0005: the runner
+-- records a SHA-256 checksum of every migration it applies and treats a
+-- changed file as an error - "0005_rls_and_app_role.sql changed after it was
+-- applied ... Restore the applied file and write a new migration for the
+-- change." A comment-only edit to 0005 would make `pnpm db:migrate` fail in
+-- every environment that has applied it: the local stack, the development
+-- instance and the cutover. The runner's own instruction is the answer.
+--
+-- This migration changes nothing. It grants nothing, revokes nothing and
+-- creates nothing; it is the place where the account of 0005 lives.
