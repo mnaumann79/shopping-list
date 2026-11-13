@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  closePool,
   inviteFromSettings,
   INVITE_TIMEOUT,
   listHouseholds,
@@ -11,6 +12,10 @@ import {
   uniqueEmail,
   waitForSettingsReady,
 } from "./helpers";
+
+// This spec reads the invitation table, so it opens the Postgres pool. The
+// teardown closes it again, so the worker does not keep the socket open.
+test.afterAll(closePool);
 
 // HSHD-02: Admin can invite by email
 // HSHD-04: User can join via email invite

@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  closePool,
   generateJoinLink,
   joinPath,
   joinToken,
@@ -13,6 +14,10 @@ import {
   uniqueEmail,
   waitForSettingsReady,
 } from "./helpers";
+
+// This spec reads the join-link table, so it opens the Postgres pool. The
+// teardown closes it again, so the worker does not keep the socket open.
+test.afterAll(closePool);
 
 // HSHD-03: Admin can generate shareable join link
 // HSHD-04: User can join via join link
