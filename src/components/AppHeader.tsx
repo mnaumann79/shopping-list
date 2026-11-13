@@ -8,6 +8,7 @@ import { buttonVariants } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
+import { HouseholdSwitcher } from '@/components/household-switcher'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,7 +38,11 @@ export function AppHeader({ userName, variant = 'default' }: AppHeaderProps) {
     <header className="border-b border-border bg-background px-4 flex items-center justify-between min-h-13">
       {/* Left zone */}
       {variant === 'default' ? (
-        <span className="text-base font-semibold">Shopping List</span>
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="text-base font-semibold">Shopping List</span>
+          {/* The household the user is shopping for */}
+          <HouseholdSwitcher />
+        </div>
       ) : (
         <div className="flex items-center gap-2">
           <Link
