@@ -16,6 +16,18 @@ export type Scope = {
 export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /**
+ * The session's user id, and nothing else.
+ *
+ * **The scope helpers take the session's user id, never one that came in
+ * with the request.** A caller that passed a client-supplied id would set
+ * the claims to somebody else, and the policies would answer for them: the
+ * same hole the bare `user_id = auth.uid()` policy had, moved one layer up.
+ */
+export type Caller = {
+  userId: string; // auth.uid() — a uuid
+};
+
+/**
  * The only sanctioned way to read or write a household-scoped table.
  *
  * One transaction, and everything that makes it a scoped one happens inside
@@ -56,6 +68,60 @@ export async function withScope<T>(
     );
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${scope.householdId}::uuid::text, 0))`,
+    );
+    return fn(tx);
+  });
+}
+
+/**
+ * Read a household-scoped table without a household.
+ *
+ * The members list and the list of the caller's own households are not scoped
+ * to one household — they are the query that finds out which household to
+ * scope to. So this sets the claims and **not** `app.current_household`, and
+ * the policies narrow the transaction by the membership alone.
+ *
+ * **The transaction is read-only.** `SET TRANSACTION READ ONLY` is its first
+ * statement, and that is not a convention: a write inside a scope-less
+ * transaction would take no advisory lock, which is what ADR-05 exists to
+ * prevent. `withScope` stays the only path for anything that writes.
+ */
+export async function withMembershipScope<T>(
+  caller: Caller,
+  fn: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  const claims = JSON.stringify({ sub: caller.userId, role: "authenticated" });
+
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`set transaction read only`);
+    await tx.execute(
+      sql`select set_config('request.jwt.claims', ${claims}, true)`,
+    );
+    return fn(tx);
+  });
+}
+
+/**
+ * Write without a household.
+ *
+ * The join link and the invitation acceptance are the two operations the
+ * policies cannot express: the caller is not a member of the household yet,
+ * so the membership policy refuses the row the flow exists to write. Both go
+ * through a `SECURITY DEFINER` function instead, with the owner's rights.
+ *
+ * This sets the claims and **not** `app.current_household` — the function
+ * resolves the household — and it is writable, because the flow it serves
+ * writes.
+ */
+export async function withClaimsOnly<T>(
+  caller: Caller,
+  fn: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  const claims = JSON.stringify({ sub: caller.userId, role: "authenticated" });
+
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`select set_config('request.jwt.claims', ${claims}, true)`,
     );
     return fn(tx);
   });
