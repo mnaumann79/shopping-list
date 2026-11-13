@@ -6,10 +6,19 @@
 -- The auth schema and GoTrue's users table: on the Supabase instance GoTrue
 -- owns both and this file adds nothing. On a plain PostgreSQL they are the
 -- smallest thing the foreign keys can point at.
-CREATE SCHEMA IF NOT EXISTS "auth";
-CREATE TABLE IF NOT EXISTS "auth"."users" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL
-);
+--
+-- The block is skipped where the schema already exists, because there the
+-- postgres role has USAGE on it but not CREATE, and a "CREATE TABLE IF NOT
+-- EXISTS" would be refused before PostgreSQL looked at the table.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+    CREATE SCHEMA "auth";
+    CREATE TABLE "auth"."users" (
+      "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL
+    );
+  END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS "account" (
 	"id" text PRIMARY KEY NOT NULL,
 	"account_id" text NOT NULL,

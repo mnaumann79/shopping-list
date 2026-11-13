@@ -12,14 +12,26 @@
 
 -- The auth schema and GoTrue's users table.
 --
--- On the Supabase instance GoTrue owns both, and these statements do nothing.
--- On a plain PostgreSQL - a local development database, a CI container - they
--- create the smallest table the foreign keys below can point at, so that the
+-- On the Supabase instance GoTrue owns both, and this statement does nothing.
+-- On a plain PostgreSQL - a local development database, a CI container - it
+-- creates the smallest table the foreign keys below can point at, so that the
 -- schema is the same in every environment.
-CREATE SCHEMA IF NOT EXISTS "auth";
-CREATE TABLE IF NOT EXISTS "auth"."users" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL
-);
+--
+-- The whole block is skipped where the schema already exists, and that is not
+-- only a convenience: on the instance the auth schema belongs to
+-- supabase_admin, and the postgres role has USAGE on it but not CREATE. A
+-- "CREATE TABLE IF NOT EXISTS" would still be refused - the privilege check
+-- comes before the check for the table - with "permission denied for schema
+-- auth", on an instance that already has everything it needs.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') THEN
+    CREATE SCHEMA "auth";
+    CREATE TABLE "auth"."users" (
+      "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL
+    );
+  END IF;
+END $$;
 
 -- The household is the tenant (§9.2).
 CREATE TABLE IF NOT EXISTS "households" (
