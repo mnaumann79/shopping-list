@@ -163,8 +163,15 @@ jobs:
       # shape of issue the perf-audit workflow opens when its audit fails.
       # The label is created if it is not there yet, so the job does not
       # depend on somebody having prepared the repository for it.
+      #
+      # A pull request from a fork, and a Dependabot pull request, are given
+      # a read-only token however much this workflow asks for `issues: write`.
+      # The step is allowed to fail there — the failure that matters is the
+      # suite's — and the trusted reporter in
+      # .github/workflows/e2e-report.yml opens the issue in that case.
       - name: Open or update the journey-failure issue
         if: ${{ always() && steps.suite.conclusion == 'failure' }}
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           script: |
