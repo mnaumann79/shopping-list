@@ -3492,12 +3492,17 @@ session, one level up.
 - **What the running guard does.** It reads the session cookie's *presence*.
   An unauthenticated visitor to a protected prefix (`/dashboard`,
   `/household`, `/settings`) is redirected to `/sign-in` **with** a `returnTo`
-  parameter naming the path they asked for; a visitor with a cookie on an
-  auth route (`/sign-in`, `/sign-up`) is redirected to `/dashboard`. Measured
-  against the built app: `/sign-up` with a session cookie → **307 →
-  `/dashboard`**; `/dashboard` without one → **307 →
-  `/sign-in?returnTo=%2Fdashboard`**. Those are the file's two branches, and
-  nothing else produces that shape.
+  parameter naming the path they asked for. Measured against the build of
+  P0S-T21's branch (pull request #48), which is the change the merged result
+  carries: `/dashboard` without a session answers **307 →
+  `/sign-in?returnTo=%2Fdashboard`**.
+- **The guard has one branch.** It used to have a second one — a visitor with
+  a cookie on an auth route (`/sign-in`, `/sign-up`) was redirected to
+  `/dashboard` — and it does not have it any more: that branch is what caught
+  a visitor whose access token had lapsed in a redirect loop, and P0S-T21
+  (pull request #48) removed it. Measured against the same build: `/sign-up`
+  with a session cookie answers **200**, not a redirect — the evidence for
+  the branch's removal.
 - **It is an optimistic guard, and it is not the authorization layer.** The
   file's own security note is right: the cookie's presence is not a session,
   and the session must also be validated server-side. SEC-01 stands: every
@@ -3508,11 +3513,15 @@ session, one level up.
   the `returnTo`; the layout's `redirect("/sign-in")` does not, so a visitor
   the layout sends to the sign-in page does not come back to the page they
   asked for.
-- **A visitor whose access token has lapsed is caught in a redirect loop.**
-  The middleware bounces `/sign-in` → `/dashboard` on the cookie's presence
-  while the layout's server-side check bounces `/dashboard` → `/sign-in`.
-  This is pre-existing — the middleware before the auth swap read the
-  cookie's presence the same way — and it is being fixed in task P0S-T21.
+- **The redirect loop a lapsed access token caused is gone.** The guard used
+  to bounce `/sign-in` → `/dashboard` on the cookie's presence while the
+  layout's server-side check bounced `/dashboard` → `/sign-in`, so a visitor
+  whose access token had lapsed was caught between the two. The loop was
+  pre-existing — the guard read the cookie's presence the same way before the
+  auth swap — and it ended when the guard stopped redirecting on the cookie's
+  presence: the sign-in page and the sign-up page own that check now, and they
+  ask the browser for the session, so a lapsed token can be renewed instead
+  of sending the visitor round in circles.
 - **What happens to the file is a cutover decision.** Whether the guard moves
   to `src/middleware.ts`, is replaced, or is deleted is decided with the
   cutover (§13.2; D-11, backlog item B1-T01). Until it is decided the file
