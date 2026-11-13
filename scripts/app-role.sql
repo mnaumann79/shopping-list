@@ -27,10 +27,14 @@ BEGIN
   END IF;
 
   -- The policies key on auth.uid(), which lives in the `auth` schema. That
-  -- schema belongs to supabase_admin, so the migrations cannot grant on it
-  -- directly — the grant is refused with a warning and grants nothing. The
-  -- role membership is what works, and this check makes the job fail when it
-  -- is missing instead of failing later, at runtime, on every request.
+  -- schema belongs to supabase_admin, so the migrations do not grant on it:
+  -- their guard is the schema's ownership, and on an instance it is not
+  -- theirs. A grant issued by hand is accepted — the statement succeeds, and
+  -- PostgreSQL declines the grant in a warning, `no privileges were granted
+  -- for "auth"` — and it grants nothing. The role membership is what works,
+  -- and this check makes the job fail when it is missing instead of failing
+  -- later, at runtime, on every request. The account is in
+  -- db/migrations/0008_auth_schema_grant_account.sql.
   IF NOT has_function_privilege('app', 'auth.uid()', 'EXECUTE') THEN
     RAISE EXCEPTION
       'the app role cannot execute auth.uid() — the policies would fail with "permission denied for schema auth"';
