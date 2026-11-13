@@ -40,8 +40,14 @@ os.environ["PGOPTIONS"] = "-c search_path=fixture"
 RESET_SCHEMA = "--reset-schema" in sys.argv[1:]
 
 def psql_args(extra):
-    """psql arguments for the target database."""
-    return ["psql", DATABASE_URL, "-t", "-A", "-F", "|"] + extra
+    """psql arguments for the target database.
+
+    `-X` keeps psql from reading the user's startup file. A `.psqlrc` that
+    sets `search_path` would override the connection's `PGOPTIONS`, and the
+    fixture's statements would run against another schema than the one it
+    owns.
+    """
+    return ["psql", DATABASE_URL, "-X", "-t", "-A", "-F", "|"] + extra
 
 # --- extract the statements from the document -----------------------------
 # The extracted files live in a temp directory: the repository holds the
@@ -226,7 +232,7 @@ def load_schema():
     destructive path - dropping the fixture's schema and rebuilding it - is
     opt-in, because it is the one thing here that destroys rows.
     """
-    args = ["psql", DATABASE_URL, "-v", "ON_ERROR_STOP=1"]
+    args = ["psql", DATABASE_URL, "-X", "-v", "ON_ERROR_STOP=1"]
     if RESET_SCHEMA:
         args += ["-v", "fixture_reset=1"]
     args += ["-f", str(HERE / "schema.sql")]
@@ -749,7 +755,7 @@ rc2,out2 = run({"$op_type":"'item.bulkArchive'","$fields":"'{archivedAt}'::text[
                 "$payload":BULK1_PAYLOAD,"$cas_version":"3","$op_base_version":"3",
                 "$entity_id":"'22222222-2222-4222-8222-222222222222'",
                 "$op_id":"'55555555-5555-4555-8555-555555555555'"}, ledger=False)
-check("the second item's statement does NOT abort the batch", rc2!=99, out2[:300])
+check("the second item's statement executes", rc2==0, out2[:300])
 # The ledger row is written ONCE, after both candidates: the envelope is
 # derived from the rows the batch wrote, so it has to be derived after them.
 rc3,out3 = write_ledger({"$op_type":"'item.bulkArchive'","$fields":"'{archivedAt}'::text[]",
