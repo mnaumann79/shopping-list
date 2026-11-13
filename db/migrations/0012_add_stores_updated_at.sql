@@ -1,0 +1,22 @@
+-- The stores table gets the column the application reads.
+--
+-- `0000_init.sql` creates the table with `CREATE TABLE IF NOT EXISTS`, so
+-- where the table already exists the statement is a no-op and the existing
+-- table keeps its own shape. The development instance's `stores` table was
+-- created before the migrations - by the application's own schema, which did
+-- not carry `updated_at` on it then - and it has five columns, in the
+-- application's order, with no sixth that was dropped: the column was never
+-- there. The migration found the table and left it as it was, and every
+-- read of `stores` against the instance failed:
+--
+--   ERROR:  42703: column "updated_at" does not exist
+--
+-- The application's schema declares the column (`src/db/schema/items.ts`),
+-- and the stores list the dashboard shows selects it, so the instance was
+-- not the schema the repository describes.
+--
+-- The statement is guarded, so it is a no-op on a database built from the
+-- migrations - where 0000 already created the column - and the fix
+-- everywhere else. It adds what is missing; it does not drop or recreate
+-- anything, and the table's rows are untouched.
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS updated_at timestamp DEFAULT now() NOT NULL;
