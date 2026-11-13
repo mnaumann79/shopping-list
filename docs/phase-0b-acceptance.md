@@ -17,7 +17,7 @@ board (P0S-T01 to P0S-T48); the plan's tasks are the table at the end.
 | --- | --- |
 | `lint, type-check, unit tests, build` (the required one) | green |
 | `supabase local stack, migrations, fixture, RLS` | green |
-| `playwright, reporting only` | the job **completes** now - it never did before P0S-T45, because every merge to main cancelled the run in flight. Its **specs** have still never run: the last completed run failed in the setup, and Playwright reported "168 did not run". Open: P0S-T43 |
+| `playwright, reporting only` | the job is no longer cancelled **while it runs**: P0S-T45 keeps a run on main from being cancelled by the next merge, and the newest run survives while superseded pending ones are dropped. **No run has completed under the new rule yet** - the first is still waiting for a runner - and the job's **specs have still never run**: the last completed run failed in the setup, and Playwright reported "168 did not run". Open: P0S-T43, P0S-T45 |
 
 ## The instance is the repository's schema
 
@@ -77,11 +77,14 @@ describes what the deployment actually needs:
 
 ## What is open
 
-- **The browser suite has never executed a spec.** The job completes now
-  (P0S-T45), but the specs have not run: the setup fails, and the helpers
+- **The browser suite has never executed a spec.** The job is no longer
+  cancelled while it runs (P0S-T45), but no run has completed under the new
+  rule yet, and a merge to main still cancels a run that is waiting for a
+  runner - so the first completed run needs a quiet main, or a run started by
+  hand. The specs themselves have not run: the setup fails, and the helpers
   read the tables directly as the application role with no claims (so they
   see nothing), call two endpoints that the auth swap removed, and poll a
-  legacy table the application stopped writing. P0S-T43.
+  legacy table the application stopped writing. P0S-T43, P0S-T45.
 - **The cutover has not been rehearsed against the instance** (P0S-T42).
 - **The root `middleware.ts` is being replaced** by a guard that validates
   the session and carries the destination (P0S-T32).
