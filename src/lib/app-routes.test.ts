@@ -9,8 +9,6 @@ import {
 describe("app-routes", () => {
   afterEach(() => {
     delete process.env.BETTER_AUTH_URL;
-    delete process.env.VERCEL_BRANCH_URL;
-    delete process.env.VERCEL_URL;
     delete process.env.NEXT_PUBLIC_APP_URL;
   });
 
