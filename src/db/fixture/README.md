@@ -29,19 +29,28 @@ reference copies.
 
 **The drift check covers the three §10.8 statements and nothing else.**
 `schema.sql` is the §9 DDL: it is applied as it stands and not compared with
-the document, so a change to the DDL in the specification is not reported by
-the drift check — it shows up as a failing run instead.
+the document. A change to the DDL in the specification is therefore *not*
+reported by the drift check — and it does not necessarily fail a run either,
+because a scenario only notices a changed constraint or column when it
+exercises it. `schema.sql` is kept in step with the DDL by hand, like the
+reference copies are.
 
 ## Running it
 
 ```bash
 # against a local PostgreSQL
 createdb auditsync
-python3 src/db/fixture/verify.py
+DATABASE_URL=postgresql://postgres@127.0.0.1:5432/auditsync python3 src/db/fixture/verify.py
 
 # against the self-hosted Supabase instance
 DATABASE_URL=postgresql://... python3 src/db/fixture/verify.py
 ```
+
+`DATABASE_URL` is how the harness knows which database to write to, and it is
+not optional in practice: without it the harness connects as `postgres` at
+`127.0.0.1:5432`, which is not the database `createdb` made. With socket
+authentication as the operating-system user, `postgresql:///auditsync` works
+too.
 
 `schema.sql` is applied first — it is the specification's own §9 DDL, in the
 fixture's **own schema**, `fixture`. The fixture creates nothing else and
@@ -56,31 +65,38 @@ foreign keys that carry an actor id do.
 `psql` and `python3` must be on the path. Nothing else is needed — the
 harness is deliberately dependency-free.
 
-### The one destructive thing, and how to ask for it
+### The two destructive things, and how to ask for the second
 
-The default path only **creates** what is missing, so a run against a database
-that already holds a `fixture` schema is safe and idempotent. To start from
-scratch — after the DDL changed, say — ask for the reset on purpose:
+**Every run deletes the rows in the `fixture` schema.** The scenarios need a
+known state, so the run empties the fixture's own tables before it starts.
+That is why the fixture wants a scratch database of its own: a run against a
+database that holds fixture data loses that data.
+
+The **schema** is only dropped when the reset is asked for on purpose:
 
 ```bash
 python3 src/db/fixture/verify.py --reset-schema
 # or, by hand:
-psql -v fixture_reset=1 -f src/db/fixture/schema.sql
+psql "$DATABASE_URL" -v fixture_reset=1 -f src/db/fixture/schema.sql
 ```
 
-Both drop **the fixture's own schema** and rebuild it. Nothing else. The
-reset is opt-in because dropping a schema is the one destructive thing here;
-without the flag, no object is ever dropped.
+The reset drops the `fixture` schema with `CASCADE` and rebuilds it. `CASCADE`
+means anything **outside** the schema that depends on a fixture table goes
+with it — a view in `public` built on `fixture.items`, say. Nothing else is
+dropped, and without the flag no schema is ever dropped.
+
+The reset is opt-in because it is the one thing here that destroys a
+structure rather than the rows the run was going to delete anyway.
 
 ## What it covers
 
-**42 scenarios in 11 groups, 248 assertions.**
+**45 scenarios in 11 groups, 271 assertions.**
 
 | Group | Scenarios | What it proves |
 | --- | --- | --- |
-| FIELD | 9 | per-field resolution; the note and the category are fields like any other; a lost CAS leaves the row untouched; a stale uncheck does not reverse an archive |
-| OVERRIDE | 2 | an override beats check-wins, and the device whose value it replaced is told |
-| PAIR | 9 | the per-tag rule of §11, in both directions; the snapshot carries a removed tag |
+| FIELD | 11 | per-field resolution; the note and the category are fields like any other; a concurrent check wins over an uncheck; a winning update tells the device whose value it displaced; a lost CAS leaves the row untouched; a stale uncheck does not reverse an archive |
+| OVERRIDE | 3 | an override beats check-wins, the device whose value it replaced is told, and an override that unchecks clears the archive |
+| PAIR | 9 | the per-tag rule of §11, in both directions; the snapshot carries a removed tag; a concurrent removal that wins tells the device whose add it discarded |
 | DELETE | 1 | a delete tombstones the row, and the tombstone reaches the change log |
 | ARCHIVE | 5 | archive-wins-with-reversal, and its order-independence |
 | UNARCHIVE | 2 | an unarchive clears the archive, and the bulk form clears every candidate |

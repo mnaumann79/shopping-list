@@ -74,27 +74,37 @@ def acquire_lock():
     refuses to start rather than waiting for the first one - a fixture run
     that waits is a fixture run nobody is watching.
 
-    The lock is held by a session that stays open, and it is released when
-    this process ends.
-
-    The two statements are two `-c` options on purpose. In one `-c` they are
-    one implicit transaction, and psql prints the result of the first only
-    when the whole string is done - so the read below would wait an hour for
-    the sleep, and the run would never start.
+    The holder is a psql session that reads its statements from a pipe and
+    then waits for the next one: it holds the lock and nothing else. When the
+    run ends, the pipe is closed, psql reads the end of it, exits, and the
+    lock goes with the session. A run that is killed leaves no lock behind -
+    a lock held by a session that is still sleeping is a lock the next run
+    refuses to take.
     """
     holder = subprocess.Popen(
-        ["psql", DATABASE_URL, "-q", "-t", "-A",
-         "-c", "select pg_try_advisory_lock(874512302);",
-         "-c", "select pg_sleep(3600);"],
-        stdout=subprocess.PIPE, text=True)
+        ["psql", DATABASE_URL, "-X", "-q", "-t", "-A"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    holder.stdin.write("select pg_try_advisory_lock(874512302);\n")
+    holder.stdin.flush()
     taken = holder.stdout.readline().strip()
     if taken != "t":
-        holder.kill()
+        release_lock(holder)
         print("Another fixture run holds the lock on this database.")
         print("Wait for it to finish, or point DATABASE_URL at another database.")
         sys.exit(1)
-    atexit.register(holder.kill)
+    atexit.register(release_lock, holder)
     return holder
+
+def release_lock(holder):
+    """End the holder's session: the pipe closes, psql exits, the lock goes."""
+    try:
+        holder.stdin.close()
+    except (BrokenPipeError, ValueError):
+        pass
+    try:
+        holder.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        holder.kill()
 
 ITEM   = "11111111-1111-4111-8111-111111111111"
 ITEM2  = "99999999-1111-4111-8111-111111111111"
@@ -378,6 +388,25 @@ check("the overriding device has no conflict of its own",
       q("SELECT count(*) FROM entity_conflicts WHERE device_id='%s'" % DEV_A)=="0",
       q("SELECT count(*) FROM entity_conflicts WHERE device_id='%s'" % DEV_A))
 
+print("\nOVERRIDE 3 - a winning override that unchecks clears the archive")
+# The archive's premise is that the item is checked. An override that wins
+# and unchecks it takes the premise away, so the archive goes with it - and
+# the archiver is told (§11).
+reset(); seed_item(version=4, is_checked="true", archived_at="now()",
+                   field_meta='{"isChecked":{"v":4,"lamport":9,"device":"%s"},'
+                              '"archivedAt":{"v":4,"lamport":20,"device":"%s"}}' % (DEV_B, DEV_A))
+rc,out = run({"$op_type":"'item.override'","$fields":"'{isChecked}'::text[]",
+              "$payload":"'{\"isChecked\":false}'::jsonb","$cas_version":"4",
+              "$op_base_version":"3","$op_lamport":"10","$device_id":"'%s'" % DEV_B})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+check("the item is UNCHECKED", "ck=false" in row, row)
+check("the archive was cleared - its premise no longer holds", "arch=none" in row, row)
+check("the version advanced to 5", "/ v5 " in row, row)
+c = q("SELECT field||'|'||resolution||'|'||device_id FROM entity_conflicts")
+check("the archiver is told its archive was reversed", c.startswith("archivedAt|rejected|"), c)
+check("the loser is the archiving device", c.split("|")[2]==DEV_A, c)
+
 print("\nFIELD 4 - a tombstoned row rejects every write (delete-wins, terminal)")
 reset(); seed_item(version=4, deleted_at="now()")
 rc,out = run({"$cas_version":"4","$op_base_version":"1"})
@@ -452,6 +481,44 @@ check("a conflict row was written", c.startswith("note|"), c)
 check("the resolution is lww", c.endswith("lww"), c)
 check("the conflict carries both values", '"My note"' in c and '"Their note"' in c, c)
 
+print("\nFIELD 9 - a concurrent CHECK wins over an uncheck")
+# The item is unchecked by B at version 4; A checks from the older base 3.
+# The base-version gate belongs to the UNCHECK (§11): a check always applies.
+reset(); seed_item(version=4, is_checked="false",
+                   field_meta='{"isChecked":{"v":4,"lamport":20,"device":"%s"}}' % DEV_B)
+rc,out = run({"$op_type":"'item.check'","$fields":"'{isChecked}'::text[]",
+              "$payload":"'{\"isChecked\":true}'::jsonb","$cas_version":"4",
+              "$op_base_version":"3","$op_lamport":"10","$device_id":"'%s'" % DEV_A})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+check("the item is CHECKED", "ck=true" in row, row)
+check("the version advanced to 5", "/ v5 " in row, row)
+check("one change-log row", q("SELECT count(*) FROM sync_changes")=="1")
+check("no conflict - the check won", q("SELECT count(*) FROM entity_conflicts")=="0")
+
+print("\nFIELD 10 - a winning concurrent update tells the device whose value it displaced")
+# B wrote the name at version 4; A writes from the older base 3 at a higher
+# lamport and wins. A's value is displaced, and A has to hear about it
+# (FR-23): a losing edit is never discarded without a record.
+reset(); seed_item(version=4, name="'Their name'",
+                   field_meta='{"name":{"v":4,"lamport":20,"device":"%s"}}' % DEV_B)
+rc,out = run({"$fields":"'{name}'::text[]",
+              "$payload":"'{\"name\":\"My name\"}'::jsonb",
+              "$cas_version":"4","$op_base_version":"3","$op_lamport":"30",
+              "$device_id":"'%s'" % DEV_A})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+check("the winner's value applied", "My name" in row, row)
+check("the version advanced to 5", "/ v5 " in row, row)
+c = q("SELECT field||'|'||resolution||'|'||device_id||'|'||local_value::text"
+      " FROM entity_conflicts")
+check("a conflict row was written", c.startswith("name|"), c)
+check("the resolution is lww", "|lww|" in c, c)
+check("the conflict is addressed to the displaced device", "|"+DEV_B+"|" in c, c)
+check("the displaced value is recorded", "Their name" in c, c)
+check("the winner's own response carries no conflict",
+      conflicts_of(out)==[], str(conflicts_of(out))[:300])
+
 print("\nDELETE 1 - a delete tombstones the row")
 reset(); seed_item(version=1)
 rc,out = run({"$op_type":"'item.delete'","$fields":"'{deletedAt}'::text[]",
@@ -506,7 +573,13 @@ check("statement executes", rc==0, out[:200])
 p = pairs()
 check("the pair was tombstoned", STORE in p and "/del=set" in p, p)
 check("the item version advanced", "/ v2 " in item_row(), item_row())
-check("no conflict - the removal won", q("SELECT count(*) FROM entity_conflicts")=="0")
+c = q("SELECT field||'|'||resolution||'|'||device_id||'|'||winner_device_id FROM entity_conflicts")
+check("a conflict row was written", c.startswith("storeIds|"), c)
+check("the resolution is removal_wins", "|removal_wins|" in c, c)
+check("the conflict is addressed to the device whose add was discarded",
+      "|"+DEV_B+"|" in c, c)
+check("the remover's own response carries no conflict",
+      conflicts_of(out)==[], str(conflicts_of(out))[:300])
 
 print("\nPAIR 4 - a CONCURRENT re-add against a tombstone is REFUSED")
 reset(); seed_item()
@@ -946,25 +1019,36 @@ reset()
 # hashtextextended takes text, and household_id is a uuid (§9.1a), so the
 # parameter is cast. The statement must succeed, must be deterministic for
 # the same household, and must differ between households.
-lock_sql = ("SELECT hashtextextended('%s'::text, 0), "
-            "pg_advisory_xact_lock(hashtextextended('%s'::text, 0))" % (HH, HH))
-rc = subprocess.run(PG_OUT+["-v","ON_ERROR_STOP=1","-c",lock_sql], capture_output=True, text=True)
+#
+# The lock is taken and released in ONE session: the acquisition, the count
+# while the transaction is open and the count after the commit have to be the
+# same backend's, or the assertion says nothing about the lock it means to
+# check. The count filters on this session's own pid, so the fixture's
+# run-lock - a session-level lock in another session - is not counted.
+lock_sql = (
+    "BEGIN;"
+    "SELECT 'key=' || hashtextextended('%s'::text, 0);"
+    "SELECT pg_advisory_xact_lock(hashtextextended('%s'::text, 0));"
+    "SELECT 'held=' || count(*) FROM pg_locks"
+    " WHERE locktype='advisory' AND pid=pg_backend_pid();"
+    "COMMIT;"
+    "SELECT 'released=' || count(*) FROM pg_locks"
+    " WHERE locktype='advisory' AND pid=pg_backend_pid();" % (HH, HH))
+rc = subprocess.run(PG_OUT+["-q","-v","ON_ERROR_STOP=1","-c",lock_sql], capture_output=True, text=True)
 check("the lock statement executes", rc.returncode==0, (rc.stdout+rc.stderr).strip()[:200])
-parts = rc.stdout.strip().split("|")
-check("it yields a 64-bit lock key", len(parts)>0 and parts[0].lstrip("-").isdigit() and abs(int(parts[0])) < 2**63,
-      parts[0] if parts else "")
+lines = [l for l in rc.stdout.strip().split("\n") if l]
+kv = dict(l.split("=", 1) for l in lines if "=" in l)
+key = kv.get("key", "")
+check("it yields a 64-bit lock key",
+      key.lstrip("-").isdigit() and abs(int(key)) < 2**63, key)
 same = subprocess.run(PG_OUT+["-c","SELECT hashtextextended('%s'::text, 0)" % HH], capture_output=True, text=True).stdout.strip()
-check("the same household yields the same key", same == parts[0], "%s vs %s" % (same, parts[0]))
+check("the same household yields the same key", same == key, "%s vs %s" % (same, key))
 other = subprocess.run(PG_OUT+["-c","SELECT hashtextextended('%s'::text, 0)" % "00000000-0000-4000-8000-000000000002"],
                         capture_output=True, text=True).stdout.strip()
-check("a different household yields a different key", other != parts[0], "%s vs %s" % (other, parts[0]))
+check("a different household yields a different key", other != key, "%s vs %s" % (other, key))
+check("the lock is held while the transaction is open", kv.get("held")=="1", kv.get("held",""))
 check("the lock is transaction-scoped, so it is released on commit",
-      # objsubid = 2 is a transaction-level advisory lock; objsubid = 1 is a
-      # session-level one, and the fixture's own run-lock is session-level -
-      # it is held for the whole run on purpose.
-      subprocess.run(PG_OUT+["-c","SELECT count(*) FROM pg_locks"
-                             " WHERE locktype='advisory' AND objsubid = 2"],
-                     capture_output=True, text=True).stdout.strip() == "0")
+      kv.get("released")=="0", kv.get("released",""))
 
 print("\nCREATE 1 - item.create writes the item AND its tags")
 reset()
