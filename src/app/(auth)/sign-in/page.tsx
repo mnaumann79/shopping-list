@@ -1,12 +1,12 @@
 "use client";
 
-import { Suspense } from "react";
+import { Suspense, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { authClient } from "@/lib/auth-client";
+import { getSession, signInWithPassword } from "@/lib/auth-client";
 import {
   Card,
   CardContent,
@@ -35,25 +35,44 @@ type SignInValues = z.infer<typeof signInSchema>;
 function SignInPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const returnTo = searchParams.get("returnTo");
   const form = useForm<SignInValues>({
     resolver: zodResolver(signInSchema),
     defaultValues: { email: "", password: "" },
   });
 
-  async function onSubmit(values: SignInValues) {
-    const result = await authClient.signIn.email({
-      email: values.email,
-      password: values.password,
+  // A visitor who already has a session has no business on this page. The
+  // middleware that used to do this does not run — the application lives
+  // under `src/`, and Next.js only loads a middleware from `src/` — so the
+  // check lives here instead.
+  //
+  // It is also what makes a long idle session recoverable: the server reads
+  // the access token without refreshing it, so a token that expired while the
+  // browser was closed looks like no session at all. The browser still holds
+  // the refresh token, so it can renew the session and send the visitor on
+  // their way rather than making them sign in again.
+  useEffect(() => {
+    let cancelled = false;
+
+    getSession().then((session) => {
+      if (!cancelled && session) router.replace(returnTo ?? "/dashboard");
     });
 
-    if (result.error) {
+    return () => {
+      cancelled = true;
+    };
+  }, [router, returnTo]);
+
+  async function onSubmit(values: SignInValues) {
+    const { error } = await signInWithPassword(values.email, values.password);
+
+    if (error) {
       form.setError("root", {
         message: "Invalid email or password",
       });
       return;
     }
 
-    const returnTo = searchParams.get("returnTo");
     router.push(returnTo ?? "/dashboard");
   }
 

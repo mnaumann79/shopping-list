@@ -15,9 +15,9 @@ test.describe("Logout", () => {
   // persistence specs. Each logout spec gets a session of its own.
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test.beforeEach(async ({ page, request }) => {
+  test.beforeEach(async ({ page }) => {
     const email = uniqueEmail("logout");
-    await startOwnSession(page, request, { email, householdName: `Logout Household ${email}` });
+    await startOwnSession(page, { email, householdName: `Logout Household ${email}` });
 
     await page.goto("/dashboard");
     await expect(page).toHaveURL(/\/dashboard$/);

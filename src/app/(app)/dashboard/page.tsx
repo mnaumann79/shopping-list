@@ -11,7 +11,7 @@ export default async function DashboardPage() {
   const session = await getRequestSession();
   if (!session) redirect("/sign-in");
 
-  const orgId = session.session.activeOrganizationId;
+  const orgId = session.activeHouseholdId;
   if (!orgId) redirect("/onboarding");
 
   const scope = { userId: session.user.id, householdId: orgId };
@@ -25,7 +25,7 @@ export default async function DashboardPage() {
 
   return (
     <div className="bg-background min-h-screen">
-      <AppHeader userName={session.user.name} />
+      <AppHeader userName={session.user.name} activeHouseholdId={session.activeHouseholdId} />
       <main>
         <Suspense fallback={<ShoppingListSkeleton />}>
           <ShoppingList initialItems={initialItems} categories={categories} stores={storeList} />

@@ -10,7 +10,7 @@ export default async function HouseholdSettingsPage() {
   return (
     <div className="min-h-screen bg-background">
       <AppHeader variant="settings" userName={session.user.name} />
-      <HouseholdSettingsClient />
+      <HouseholdSettingsClient activeHouseholdId={session.activeHouseholdId} />
     </div>
   );
 }

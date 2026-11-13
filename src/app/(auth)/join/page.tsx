@@ -1,7 +1,7 @@
 "use client";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { authClient } from "@/lib/auth-client";
+import { getSession, setActiveHousehold } from "@/lib/auth-client";
 import {
   Card,
   CardHeader,
@@ -28,9 +28,9 @@ function JoinPageContent() {
     }
 
     async function handleJoin() {
-      const sessionResult = await authClient.getSession();
+      const session = await getSession();
 
-      if (!sessionResult.data) {
+      if (!session) {
         // Not logged in: preserve token, redirect to sign-up
         sessionStorage.setItem("pendingJoinToken", token!);
         router.push(`/sign-up?joinToken=${token}`);
@@ -61,8 +61,10 @@ function JoinPageContent() {
         }
 
         const data = await res.json();
-        // Set the joined household as active
-        await authClient.organization.setActive({ organizationId: data.householdId });
+        // Set the joined household as active. The client asks the server to
+        // do it: the `sb-household` cookie is httpOnly, and the server checks
+        // the membership before it writes one.
+        await setActiveHousehold(data.householdId);
         setStatus("success");
         setTimeout(() => {
           router.push("/dashboard");

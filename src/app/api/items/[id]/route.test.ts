@@ -5,13 +5,14 @@ vi.mock("next/headers", () => ({
   headers: vi.fn().mockResolvedValue(new Headers()),
 }));
 
-// Mock auth
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      getSession: vi.fn(),
-    },
-  },
+// Mock the request seam.
+//
+// A route test fakes the caller here, not at the auth provider: what is
+// under test is the route's contract, not the provider's. The seam answers
+// with the caller and the household they are acting on.
+vi.mock("@/lib/request-auth", () => ({
+  requireActiveOrganization: vi.fn(),
+  requireRequestSession: vi.fn(),
 }));
 
 // Mock db
@@ -35,7 +36,7 @@ const { dbMock } = vi.hoisted(() => {
 
 vi.mock("@/db", () => ({ db: dbMock }));
 
-import { auth } from "@/lib/auth";
+import { requireActiveOrganization } from "@/lib/request-auth";
 import { PATCH, DELETE } from "@/app/api/items/[id]/route";
 import { NextRequest } from "next/server";
 
@@ -58,27 +59,37 @@ describe("PATCH /api/items/[id]", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }),
+    );
     const req = makeRequest("PATCH", { name: "Whole Milk" });
     const res = await PATCH(req, { params: Promise.resolve({ id: "item-1" }) });
     expect(res.status).toBe(401);
   });
 
   it("returns 400 when no fields provided", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const req = makeRequest("PATCH", {});
     const res = await PATCH(req, { params: Promise.resolve({ id: "item-1" }) });
     expect(res.status).toBe(400);
   });
 
   it("returns 200 and updates item fields", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const { db } = await import("@/db");
     vi.mocked(db.transaction).mockImplementationOnce(async (fn) => fn(db as never));
     vi.mocked(db.update).mockReturnValue({
@@ -104,10 +115,14 @@ describe("PATCH /api/items/[id]", () => {
   });
 
   it("returns 200 when checking an item", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const { db } = await import("@/db");
     vi.mocked(db.update).mockReturnValue({
       set: vi.fn().mockReturnValue({
@@ -134,10 +149,14 @@ describe("PATCH /api/items/[id]", () => {
   });
 
   it("returns 200 when unchecking an item", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const { db } = await import("@/db");
     vi.mocked(db.update).mockReturnValue({
       set: vi.fn().mockReturnValue({
@@ -164,10 +183,14 @@ describe("PATCH /api/items/[id]", () => {
   });
 
   it("returns 200 when restoring a cleared item", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const { db } = await import("@/db");
     const set = vi.fn().mockReturnValue({
       where: vi.fn().mockReturnValue({
@@ -199,10 +222,14 @@ describe("PATCH /api/items/[id]", () => {
   });
 
   it("returns 200 when updating storeIds only", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const { db } = await import("@/db");
 
     const selectWhere = vi.fn().mockResolvedValue([{ id: "store-1" }]);
@@ -244,17 +271,23 @@ describe("DELETE /api/items/[id]", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }),
+    );
     const req = makeRequest("DELETE");
     const res = await DELETE(req, { params: Promise.resolve({ id: "item-1" }) });
     expect(res.status).toBe(401);
   });
 
   it("returns 200 and soft-deletes item (sets isActive=false)", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const { db } = await import("@/db");
     vi.mocked(db.update).mockReturnValue({
       set: vi.fn().mockReturnValue({
