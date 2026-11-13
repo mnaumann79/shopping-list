@@ -7,10 +7,14 @@
 // instance does not run. The pin lives in supabase/config.toml; this script
 // compares the running server against it and fails when they differ.
 //
+// It shells out to psql rather than using the pg driver, so it needs nothing
+// installed: the check can run before the dependencies are in place, which is
+// where a gate like this belongs — before anything has been applied.
+//
 // Usage: DATABASE_URL=postgresql://... node scripts/ci/assert-postgres-version.mjs
 
 import { readFileSync } from 'node:fs'
-import pg from 'pg'
+import { execFileSync } from 'node:child_process'
 
 const configPath = new URL('../../supabase/config.toml', import.meta.url)
 const config = readFileSync(configPath, 'utf8')
@@ -27,13 +31,13 @@ if (!connectionString) {
   process.exit(1)
 }
 
-const client = new pg.Client({ connectionString })
-await client.connect()
+const versionNum = execFileSync(
+  'psql',
+  [connectionString, '-tAc', 'SHOW server_version_num'],
+  { encoding: 'utf8' },
+).trim()
 
-const { rows } = await client.query('SHOW server_version_num')
-await client.end()
-
-const actual = Math.floor(Number(rows[0].server_version_num) / 10000)
+const actual = Math.floor(Number(versionNum) / 10000)
 
 console.log(`pinned PostgreSQL major version: ${pinned}`)
 console.log(`running PostgreSQL major version: ${actual}`)
