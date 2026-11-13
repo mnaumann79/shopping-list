@@ -36,7 +36,6 @@ jobs:
       # The local stack's own Postgres, as its owner. The owner bypasses RLS,
       # which is what this audit measured before the auth swap as well.
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
-      BETTER_AUTH_URL: http://localhost:3000
       NEXT_PUBLIC_APP_URL: http://localhost:3000
       # The verify script never creates an invitation, so these are never
       # read — but the invitation mailer is configured at startup and

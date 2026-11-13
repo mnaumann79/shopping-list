@@ -127,8 +127,8 @@ export async function generateJoinLink(page: Page): Promise<string> {
 
 /**
  * The path and query of a join link URL. The app builds the link from
- * BETTER_AUTH_URL, which is not necessarily the URL Playwright is driving,
- * so the specs navigate by path instead of by absolute URL.
+ * NEXT_PUBLIC_APP_URL, which is not necessarily the URL Playwright is
+ * driving, so the specs navigate by path instead of by absolute URL.
  */
 export function joinPath(url: string): string {
   const parsed = new URL(url);

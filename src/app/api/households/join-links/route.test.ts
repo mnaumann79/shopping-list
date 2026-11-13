@@ -148,12 +148,17 @@ describe("POST /api/households/join-links", () => {
     expect(db.delete).not.toHaveBeenCalled();
   });
 
-  test("returned URL uses BETTER_AUTH_URL as base", async () => {
-    process.env.BETTER_AUTH_URL = "https://app.example.com";
+  test("returned URL uses NEXT_PUBLIC_APP_URL as base", async () => {
+    const before = process.env.NEXT_PUBLIC_APP_URL;
+    process.env.NEXT_PUBLIC_APP_URL = "https://app.example.com";
     signedIn();
     const res = await POST();
     const json = await res.json();
     expect(json.url).toMatch(/^https:\/\/app\.example\.com\/join\?token=/);
-    delete process.env.BETTER_AUTH_URL;
+    if (before === undefined) {
+      delete process.env.NEXT_PUBLIC_APP_URL;
+    } else {
+      process.env.NEXT_PUBLIC_APP_URL = before;
+    }
   });
 });
