@@ -94,10 +94,11 @@ A phase is done when **all** of the following hold:
 2. `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and
    `pnpm test:e2e` all pass **on the merged result** — not merely on
    individual branches.
-3. `pnpm test:integration` passes **from Phase 1 onward**. The integration
-   suite is introduced by task 1.9, so a Phase 0 gate that requires it would
-   demand a command that does not exist yet — and Phase 1 cannot start until
-   Phase 0 is done.
+3. `pnpm test:integration` passes **from Phase 0b onward**. The integration
+   suite is introduced by task 0b.11, which runs the **Supabase local stack**
+   in CI — the row-level security policies key on `auth.uid()`, and only
+   GoTrue provides it, so a bare PostgreSQL container cannot evaluate them.
+   Phase 0 does not require it: the suite does not exist there yet.
 3. The phase's **verification commands** have been executed and their output
    attached. An unrun check is reported as a gap, never as a pass.
 4. The phase's **demonstration** (a scripted, repeatable run) succeeds.
@@ -216,7 +217,7 @@ cutover rather than after.
 | 0b.1 | Amend the specification for the new stack: §9.1a (identity types), §9.2 (household tables), §9.2b (RLS), §10.1/§10.8 (`household_id` rename, the interactive transaction), §12 (Supabase Auth), §13.2a–c (the cutover), §16.5 (CI), ADR-11/12/14 (amended), ADR-16/17 (new) | Lead | `docs/project.md` |
 | 0b.2 | **Re-verify the target instance.** §16.4 already records PostgreSQL 17.11 and the fixture's pass: re-run the fixture against the instance and record the version and the outcome; confirm `pg_advisory_xact_lock`, `hashtextextended`, `jsonb_to_recordset` and the data-modifying CTEs behave as expected; confirm the `auth` schema is present and `auth.uid()` resolves; take and **restore-test** a backup | Database | `src/db/fixture/**` (scratch and evidence) |
 | 0b.3 | Replace the driver with the standard `pg` driver and add `pg` and `@supabase/ssr` to `package.json` — there is one driver, so there is nothing to switch (ADR-16). Decide the pooling: direct connection to the instance, or the Supavisor pooler with `?pgbouncer=true` (the `pg` driver's named prepared statements are not compatible with transaction-mode pooling). **The advisory lock is transaction-scoped, so it is safe under a transaction-mode pooler** | Database | `src/db/index.ts`, `package.json`, `.env.local.example` |
-| 0b.4 | Create `households`, `household_members`, `household_invitations`; rename `organization_id` → `household_id` on `items`, `categories`, `stores` and `household_join_links` and retype it to `uuid`; retype `created_by_id`, `updated_by_id` and `actor_id` to `uuid` referencing `auth.users(id)`. The wire contract's `organizationId` → `householdId` **lands here** — 76 occurrences across 28 files under `src/`, measured on `main` at `0f8dd29`. Phase 4 no longer rewrites the client wholesale in a way that makes the rename free there. The rename reaches the client in `src/components/household-switcher.tsx`, `src/components/AppHeader.tsx`, `src/app/onboarding/page.tsx` and `src/app/(auth)/**`; task 0b.9 does that client work against the renamed contract | Database | `src/db/schema/**`, `db/migrations/**` |
+| 0b.4 | Create `households`, `household_members`, `household_invitations` and the five sync tables of §9.2, additively, with the Drizzle schema for them | Database | `src/db/schema/**`, `db/migrations/**`, `db/init.sql` |
 | 0b.5 | Enable RLS on every household-scoped table with policies keyed on `auth.uid()` (§9.2b), create the non-owner `app` role the application connects as, and add the `household_members` policy that stops the recursion; add the scope helper `src/db/scope.ts`: one `db.transaction()` that sets `request.jwt.claims` **locally** and runs the caller's query on the transaction's client | Database | `db/migrations/**`, `src/db/scope.ts` |
 | 0b.6 | Route every household-scoped query through the scope helper from task 0b.5, which is the only sanctioned path (it **is** Phase 1's task 1.4, now with RLS behind it). The household membership and invitation services move in task 0b.8 | Backend | `src/server/services/items.ts` |
 | 0b.7 | Replace Better Auth with Supabase Auth: `@supabase/ssr` server and browser clients, sign-up/sign-in/sign-out, the `sb-household` cookie, and the session helpers in `request-auth.ts` (13 API route files import them; 11 of them call `requireActiveOrganization`). **The middleware half of today's auth story is dead code**: the repository's root `middleware.ts` does not run — the app lives under `src/`, and there is no `src/middleware.ts` - while the guard that does run is `redirect("/sign-in")` in `src/app/(app)/layout.tsx`, without a `returnTo` (`docs/project.md` §12.1b). Whether that file moves to `src/`, is replaced, or is deleted is decided with the cutover, not here | Backend | `src/lib/auth.ts`, `src/lib/request-auth.ts`, `src/lib/auth-client.ts`, `src/app/api/auth/[...all]/route.ts` |
@@ -225,12 +226,16 @@ cutover rather than after.
 | 0b.10 | The **transitional sign-in** that carries existing passwords across (§13.2c). Better Auth's scrypt hashes cannot be converted to GoTrue's bcrypt, so the old password is verified once and re-provisioned. Better Auth stays a dependency until the rollback window closes, and this task records its removal date. The transitional sign-in must not assume the middleware's `returnTo` behaviour: the guard that runs redirects to `/sign-in` without it (§12.1b) | Backend | `src/app/api/auth/legacy-signin/route.ts` |
 | 0b.11 | CI runs the **Supabase local stack**, not a bare PostgreSQL container — the RLS policies need `auth.uid()`, which only GoTrue provides. The local stack's PostgreSQL major version must match the production instance's, and the integration job asserts it | Lead | `.github/workflows/**`, `supabase/config.toml` |
 | 0b.12 | Rehearse the cutover runbook (§13.2a of `docs/project.md`, written in task 0b.1) and correct it where the rehearsal finds a gap: the dump, the restore, the identity mapping, the verification queries, and the rollback. **The rehearsal is a full dry run against a scratch database on the instance**, and its output is attached to the pull request | Lead | `docs/project.md` (§13.2a), `scripts/**` |
+| 0b.13 | Rename `organization_id` → `household_id` on `items`, `categories`, `stores` and `household_join_links` and retype it to `uuid`; retype `created_by_id`, `updated_by_id` and `actor_id` to `uuid` referencing `auth.users(id)`; rename the wire contract's `organizationId` → `householdId` — **76 occurrences across 28 files under `src/`**, measured on `main` at `0f8dd29`. **This is one pull request, and it is exclusive**: the type-check is repository-wide, so the moment the Drizzle schema says `householdId`, every call site that still says `organizationId` is a compile error — and those call sites are spread across three ownership columns, which may not be written at the same time. A rename split by owner leaves `main` broken for the length of the merge window, and the required type-check check does not allow that. It lands **before** 0b.5, 0b.6, 0b.7 and 0b.9, which are written against the renamed contract | Database | `src/db/schema/**`, `db/migrations/**`, `db/init.sql`, `src/server/services/**`, `src/lib/**`, `src/app/api/**`, `src/app/(app)/**`, `src/app/(auth)/**`, `src/app/onboarding/**`, `src/components/**` |
 
 **Two paths are written by two tasks in this phase**: `docs/project.md`
 (0b.1 writes the specification and the runbook, 0b.12 rehearses the runbook
-and corrects it) and `db/migrations/**` (0b.4 creates the tables, 0b.5 adds
-the RLS policies). Each pair has one owner and runs in sequence, so no two
-tasks write the same path at the same time (§0.1).
+and corrects it) and `db/migrations/**` (0b.4 creates the tables, 0b.13
+renames the columns, 0b.5 adds the RLS policies). Each path has one owner
+and the tasks run in sequence, so no two tasks write the same path at the
+same time (§0.1). The same rule governs task 0b.13, which is **exclusive
+while it is open**: it writes every path the rename touches, in one pull
+request, so the tasks that would otherwise share them wait for it.
 
 ### Deliverables
 
@@ -255,6 +260,20 @@ against it). Nothing in this phase depends on Phase 1 — but **Phase 1's task
 1.4 is absorbed into tasks 0b.5 and 0b.6**, and Phase 1's tasks 1.1–1.3 are
 closed by task 0b.8, so those three are dropped from Phase 1 rather than
 repeated.
+
+### Files / architectural areas affected
+
+The auth stack (`src/lib/auth.ts`, `src/lib/request-auth.ts`,
+`src/lib/auth-client.ts`, `src/app/api/auth/**`, `src/app/(auth)/**`,
+`src/app/(app)/**`), the schema and its migrations (`src/db/schema/**`,
+`db/migrations/**`, `db/init.sql`), row-level security and the scope helper
+(`src/db/scope.ts`), the household-scoped queries and services
+(`src/server/services/**`, `src/app/api/**`, `src/lib/categories.ts`), the
+client components that read the session (`src/components/**`,
+`src/app/onboarding/**`), the E2E harness (`e2e/auth/**`,
+`e2e/household/**`), the CI configuration (`.github/workflows/**`,
+`supabase/config.toml`, `scripts/**`) and this phase's own documents
+(`docs/project.md`, `docs/audit-summary.md`).
 
 ### Risks
 
@@ -518,7 +537,7 @@ plus explicit probes:
   normal update, a field lost to a concurrent write, a check that loses by
   check-wins, a write to a tombstoned row, an undelete that is too old, a lost
   compare-and-swap, **both arrival orders of an archive racing an uncheck and
-  the assertion that they converge**, eight store-tag outcomes, a bulk
+  the assertion that they converge**, nine store-tag outcomes, a bulk
   operation sharing one `opId`, a replay of an operation that won nothing, a
   replay of an applied operation, the outcome vocabulary, and a create with
   tags. An implementation that reaches a different outcome fails here.
