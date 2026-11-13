@@ -4,6 +4,7 @@ import { ServiceError } from "@/server/services/service-error";
 import type { Scope } from "@/db/scope";
 import { NextRequest } from "next/server";
 import { z } from "zod";
+import { withActiveHousehold } from "@/app/api/households/active-cookie";
 
 const householdSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -23,7 +24,7 @@ export async function GET() {
   }
 
   try {
-    const households = await listHouseholds({ userId: session.user.id } as Scope);
+    const households = await listHouseholds(session.user.id);
     return Response.json(households, { status: 200 });
   } catch (error) {
     console.error(error);
@@ -64,18 +65,8 @@ export async function POST(req: NextRequest) {
     const household = await createHousehold(scope, parsed.data.name);
 
     // The household that was just created is the active one: the client's
-    // create-then-set-active pair, in one server call. The cookie is httpOnly
-    // and SameSite=Lax, so it is server-side only — the role is never taken
-    // from it, and a household the caller is not a member of is refused by
-    // the policies rather than by the cookie.
-    const response = Response.json(household, { status: 201 });
-    response.headers.append(
-      "Set-Cookie",
-      `sb-household=${household.householdId}; Path=/; HttpOnly; SameSite=Lax${
-        process.env.NODE_ENV === "production" ? "; Secure" : ""
-      }`,
-    );
-    return response;
+    // create-then-set-active pair, in one server call.
+    return withActiveHousehold(Response.json(household, { status: 201 }), household.householdId);
   } catch (error) {
     if (error instanceof ServiceError) {
       return Response.json({ error: error.message }, { status: error.status });

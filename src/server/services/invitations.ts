@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import { householdInvitations } from "@/db/schema/households";
 import { withClaimsOnly, withScope, type Scope, type Tx } from "@/db/scope";
@@ -82,6 +82,8 @@ export async function listInvitations(scope: Scope) {
           eq(householdInvitations.householdId, scope.householdId),
           isNull(householdInvitations.acceptedAt),
           isNull(householdInvitations.revokedAt),
+          // An expired invitation is not an invitation any more.
+          gt(householdInvitations.expiresAt, new Date()),
         ),
       ),
   );

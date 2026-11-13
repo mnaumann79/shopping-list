@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "crypto";
 import { and, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
+import { z } from "zod";
 import { householdJoinLinks, householdMembers, households } from "@/db/schema/households";
 import { withClaimsOnly, withMembershipScope, withScope, type Scope, type Tx } from "@/db/scope";
 import { getJoinUrl } from "@/lib/app-routes";
@@ -16,14 +17,24 @@ export type HouseholdRole = "owner" | "admin" | "member";
 /** The roles that may administer a household (FR-13). */
 export const ADMIN_ROLES: readonly HouseholdRole[] = ["owner", "admin"];
 
+/** The one form an id is written in: the hyphenated uuid. */
+const uuidSchema = z.uuid();
+
 /**
  * One spelling of an id.
  *
- * PostgreSQL accepts an id in several forms — upper and lower case among
- * them — and two spellings of one id must not be two things.
+ * PostgreSQL accepts an id in several forms — upper and lower case, without
+ * hyphens, in braces — and two spellings of one id must not be two things.
+ * The id is parsed instead of trimmed, so the comparison is on the one
+ * spelling, and a value that is not an id at all is a 400 rather than a
+ * failed cast.
  */
-function canonicalUuid(value: string) {
-  return value.trim().toLowerCase();
+function canonicalUuid(value: string): string {
+  const parsed = uuidSchema.safeParse(value.trim());
+  if (!parsed.success) {
+    throw new ServiceError(400, "Invalid user id");
+  }
+  return parsed.data.toLowerCase();
 }
 
 /**
@@ -150,28 +161,58 @@ export async function findJoinLink(token: string) {
  * Only an owner or an admin may do it, and the check is on the server. The
  * caller cannot remove themselves through it: an owner who leaves leaves the
  * household without an owner.
+ *
+ * And the privileged rows are the owner's to give and to take away: an admin
+ * may remove a plain member, but the owner's row is only the owner's to
+ * remove — §12.5 gives the role table "remove a member: owner or admin" and
+ * "change a member's role: owner", and nothing can put an owner back
+ * (an invitation never grants the owner role, and only the creator's
+ * bootstrap makes one), so an admin who could remove the owner would leave a
+ * household nobody could repair.
  */
 export async function removeMember(scope: Scope, userId: string): Promise<void> {
-  await requireHouseholdRole(scope, ADMIN_ROLES);
+  const callerRole = await requireHouseholdRole(scope, ADMIN_ROLES);
 
-  // PostgreSQL accepts an id in several spellings, so the comparison has to
-  // be on one of them: an uppercase form of the caller's own id is the same
-  // id, and a string comparison would let it through.
-  if (canonicalUuid(userId) === canonicalUuid(scope.userId)) {
+  // One spelling of the id, on both sides: an uppercase form of the
+  // caller's own id is the same id, and a string comparison would let it
+  // through.
+  const targetUserId = canonicalUuid(userId);
+
+  if (targetUserId === canonicalUuid(scope.userId)) {
     throw new ServiceError(400, "You cannot remove yourself from the household");
   }
 
-  const removed = await withScope(scope, (tx) =>
-    tx
-      .delete(householdMembers)
-      .where(and(eq(householdMembers.householdId, scope.householdId), eq(householdMembers.userId, userId)))
-      .returning({ userId: householdMembers.userId }),
-  );
+  // The target's role and the removal are one transaction: the answer has to
+  // be the role the row has when it is deleted.
+  await withScope(scope, async (tx) => {
+    const [target] = await tx
+      .select({ role: householdMembers.role })
+      .from(householdMembers)
+      .where(
+        and(
+          eq(householdMembers.householdId, scope.householdId),
+          eq(householdMembers.userId, targetUserId),
+        ),
+      )
+      .limit(1);
 
-  // A request that removes nobody is not a success.
-  if (removed.length === 0) {
-    throw new ServiceError(404, "Member not found");
-  }
+    if (!target) {
+      throw new ServiceError(404, "Member not found");
+    }
+
+    if (target.role !== "member" && callerRole !== "owner") {
+      throw new ServiceError(403, "You do not have permission to do that");
+    }
+
+    await tx
+      .delete(householdMembers)
+      .where(
+        and(
+          eq(householdMembers.householdId, scope.householdId),
+          eq(householdMembers.userId, targetUserId),
+        ),
+      );
+  });
 }
 
 
@@ -221,14 +262,14 @@ export async function joinHousehold(input: { token: string }): Promise<{ househo
  * else. A fourth caller would be a design question, not a convenience.
  */
 export async function listHouseholds(
-  scope: Scope,
+  userId: string,
 ): Promise<Array<{ id: string; name: string; role: HouseholdRole }>> {
-  return withMembershipScope({ userId: scope.userId }, async (tx: Tx) => {
+  return withMembershipScope({ userId }, async (tx: Tx) => {
     const rows = await tx
       .select({ id: households.id, name: households.name, role: householdMembers.role })
       .from(householdMembers)
       .innerJoin(households, eq(households.id, householdMembers.householdId))
-      .where(eq(householdMembers.userId, scope.userId));
+      .where(eq(householdMembers.userId, userId));
 
     return rows.map((row: { id: string; name: string; role: string }) => ({
       id: row.id,

@@ -90,8 +90,8 @@ test("an authorization failure answers 403, not 500", async ({ browser }) => {
 });
 
 // S-4: the invitation-email endpoint answered anybody who guessed an id.
-test("the invitation-email endpoint needs a session", async ({ browser }) => {
-  const { owner, invitationId } = await householdWithAPlainMember(browser);
+test("the invitation-email endpoint needs a session, and the invitee", async ({ browser }) => {
+  const { owner, member, invitationId } = await householdWithAPlainMember(browser);
 
   const anonymous = await browser.newContext({ storageState: { cookies: [], origins: [] } });
   try {
@@ -101,7 +101,12 @@ test("the invitation-email endpoint needs a session", async ({ browser }) => {
     await anonymous.close();
   }
 
-  // A caller with a session is answered.
-  const signedIn = await owner.page.request.get(`/api/invitation-email?id=${invitationId}`);
-  expect(signedIn.status()).toBe(200);
+  // The invitation id works as a bearer token, so a session is not enough:
+  // the address comes back only to the person the invitation was sent to.
+  const byOwner = await owner.page.request.get(`/api/invitation-email?id=${invitationId}`);
+  expect(byOwner.status()).toBe(403);
+
+  const byInvitee = await member.page.request.get(`/api/invitation-email?id=${invitationId}`);
+  expect(byInvitee.status()).toBe(200);
+  expect(await byInvitee.json()).toEqual({ email: member.email });
 });

@@ -2,6 +2,7 @@ import { requireRequestSession } from "@/lib/request-auth";
 import { joinHousehold } from "@/server/services/households";
 import { ServiceError } from "@/server/services/service-error";
 import { NextRequest } from "next/server";
+import { withActiveHousehold } from "@/app/api/households/active-cookie";
 
 /**
  * Joins the household the link names.
@@ -26,7 +27,11 @@ export async function POST(req: NextRequest) {
   try {
     const result = await joinHousehold({ token: body.token });
 
-    return Response.json({ success: true, householdId: result.householdId }, { status: 200 });
+    // The household the caller just joined is the active one.
+    return withActiveHousehold(
+      Response.json({ success: true, householdId: result.householdId }, { status: 200 }),
+      result.householdId,
+    );
   } catch (error) {
     if (error instanceof ServiceError) {
       return Response.json({ error: error.message }, { status: error.status });
