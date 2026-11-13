@@ -12,6 +12,18 @@ loadEnv({ path: path.resolve(__dirname, ".env.test") });
 
 const authFile = path.join(__dirname, "playwright/.auth/user.json");
 
+// The address a browser profile presents to the application.
+//
+// The transitional route counts its failures against the client, and it takes
+// the client's address from `x-forwarded-for` — the header a deployment behind
+// a proxy fills in. With no proxy in front, every request would carry the
+// route's own fallback, the literal "unknown", and every profile would share
+// one budget. Each profile gets an address of its own instead, so the limiter
+// is exercised the way a deployment exercises it: one budget per client.
+const client = (octet: number) => ({
+  extraHTTPHeaders: { "x-forwarded-for": `10.0.0.${octet}` },
+});
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
@@ -27,25 +39,26 @@ export default defineConfig({
     {
       name: "setup",
       testMatch: /auth\.setup\.ts/,
+      use: client(1),
     },
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"], storageState: authFile },
+      use: { ...devices["Desktop Chrome"], storageState: authFile, ...client(2) },
       dependencies: ["setup"],
     },
     {
       name: "firefox",
-      use: { ...devices["Desktop Firefox"], storageState: authFile },
+      use: { ...devices["Desktop Firefox"], storageState: authFile, ...client(3) },
       dependencies: ["setup"],
     },
     {
       name: "webkit",
-      use: { ...devices["Desktop Safari"], storageState: authFile },
+      use: { ...devices["Desktop Safari"], storageState: authFile, ...client(4) },
       dependencies: ["setup"],
     },
     {
       name: "iPhone 13",
-      use: { ...devices["iPhone 13"], storageState: authFile },
+      use: { ...devices["iPhone 13"], storageState: authFile, ...client(5) },
       dependencies: ["setup"],
       testIgnore: [
         // Logout spec exercises the auth-cleared redirect path; the iPhone

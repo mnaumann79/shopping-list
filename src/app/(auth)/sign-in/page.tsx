@@ -32,6 +32,53 @@ const signInSchema = z.object({
 
 type SignInValues = z.infer<typeof signInSchema>;
 
+/** The one message a failed sign-in gets. */
+const SIGN_IN_FAILED = "Invalid email or password";
+
+/**
+ * Signs the visitor in.
+ *
+ * The transitional route tries Supabase Auth first and falls back to the
+ * legacy password, so the page does not choose between the two paths: it
+ * posts to the route and lets the route answer. The route sets the session
+ * and the `sb-household` cookie server-side, so the page only has to know
+ * whether it worked — it receives no token and sets no cookie.
+ *
+ * The route goes with the rollback window, and a 404 is how the page learns
+ * that it is gone: the sign-in is Supabase Auth alone from then on. Nothing
+ * has to be configured or remembered when the window closes.
+ */
+async function signIn(
+  email: string,
+  password: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const response = await fetch("/api/auth/legacy-signin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  }).catch(() => null);
+
+  if (!response) return { ok: false, message: SIGN_IN_FAILED };
+
+  if (response.status === 404) {
+    const { error } = await signInWithPassword(email, password);
+    return error ? { ok: false, message: SIGN_IN_FAILED } : { ok: true };
+  }
+
+  if (response.ok) return { ok: true };
+
+  // The route answers 401 for every failure — a wrong password, an unknown
+  // account and an account that is not the caller's are one failure to the
+  // caller — and that one message is passed through unchanged.
+  const body = await response.json().catch(() => null);
+  const message =
+    response.status === 401 && typeof body?.error === "string"
+      ? body.error
+      : SIGN_IN_FAILED;
+
+  return { ok: false, message };
+}
+
 function SignInPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -41,16 +88,14 @@ function SignInPageContent() {
     defaultValues: { email: "", password: "" },
   });
 
-  // A visitor who already has a session has no business on this page. The
-  // middleware that used to do this does not run — the application lives
-  // under `src/`, and Next.js only loads a middleware from `src/` — so the
-  // check lives here instead.
+  // A visitor who already has a session has no business on this page.
   //
-  // It is also what makes a long idle session recoverable: the server reads
-  // the access token without refreshing it, so a token that expired while the
-  // browser was closed looks like no session at all. The browser still holds
-  // the refresh token, so it can renew the session and send the visitor on
-  // their way rather than making them sign in again.
+  // The middleware redirects one too, but it goes by the cookie: the check
+  // here goes by the session. That is what makes a long idle session
+  // recoverable — the server reads the access token without refreshing it, so
+  // a token that expired while the browser was closed looks like no session
+  // at all, while the browser still holds the refresh token and can renew it
+  // and send the visitor on their way rather than making them sign in again.
   useEffect(() => {
     let cancelled = false;
 
@@ -64,11 +109,11 @@ function SignInPageContent() {
   }, [router, returnTo]);
 
   async function onSubmit(values: SignInValues) {
-    const { error } = await signInWithPassword(values.email, values.password);
+    const result = await signIn(values.email, values.password);
 
-    if (error) {
+    if (!result.ok) {
       form.setError("root", {
-        message: "Invalid email or password",
+        message: result.message,
       });
       return;
     }

@@ -13,8 +13,14 @@ const SIGNED_IN_URL = /\/(onboarding|dashboard)$/;
 /** The GoTrue endpoint the browser client signs up against. */
 const SIGN_UP_ENDPOINT = "/auth/v1/signup";
 
-/** The GoTrue endpoint the browser client signs in against. */
-const SIGN_IN_ENDPOINT = "/auth/v1/token";
+/**
+ * The endpoint the sign-in form sends to.
+ *
+ * The form posts to the application's transitional route, and the route signs
+ * in on the server's side, so the request goes through the application rather
+ * than to the auth server.
+ */
+const SIGN_IN_ENDPOINT = "/api/auth/legacy-signin";
 
 // The setup drives three forms against a dev server that compiles routes on
 // demand, so it needs more than the default 30s.
