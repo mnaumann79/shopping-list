@@ -3513,6 +3513,39 @@ So the restore is a set of `pg_restore --table=…` calls for the shopping
 list's tables, into `public`, and nothing else. The dry run (step 3) does the
 same into a scratch database, which is why it catches a missing table.
 
+#### What the rehearsal found
+
+The runbook was rehearsed end to end against a Supabase instance — the dump,
+the scoped restore, the identity mapping, the verification queries, the row
+counts compared table by table, and the rollback. The scripts are in
+`scripts/cutover/`, and they found two things this section did not say.
+
+**1. The legacy foreign keys have to go before the ids are replaced.** The
+household columns still carry foreign keys into Better Auth's `organization`
+table, and the identity columns into its `user` table. After the rename those
+constraints point at the wrong table with the wrong kind of id — a uuid in a
+column whose constraint still expects a text organization id — and the
+mapping's update fails on the *constraint*, not on the cast, with a message
+that says nothing about the mapping. So the mapping drops the six legacy
+constraints first, and the rename migration adds the new ones: to
+`households(id)` and to `auth.users(id)`.
+
+**2. The users are provisioned in the instance's main database, and the
+scratch database gets their ids and nothing else.** GoTrue owns `auth.users`
+in the instance's main database, and it does not manage a scratch database at
+all. The verification queries join against `auth.users`, so the ids have to
+be there — but copying the schema over would be exactly what the first rule
+above forbids. The scratch database therefore gets the provisioned ids, and
+the mapping's foreign keys point at those.
+
+The order is therefore: the **mapping** does the data (the ids, the rows,
+the casts, and the drop of the legacy constraints), and the **rename
+migration** does the schema (the new constraints, and the rename and the cast
+when the mapping has not already done them). The migration must therefore be
+tolerant of the mapping having run first: it renames the column only if it is
+still `organization_id`, casts it only if it is still `text`, and drops the
+legacy constraints with `IF EXISTS`.
+
 #### 13.2b The identity mapping
 
 Two mapping tables are built during the window and dropped with it:
