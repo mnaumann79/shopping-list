@@ -21,7 +21,7 @@ The job starts the **Supabase local stack** (`supabase start`, the same version 
 
 **The gateway must not be excluded.** The Supabase client addresses the gateway, and the gateway is what serves `/auth/v1`: without it, the browser signs nobody in, and the specs fail in a way that looks like a product defect rather than a missing container. The integration job excludes it because the application there is not exercised over HTTP.
 
-The job takes the two public values the browser client signs up with from the stack itself (`supabase status -o env`: `API_URL` and `PUBLISHABLE_KEY`), so there are no secrets in it and nothing to keep in step. The schema comes from `db/migrations/**` through `pnpm db:migrate` — the migration folder is the source of truth, and the flat snapshot `db/init.sql` is a mirror of it.
+The job takes the two public values the browser client signs up with from the stack itself (`supabase status --output env`: `API_URL` and `PUBLISHABLE_KEY`), so there are no secrets in it and nothing to keep in step. They are read with `grep`/`cut`, not evaluated, and a value that cannot be read stops the job there — with the message `the local stack's url was not read from 'supabase status --output env'` — rather than minutes later, after the stack has started and the app has been built. The schema comes from `db/migrations/**` through `pnpm db:migrate` — the migration folder is the source of truth, and the flat snapshot `db/init.sql` is a mirror of it. The snapshot is not applied on top: it adds its constraints unconditionally, so applying both would fail on the first constraint that already exists.
 
 ## Owner
 
@@ -46,18 +46,24 @@ Both also appear in the run's stdout under "Core Web Vitals (mobile, simulated 4
    # The local stack: GoTrue, and the Postgres the application connects to.
    npx supabase start
    eval "$(npx supabase status -o env)"
+
+   # One file for both terminals. The audit script reads the Supabase values
+   # from its own environment, and an export in one terminal does not reach
+   # the other - so both terminals source the same file.
+   cat > /tmp/perf-audit.env <<EOF
    export NEXT_PUBLIC_SUPABASE_URL="$API_URL"
    export NEXT_PUBLIC_SUPABASE_ANON_KEY="$PUBLISHABLE_KEY"
-
-   # The schema, from the migrations.
    export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
-   pnpm db:migrate
+   EOF
 
    # In one terminal
+   source /tmp/perf-audit.env
+   pnpm db:migrate
    pnpm build
    pnpm start
 
    # In another terminal
+   source /tmp/perf-audit.env
    pnpm exec node scripts/verify-perf-07.mjs
    ```
 
@@ -72,6 +78,7 @@ GitHub → Actions → `perf-audit` → run → **Re-run all jobs**. The comment
 ## Common failure modes
 
 - **The local stack does not start** — the health check failed. Retry the run; if persistent, the runner image may have shifted.
+- **The stack's configuration was not read** (`the local stack's url was not read from 'supabase status --output env'`) — the CLI's output shape changed. The job stops there, before it builds anything; the two values are read with `grep`/`cut`, and one of them came back empty.
 - **Signup fails** (`signup failed: 4xx`) — the Supabase configuration is wrong: `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` must name the project the application signs up against. In the workflow they come from `supabase status`; locally, from the same command.
 - **Sign-up succeeds but the household is not created** (`household create failed`) — the application could not write to the database. Check `DATABASE_URL` and that the schema is applied (`pnpm db:migrate`).
 - **The readiness probe times out** — the application did not answer `/api/categories` with 401 or 200 within 60 seconds. The step prints the tail of the app log.

@@ -72,17 +72,33 @@ jobs:
           supabase start \
             --exclude studio,edge-runtime,logflare,vector,imgproxy,storage-api,realtime,postgrest,postgres-meta,supavisor,mailpit
 
-      - name: Export the stack's public configuration
+      - name: Read the stack's public configuration
         # The application's own two values, taken from the stack that is
         # running: the URL the browser client signs up against and the
         # publishable key it signs up with. Both are public by design.
         #
         # PUBLISHABLE_KEY, not ANON_KEY: the CLI prints both, and the
         # publishable key is the one the browser client is meant to use.
+        #
+        # The CLI's output is parsed, not evaluated. `eval` of the whole
+        # file would fail late and vaguely - minutes later, after the stack
+        # has started and the app has been built - and it would evaluate
+        # whatever else the CLI prints. If the output's shape changes, the
+        # job says so here, where the cause is.
         run: |
-          eval "$(supabase status -o env)"
-          echo "NEXT_PUBLIC_SUPABASE_URL=$API_URL" >> "$GITHUB_ENV"
-          echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$PUBLISHABLE_KEY" >> "$GITHUB_ENV"
+          supabase status --output env > /tmp/stack.env
+          url=$(grep -E '^API_URL=' /tmp/stack.env | head -1 | cut -d= -f2- | tr -d '"')
+          key=$(grep -E '^PUBLISHABLE_KEY=' /tmp/stack.env | head -1 | cut -d= -f2- | tr -d '"')
+          for value in url key; do
+            if [ -z "${!value}" ]; then
+              echo "::error::the local stack's $value was not read from 'supabase status --output env'"
+              exit 1
+            fi
+          done
+          {
+            echo "NEXT_PUBLIC_SUPABASE_URL=$url"
+            echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$key"
+          } >> "$GITHUB_ENV"
 
       - name: Install dependencies
         # Override NODE_ENV for install only — pnpm skips devDependencies
@@ -97,21 +113,17 @@ jobs:
 
       - name: Apply the schema
         # The migration folder is the source of truth for the schema; the
-        # flat snapshot is a mirror of it. The runner records a checksum of
-        # every migration it applies, so a second run is a no-op.
+        # flat snapshot db/init.sql is a mirror of it. The runner records a
+        # checksum of every migration it applies, so a second run is a
+        # no-op.
+        #
+        # The snapshot is not applied as well: it adds its constraints
+        # unconditionally, so applying both would fail on the first
+        # constraint that already exists.
         run: pnpm db:migrate
 
       - name: Build app
         run: pnpm build
-
-      - name: Install psql and apply DB schema
-        # The schema is applied directly with psql using db/init.sql (a
-        # hand-derived mirror of src/db/schema/*), so the step needs no new
-        # Node deps.
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/init.sql
 
       - name: Start app and run audit
         id: run-audit
