@@ -17,6 +17,16 @@ export type HouseholdRole = "owner" | "admin" | "member";
 export const ADMIN_ROLES: readonly HouseholdRole[] = ["owner", "admin"];
 
 /**
+ * One spelling of an id.
+ *
+ * PostgreSQL accepts an id in several forms — upper and lower case among
+ * them — and two spellings of one id must not be two things.
+ */
+function canonicalUuid(value: string) {
+  return value.trim().toLowerCase();
+}
+
+/**
  * The caller's role in the household.
  *
  * The answer comes from `app_household_role`, the SECURITY DEFINER function
@@ -144,15 +154,24 @@ export async function findJoinLink(token: string) {
 export async function removeMember(scope: Scope, userId: string): Promise<void> {
   await requireHouseholdRole(scope, ADMIN_ROLES);
 
-  if (userId === scope.userId) {
+  // PostgreSQL accepts an id in several spellings, so the comparison has to
+  // be on one of them: an uppercase form of the caller's own id is the same
+  // id, and a string comparison would let it through.
+  if (canonicalUuid(userId) === canonicalUuid(scope.userId)) {
     throw new ServiceError(400, "You cannot remove yourself from the household");
   }
 
-  await withScope(scope, (tx) =>
+  const removed = await withScope(scope, (tx) =>
     tx
       .delete(householdMembers)
-      .where(and(eq(householdMembers.householdId, scope.householdId), eq(householdMembers.userId, userId))),
+      .where(and(eq(householdMembers.householdId, scope.householdId), eq(householdMembers.userId, userId)))
+      .returning({ userId: householdMembers.userId }),
   );
+
+  // A request that removes nobody is not a success.
+  if (removed.length === 0) {
+    throw new ServiceError(404, "Member not found");
+  }
 }
 
 

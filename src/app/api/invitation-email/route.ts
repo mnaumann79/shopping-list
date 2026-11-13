@@ -26,5 +26,13 @@ export async function GET(req: Request) {
     .limit(1)
     .then((rows) => rows[0]);
 
+  // The invitation id is a bearer token, so a session is not enough: the
+  // caller has to be the person the invitation was sent to. The household's
+  // own view of its pending invitations is the invitations endpoint, which
+  // checks the role.
+  if (row && row.email !== session.user.email) {
+    return Response.json({ email: null }, { status: 403 });
+  }
+
   return Response.json({ email: row?.email ?? null });
 }

@@ -1,4 +1,4 @@
-import { requireActiveOrganization, requireRequestSession } from "@/lib/request-auth";
+import { requireRequestSession } from "@/lib/request-auth";
 import { createHousehold, listHouseholds } from "@/server/services/households";
 import { ServiceError } from "@/server/services/service-error";
 import type { Scope } from "@/db/scope";
