@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/headers", () => ({ headers: vi.fn().mockResolvedValue(new Headers()) }));
-vi.mock("@/lib/auth", () => ({ auth: { api: { getSession: vi.fn() } } }));
+// Mock the request seam.
+//
+// A route test fakes the caller here, not at the auth provider: what is
+// under test is the route's contract, not the provider's. The seam answers
+// with the caller and the household they are acting on.
+vi.mock("@/lib/request-auth", () => ({
+  requireActiveOrganization: vi.fn(),
+  requireRequestSession: vi.fn(),
+}));
 // The scope helper opens a transaction and runs the caller's query on the
 // transaction's client. In a unit test that client is the mocked db itself,
 // so the mock's transaction hands the callback the same object.
