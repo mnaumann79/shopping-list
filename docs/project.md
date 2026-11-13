@@ -3801,19 +3801,38 @@ honest options:
 
 **The chosen mechanism is a transitional sign-in.** For the rollback window
 (§13.2a step 8), the legacy Better Auth tables are present in the new
-database and Better Auth is still installed, pointed at it. The sign-in route
-tries Supabase Auth first; if that fails **and** the legacy tables still hold
-the account, it verifies the password against the legacy hash, provisions the
-GoTrue user with that same password, and signs the user in. The plaintext
+database. The sign-in route tries Supabase Auth first; if that fails **and**
+the legacy tables still hold the account **and** the GoTrue account has never
+been signed into, it verifies the password against the legacy hash, gives the
+GoTrue account that same password, and signs the user in. The plaintext
 exists for exactly one request, over TLS, and is never logged.
+
+**The condition on the GoTrue account is what keeps the two sides apart.** The
+cutover provisions a GoTrue user for every legacy user, with a random
+unusable password, so *"a GoTrue account exists for this email"* is true of
+every migrated user and cannot be the test. What separates the two cases is
+whether the account has ever been **used**: an account that has never been
+signed into still holds the cutover's unusable password, so setting its
+password displaces nothing; an account that has signed in belongs to the user
+now, the legacy path is not taken at all, and the caller sees the sign-in
+failure they would have seen anyway. If no GoTrue account exists for the
+email, the path creates one — the cutover normally provisions it, and the
+transitional path must never be the reason somebody cannot get in.
+
+**Better Auth the package is not needed; its tables are.** The legacy hash is
+`<salt>:<key>` in hex, and verifying it is `scrypt` with N=16384, r=16, p=1
+and a 64-byte key over the NFKC-normalised password — which is what
+`node:crypto` does. The dependency goes; the legacy tables and the
+transitional route stay until the rollback window closes, and they go with it.
 
 **A user therefore never has to reset their password, and never sees a
 sign-in prompt they did not expect.** The transitional path is removed when
 the rollback window closes, and the legacy tables are dropped with it.
 
-**What this costs.** Better Auth stays a dependency for two weeks, and its
-tables live in the same database as the new ones. That is a temporary,
-explicit, dated state — not a permanent second authentication system.
+**What this costs.** Better Auth's tables live in the same database as the new
+ones for two weeks, and a sign-in path that exists only to answer the scrypt
+wall has to be removed with them. That is a temporary, explicit, dated state —
+not a permanent second authentication system.
 
 ### 13.3 Recovery objectives
 
