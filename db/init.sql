@@ -661,6 +661,34 @@ GRANT EXECUTE ON FUNCTION app_user_display(uuid) TO app;
 GRANT EXECUTE ON FUNCTION app_accept_household_invitation(uuid) TO app;
 GRANT EXECUTE ON FUNCTION app_join_household_by_link(text) TO app;
 
+-- The membership functions are the application's, and the browser's role does
+-- not execute them.
+--
+-- The grants above gave `authenticated` - the role a signed-in browser
+-- request assumes - EXECUTE on all three as well, so that "a PostgREST
+-- connection that assumes that role still reaches them". The application has
+-- its own direct grant on all three, so the inherited path was never needed
+-- for the application, and the PostgREST connection it was protecting is the
+-- browser's.
+--
+-- With the grant in place, `app_user_display(p_user_id)` was reachable by
+-- every signed-in user: the function is SECURITY DEFINER, takes the user id
+-- as an argument and checks nothing, so anyone who knew another user's uuid
+-- could read that user's name and email. A check inside the function would
+-- not have closed it - the application role sets request.jwt.claims itself,
+-- so a check inside a SECURITY DEFINER function is forgeable for the role
+-- that matters. The one unforgeable boundary is `authenticated`'s, because
+-- GoTrue signs those claims, and the simplest way to close it is not to
+-- grant it at all.
+--
+-- The browser never calls these functions, so the grant bought nothing and
+-- opened a door. The direct grants to `app` are unchanged.
+--
+-- See migration 0010.
+REVOKE EXECUTE ON FUNCTION app_user_display(uuid) FROM authenticated;
+REVOKE EXECUTE ON FUNCTION app_accept_household_invitation(uuid) FROM authenticated;
+REVOKE EXECUTE ON FUNCTION app_join_household_by_link(text) FROM authenticated;
+
 -- Every table that carries a household id. That includes the five sync
 -- tables: the app role has CRUD on every table in this schema, so a table
 -- without a policy is a table the app role can read across households.

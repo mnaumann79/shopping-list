@@ -1,0 +1,38 @@
+-- The membership functions are the application's, and the browser's role does
+-- not execute them.
+--
+-- Migration 0006 granted EXECUTE on the three SECURITY DEFINER membership
+-- functions to `authenticated` as well as to `app`, and said why: "the
+-- inherited authenticated role as well, so a PostgREST connection that assumes
+-- that role still reaches them".
+--
+-- That sentence was the bug. The application connects as `app`, which has its
+-- own direct grant on all three, so the inherited path was never needed for
+-- the application - and the PostgREST connection it was protecting is the
+-- browser's.
+--
+-- On a hosted instance PostgREST serves the `public` schema as an RPC
+-- endpoint, and a signed-in browser request assumes `authenticated`. The
+-- grant therefore made `app_user_display(p_user_id)` reachable by every
+-- signed-in user: the function is SECURITY DEFINER, takes the user id as an
+-- argument and checks nothing, so anyone who knew another user's uuid could
+-- read that user's name and email. The uuid is unguessable, but it leaks -
+-- in logs, in URLs, in screenshots, in other systems - and an email address is
+-- personal data.
+--
+-- A check inside the function would not have closed it. The application role
+-- sets `request.jwt.claims` itself, so any check inside a SECURITY DEFINER
+-- function is forgeable for the role that matters; `app` is trusted by
+-- design. The one unforgeable boundary is `authenticated`'s, because GoTrue
+-- signs those claims - and the simplest way to close that boundary is not to
+-- grant it at all.
+--
+-- The browser never calls these functions - there is no `.rpc(` anywhere in
+-- the application - so the grant bought nothing and opened a door.
+--
+-- PUBLIC keeps no execute right either: 0006 revoked it there, and that
+-- stands. The direct grants to `app` are unchanged: the application still
+-- reaches all three, and the member list still returns names and emails.
+REVOKE EXECUTE ON FUNCTION app_user_display(uuid) FROM authenticated;
+REVOKE EXECUTE ON FUNCTION app_accept_household_invitation(uuid) FROM authenticated;
+REVOKE EXECUTE ON FUNCTION app_join_household_by_link(text) FROM authenticated;

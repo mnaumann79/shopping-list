@@ -3701,6 +3701,32 @@ with a `CHECK` constraint on `household_members.role` and
 `household_invitations.role` (§9.2), so a role that is not one of the three
 cannot be written at all.
 
+**The membership functions are the application's, and the browser's role does
+not execute them.** `app_user_display`, `app_accept_household_invitation` and
+`app_join_household_by_link` are `SECURITY DEFINER` functions the application
+calls as `app`: the display path reads a member's name and email, the
+invitation path joins a household, and the join-link path does the same. They
+are not part of the browser's surface. `authenticated` — the role a signed-in
+browser request assumes, and the role PostgREST assumes on a hosted instance —
+was granted `EXECUTE` on all three by migration 0006, so that *"a PostgREST
+connection that assumes that role still reaches them"*. The application has
+its own direct grant on all three, so the inherited path was never needed for
+it, and the connection it was protecting is the browser's.
+
+With the grant in place, `app_user_display(p_user_id)` was reachable by every
+signed-in user: the function takes the user id as an argument and checks
+nothing, so anyone who knew another user's uuid could read that user's name
+and email. The uuid is unguessable, but it leaks — in logs, in URLs, in
+screenshots, in other systems — and an email address is personal data. **A
+check inside the function would not have closed it**, because the application
+role sets `request.jwt.claims` itself and a check inside a `SECURITY DEFINER`
+function is forgeable for the role that matters; the one unforgeable boundary
+is `authenticated`'s, because GoTrue signs those claims. So the grant was
+**removed rather than checked**: migration 0010 revokes `EXECUTE` on all three
+from `authenticated`, and the direct grants to `app` are unchanged. The
+browser never calls these functions — there is no `.rpc(` anywhere in the
+application — so nothing the product needs is lost.
+
 ### 12.6 Tenant isolation
 
 Isolation is enforced in three layers, and the third one is new:
