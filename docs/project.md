@@ -1620,18 +1620,44 @@ The cascade is not affected: the referential integrity checks run with the
 table owner's rights, so deleting a household still takes its membership rows
 with it.
 
+**The policy is created by migration `0007_no_self_delete`, and the same
+statement is in the flat snapshot `db/init.sql`.** It was measured against a
+database built from the migration folder alone — not a hand-patched stack —
+on PostgreSQL 17, the major version `supabase/config.toml` pins, as the
+application role `app`:
+
+```sql
+BEGIN;
+SET LOCAL ROLE app;
+SELECT set_config('request.jwt.claims',
+                   '{"sub":"<the member>","role":"authenticated"}', true);
+DELETE FROM household_members
+ WHERE household_id = '<the household>' AND user_id = '<the member>';
+ROLLBACK;
+```
+
+The command tag is the measurement. A member deleting their own membership
+row affected **no rows** (`DELETE 0`), and so did the owner deleting their
+own (`DELETE 0`); the owner removing a member affected **one row**
+(`DELETE 1`), and so did an admin (`DELETE 1`). The cascade still took a
+household's membership rows with it. The integration scenario
+(`tests/integration/rls-household-boundaries.test.ts`) pins it: with the
+policy dropped, it fails with *"expected 1 to be +0"*.
+
 **Each of these branches is load-bearing, and the policy without them is
-exploitable.** Measured on the local stack as the application role, against a
-membership policy that carried only `user_id = auth.uid()`: a caller who was a
-member of nothing wrote themselves into a household whose id they knew **as
-its owner**, because the write check defaults to the read check; and with the
-scope clause missing from the policies, a transaction scoped to household A
-read household B's items and deleted household B, cascade and all. With the
-policies above, the self-write is refused, the scoped read returns zero rows
-and the scoped delete zero households — while the legitimate flows still work:
-the owner sees every member and the owner's removal of a member reaches the
-database, a plain member still sees only their own row and removes nothing,
-and the creator still bootstraps their own household.
+exploitable.** Measured as the application role, against a database built from
+the migration folder alone, with the membership policy reduced to
+`USING (user_id = auth.uid())`: a caller who was a member of nothing wrote
+themselves into a household whose id they knew **as its owner**, because the
+write check defaults to the read check (`INSERT 0 1`); and with the scope
+clause missing from the policies, a transaction scoped to household A read
+household B's items (one row) and deleted household B, cascade and all
+(`DELETE 1`). With the policies above, the self-write is refused, the scoped
+read returns zero rows and the scoped delete zero households — while the
+legitimate flows still work: the owner sees every member and the owner's
+removal of a member reaches the database, a plain member still sees only
+their own row and removes nothing, and the creator still bootstraps their own
+household.
 
 **What a member sees.** The members list shows every member to an owner or an
 admin, and to a plain member it shows the caller's own row and nothing else.

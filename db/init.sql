@@ -581,6 +581,36 @@ CREATE POLICY household_members_isolation ON household_members
                    AND app_household_bootstrap(household_id, auth.uid())))
               AND app_household_scope(household_id));
 
+-- Nobody may remove themselves.
+--
+-- Section 12.5's rule is the product's: nobody removes themselves, because the
+-- owner cannot be recreated - an invitation grants 'admin' or 'member', and
+-- only the creator's bootstrap makes an owner - so a self-delete is
+-- irreversible.
+--
+-- The membership policy above does not refuse that by itself. Its USING clause
+-- has no command qualifier, so it also governs DELETE, and it admits the
+-- caller's own row ("a read may be answered by the caller's own membership
+-- row"). Measured as the application role against a database built from the
+-- migrations, a member deleting their own row removed it, and so did the
+-- owner.
+--
+-- So the rule gets its own policy. It is RESTRICTIVE: it narrows the
+-- permissive policy instead of replacing it, and the two are combined with
+-- AND. A row is deletable when the membership policy admits it *and* it is
+-- not the caller's own - so the owner and the admins may still remove a
+-- member, and nobody may remove themselves.
+--
+-- The cascade is unaffected. A household's membership rows still go with the
+-- household: the referential action runs with the table owner's rights, and
+-- an owner bypasses row-level security.
+--
+-- See migration 0007.
+CREATE POLICY household_members_no_self_delete ON household_members
+  AS RESTRICTIVE
+  FOR DELETE
+  USING (user_id <> auth.uid());
+
 -- The households table carries the household's name and its creator, and a
 -- membership is what makes it visible.
 --
