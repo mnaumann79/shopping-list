@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
-import { db } from "@/db";
 import { categories, itemStores, items, stores } from "@/db/schema";
+import { withScope, type Scope, type Tx } from "@/db/scope";
 import { ServiceError } from "./service-error";
 
 type ItemRow = typeof items.$inferSelect;
@@ -23,8 +23,7 @@ export type StoreDto = Omit<StoreRow, "createdAt" | "updatedAt"> & {
 };
 
 type CreateItemInput = {
-  orgId: string;
-  userId: string;
+  scope: Scope;
   name: string;
   quantity?: string | null;
   note?: string | null;
@@ -33,7 +32,7 @@ type CreateItemInput = {
 };
 
 type UpdateItemInput = {
-  orgId: string;
+  scope: Scope;
   itemId: string;
   updates: {
     name?: string;
@@ -76,11 +75,16 @@ function serializeStore(store: StoreRow): StoreDto {
   };
 }
 
-async function assertCategoryInOrganization(orgId: string, categoryId: string) {
-  const [category] = await db
+/**
+ * The household's categories, read through the transaction the scope helper
+ * opened. The household predicate stays: it is the application layer of the
+ * isolation, and the policies are the second one behind it (ADR-12).
+ */
+async function assertCategoryInHousehold(tx: Tx, householdId: string, categoryId: string) {
+  const [category] = await tx
     .select({ id: categories.id })
     .from(categories)
-    .where(and(eq(categories.id, categoryId), eq(categories.householdId, orgId)))
+    .where(and(eq(categories.id, categoryId), eq(categories.householdId, householdId)))
     .limit(1);
 
   if (!category) {
@@ -88,16 +92,16 @@ async function assertCategoryInOrganization(orgId: string, categoryId: string) {
   }
 }
 
-async function assertStoresInOrganization(orgId: string, storeIds: string[]) {
+async function assertStoresInHousehold(tx: Tx, householdId: string, storeIds: string[]) {
   const uniqueStoreIds = [...new Set(storeIds)];
   if (uniqueStoreIds.length === 0) {
     return uniqueStoreIds;
   }
 
-  const matchingStores = await db
+  const matchingStores = await tx
     .select({ id: stores.id })
     .from(stores)
-    .where(and(eq(stores.householdId, orgId), eq(stores.isActive, true)));
+    .where(and(eq(stores.householdId, householdId), eq(stores.isActive, true)));
 
   const validStoreIds = new Set(matchingStores.map((store) => store.id));
   if (uniqueStoreIds.some((storeId) => !validStoreIds.has(storeId))) {
@@ -107,12 +111,12 @@ async function assertStoresInOrganization(orgId: string, storeIds: string[]) {
   return uniqueStoreIds;
 }
 
-async function listItemRows(orgId: string) {
-  const rows = await db
+async function listItemRows(tx: Tx, householdId: string) {
+  const rows = await tx
     .select({ item: items, storeId: itemStores.storeId })
     .from(items)
     .leftJoin(itemStores, eq(itemStores.itemId, items.id))
-    .where(and(eq(items.householdId, orgId), eq(items.isActive, true), isNull(items.archivedAt)))
+    .where(and(eq(items.householdId, householdId), eq(items.isActive, true), isNull(items.archivedAt)))
     .orderBy(desc(items.createdAt));
 
   const grouped = new Map<string, { item: ItemRow; storeIds: string[] }>();
@@ -135,20 +139,25 @@ async function listItemRows(orgId: string) {
   return Array.from(grouped.values());
 }
 
-export async function listActiveItems(orgId: string): Promise<ItemDto[]> {
-  const groupedRows = await listItemRows(orgId);
+export async function listActiveItems(scope: Scope): Promise<ItemDto[]> {
+  const groupedRows = await withScope(scope, (tx) => listItemRows(tx, scope.householdId));
   return groupedRows.map(({ item, storeIds }) => serializeItem(item, storeIds));
 }
 
-export async function listArchivedItems(orgId: string): Promise<ItemDto[]> {
-  const rows = await db
-    .select({ item: items, storeId: itemStores.storeId })
-    .from(items)
-    .leftJoin(itemStores, eq(itemStores.itemId, items.id))
-    .where(and(eq(items.householdId, orgId), isNotNull(items.archivedAt)))
-    .orderBy(desc(items.archivedAt));
+export async function listArchivedItems(scope: Scope): Promise<ItemDto[]> {
+  const rows = await withScope(scope, async (tx) => {
+    const archived = await tx
+      .select({ item: items, storeId: itemStores.storeId })
+      .from(items)
+      .leftJoin(itemStores, eq(itemStores.itemId, items.id))
+      .where(and(eq(items.householdId, scope.householdId), isNotNull(items.archivedAt)))
+      .orderBy(desc(items.archivedAt));
+
+    return archived;
+  });
 
   const grouped = new Map<string, { item: ItemRow; storeIds: string[] }>();
+
   for (const row of rows) {
     const existing = grouped.get(row.item.id);
     if (existing) {
@@ -161,162 +170,173 @@ export async function listArchivedItems(orgId: string): Promise<ItemDto[]> {
   return Array.from(grouped.values()).map(({ item, storeIds }) => serializeItem(item, storeIds));
 }
 
-export async function listActiveStores(orgId: string): Promise<StoreDto[]> {
-  const storeRows = await db
-    .select()
-    .from(stores)
-    .where(and(eq(stores.householdId, orgId), eq(stores.isActive, true)))
-    .orderBy(asc(stores.name));
+export async function listActiveStores(scope: Scope): Promise<StoreDto[]> {
+  const storeRows = await withScope(scope, (tx) =>
+    tx
+      .select()
+      .from(stores)
+      .where(and(eq(stores.householdId, scope.householdId), eq(stores.isActive, true)))
+      .orderBy(asc(stores.name)),
+  );
 
   return storeRows.map(serializeStore);
 }
 
 export async function createItem(input: CreateItemInput): Promise<ItemDto> {
-  const { orgId, userId, name, quantity, note, categoryId, storeIds = [] } = input;
+  const { scope, name, quantity, note, categoryId, storeIds = [] } = input;
 
-  if (categoryId) {
-    await assertCategoryInOrganization(orgId, categoryId);
-  }
+  const created = await withScope(scope, async (tx) => {
+    if (categoryId) {
+      await assertCategoryInHousehold(tx, scope.householdId, categoryId);
+    }
 
-  const validStoreIds = await assertStoresInOrganization(orgId, storeIds);
+    const validStoreIds = await assertStoresInHousehold(tx, scope.householdId, storeIds);
 
-  const [item] = await db
-    .insert(items)
-    .values({
-      householdId: orgId,
-      name,
-      quantity: quantity ?? null,
-      note: note ?? null,
-      categoryId: categoryId ?? null,
-      createdById: userId,
-    })
-    .returning();
+    const [item] = await tx
+      .insert(items)
+      .values({
+        householdId: scope.householdId,
+        name,
+        quantity: quantity ?? null,
+        note: note ?? null,
+        categoryId: categoryId ?? null,
+        createdById: scope.userId,
+      })
+      .returning();
 
-  if (validStoreIds.length > 0) {
-    await db
-      .insert(itemStores)
-      .values(validStoreIds.map((storeId) => ({ itemId: item.id, storeId })));
-  }
+    if (validStoreIds.length > 0) {
+      await tx
+        .insert(itemStores)
+        .values(validStoreIds.map((storeId) => ({ itemId: item.id, storeId })));
+    }
 
-  return serializeItem(item, validStoreIds);
+    return { item, validStoreIds };
+  });
+
+  return serializeItem(created.item, created.validStoreIds);
 }
 
 export async function updateItem(input: UpdateItemInput): Promise<ItemUpdateResult> {
-  const { orgId, itemId, updates } = input;
+  const { scope, itemId, updates } = input;
 
-  if (updates.categoryId) {
-    await assertCategoryInOrganization(orgId, updates.categoryId);
-  }
+  return withScope(scope, async (tx) => {
+    if (updates.categoryId) {
+      await assertCategoryInHousehold(tx, scope.householdId, updates.categoryId);
+    }
 
-  if (updates.storeIds) {
-    updates.storeIds = await assertStoresInOrganization(orgId, updates.storeIds);
-  }
+    if (updates.storeIds) {
+      updates.storeIds = await assertStoresInHousehold(tx, scope.householdId, updates.storeIds);
+    }
 
-  const updateFields: Record<string, unknown> = { updatedAt: new Date() };
-  if (updates.name !== undefined) updateFields.name = updates.name;
-  if (updates.quantity !== undefined) updateFields.quantity = updates.quantity;
-  if (updates.note !== undefined) updateFields.note = updates.note;
-  if (updates.categoryId !== undefined) updateFields.categoryId = updates.categoryId;
-  if (updates.isActive !== undefined) updateFields.isActive = updates.isActive;
-  if (updates.isChecked !== undefined) updateFields.isChecked = updates.isChecked;
+    const updateFields: Record<string, unknown> = { updatedAt: new Date() };
+    if (updates.name !== undefined) updateFields.name = updates.name;
+    if (updates.quantity !== undefined) updateFields.quantity = updates.quantity;
+    if (updates.note !== undefined) updateFields.note = updates.note;
+    if (updates.categoryId !== undefined) updateFields.categoryId = updates.categoryId;
+    if (updates.isActive !== undefined) updateFields.isActive = updates.isActive;
+    if (updates.isChecked !== undefined) updateFields.isChecked = updates.isChecked;
 
-  if (updates.storeIds === undefined) {
-    const [updated] = await db
+    if (updates.storeIds === undefined) {
+      const [updated] = await tx
+        .update(items)
+        .set(updateFields)
+        .where(and(eq(items.id, itemId), eq(items.householdId, scope.householdId)))
+        .returning();
+
+      if (!updated) {
+        throw new ServiceError(404, "Item not found");
+      }
+
+      return { ...serializeItem(updated, []), storeIds: undefined };
+    }
+
+    const [updated] = await tx
       .update(items)
       .set(updateFields)
-      .where(and(eq(items.id, itemId), eq(items.householdId, orgId)))
+      .where(and(eq(items.id, itemId), eq(items.householdId, scope.householdId)))
       .returning();
 
     if (!updated) {
       throw new ServiceError(404, "Item not found");
     }
 
-    return { ...serializeItem(updated, []), storeIds: undefined };
-  }
+    await tx.delete(itemStores).where(eq(itemStores.itemId, itemId));
 
-  const [updated] = await db
-    .update(items)
-    .set(updateFields)
-    .where(and(eq(items.id, itemId), eq(items.householdId, orgId)))
-    .returning();
+    if (updates.storeIds.length > 0) {
+      await tx
+        .insert(itemStores)
+        .values(updates.storeIds.map((storeId) => ({ itemId, storeId })));
+    }
 
-  if (!updated) {
-    throw new ServiceError(404, "Item not found");
-  }
-
-  await db.delete(itemStores).where(eq(itemStores.itemId, itemId));
-
-  if (updates.storeIds.length > 0) {
-    await db
-      .insert(itemStores)
-      .values(updates.storeIds.map((storeId) => ({ itemId, storeId })));
-  }
-
-  return serializeItem(updated, updates.storeIds);
+    return serializeItem(updated, updates.storeIds);
+  });
 }
 
-export async function softDeleteItem(orgId: string, itemId: string) {
-  const [item] = await db
-    .update(items)
-    .set({ isActive: false, updatedAt: new Date() })
-    .where(and(eq(items.id, itemId), eq(items.householdId, orgId)))
-    .returning();
-
-  if (!item) {
-    throw new ServiceError(404, "Item not found");
-  }
-}
-
-export async function clearCompletedItems(orgId: string): Promise<ItemDto[]> {
-  const rows = await db
-    .select({ item: items, storeId: itemStores.storeId })
-    .from(items)
-    .leftJoin(itemStores, eq(itemStores.itemId, items.id))
-    .where(and(eq(items.householdId, orgId), eq(items.isActive, true), eq(items.isChecked, true), isNull(items.archivedAt)));
-
-  const ids = [...new Set(rows.map((r) => r.item.id))];
-  if (ids.length > 0) {
-    await db
+export async function softDeleteItem(scope: Scope, itemId: string) {
+  await withScope(scope, async (tx) => {
+    const [item] = await tx
       .update(items)
-      .set({ archivedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(items.householdId, orgId), inArray(items.id, ids)));
-  }
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(and(eq(items.id, itemId), eq(items.householdId, scope.householdId)))
+      .returning();
+
+    if (!item) {
+      throw new ServiceError(404, "Item not found");
+    }
+  });
+}
+
+export async function clearCompletedItems(scope: Scope): Promise<ItemDto[]> {
+  const rows = await withScope(scope, async (tx) => {
+    const completed = await tx
+      .select({ item: items, storeId: itemStores.storeId })
+      .from(items)
+      .leftJoin(itemStores, eq(itemStores.itemId, items.id))
+      .where(and(eq(items.householdId, scope.householdId), eq(items.isActive, true), eq(items.isChecked, true), isNull(items.archivedAt)));
+
+    const ids = [...new Set(completed.map((r) => r.item.id))];
+    if (ids.length > 0) {
+      await tx
+        .update(items)
+        .set({ archivedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(items.householdId, scope.householdId), inArray(items.id, ids)));
+    }
+
+    return completed;
+  });
 
   const grouped = new Map<string, { item: ItemRow; storeIds: string[] }>();
 
   for (const row of rows) {
     const existing = grouped.get(row.item.id);
     if (existing) {
-      if (row.storeId) {
-        existing.storeIds.push(row.storeId);
-      }
+      if (row.storeId) existing.storeIds.push(row.storeId);
       continue;
     }
-
-    grouped.set(row.item.id, {
-      item: row.item,
-      storeIds: row.storeId ? [row.storeId] : [],
-    });
+    grouped.set(row.item.id, { item: row.item, storeIds: row.storeId ? [row.storeId] : [] });
   }
 
   return Array.from(grouped.values()).map(({ item, storeIds }) => serializeItem(item, storeIds));
 }
 
-export async function reAddArchivedItem(orgId: string, itemId: string): Promise<ItemDto> {
+export async function reAddArchivedItem(scope: Scope, itemId: string): Promise<ItemDto> {
   // Restore the original row so its category and store tags remain intact.
   const now = new Date();
-  const [item] = await db
-    .update(items)
-    .set({ archivedAt: null, isChecked: false, createdAt: now, updatedAt: now })
-    .where(and(eq(items.id, itemId), eq(items.householdId, orgId), isNotNull(items.archivedAt)))
-    .returning();
 
-  if (!item) throw new ServiceError(404, "Archived item not found");
+  return withScope(scope, async (tx) => {
+    const [item] = await tx
+      .update(items)
+      .set({ archivedAt: null, isChecked: false, createdAt: now, updatedAt: now })
+      .where(and(eq(items.id, itemId), eq(items.householdId, scope.householdId), isNotNull(items.archivedAt)))
+      .returning();
 
-  const storeRows = await db
-    .select({ storeId: itemStores.storeId })
-    .from(itemStores)
-    .where(eq(itemStores.itemId, itemId));
+    if (!item) throw new ServiceError(404, "Archived item not found");
 
-  return serializeItem(item, storeRows.map((row) => row.storeId));
+    const storeRows = await tx
+      .select({ storeId: itemStores.storeId })
+      .from(itemStores)
+      .where(eq(itemStores.itemId, itemId));
+
+    return serializeItem(item, storeRows.map((row) => row.storeId));
+  });
 }

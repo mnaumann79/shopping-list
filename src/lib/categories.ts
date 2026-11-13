@@ -1,6 +1,6 @@
-import { db } from "@/db";
-import { categories } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
+import { categories } from "@/db/schema";
+import { withScope, type Scope } from "@/db/scope";
 
 export const DEFAULT_CATEGORIES = [
   "Produce",
@@ -15,40 +15,42 @@ export const DEFAULT_CATEGORIES = [
   "Other",
 ] as const;
 
-export async function ensureDefaultCategories(orgId: string) {
-  const existingDefaults = await db
-    .select()
-    .from(categories)
-    .where(
-      and(
-        eq(categories.householdId, orgId),
-        eq(categories.isDefault, true),
-        eq(categories.isActive, true)
-      )
-    );
+export async function ensureDefaultCategories(scope: Scope) {
+  return withScope(scope, async (tx) => {
+    const existingDefaults = await tx
+      .select()
+      .from(categories)
+      .where(
+        and(
+          eq(categories.householdId, scope.householdId),
+          eq(categories.isDefault, true),
+          eq(categories.isActive, true)
+        )
+      );
 
-  if (existingDefaults.length > 0) {
-    return existingDefaults;
-  }
+    if (existingDefaults.length > 0) {
+      return existingDefaults;
+    }
 
-  const rows = DEFAULT_CATEGORIES.map((name) => ({
-    householdId: orgId,
-    name,
-    isDefault: true,
-  }));
+    const rows = DEFAULT_CATEGORIES.map((name) => ({
+      householdId: scope.householdId,
+      name,
+      isDefault: true,
+    }));
 
-  await db.insert(categories).values(rows);
+    await tx.insert(categories).values(rows);
 
-  return rows;
+    return rows;
+  });
 }
 
-export async function fetchCategories(orgId: string) {
-  const allCategories = await db
-    .select()
-    .from(categories)
-    .where(
-      and(eq(categories.householdId, orgId), eq(categories.isActive, true))
-    );
+export async function fetchCategories(scope: Scope) {
+  const allCategories = await withScope(scope, (tx) =>
+    tx
+      .select()
+      .from(categories)
+      .where(and(eq(categories.householdId, scope.householdId), eq(categories.isActive, true))),
+  );
 
   const defaults = allCategories.filter((category) => category.isDefault);
   const custom = allCategories.filter((category) => !category.isDefault);

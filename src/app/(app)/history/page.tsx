@@ -12,7 +12,11 @@ export default async function HistoryPage() {
   const orgId = session.session.activeOrganizationId;
   if (!orgId) redirect("/onboarding");
 
-  const [items, categories, stores] = await Promise.all([listArchivedItems(orgId), fetchCategories(orgId), listActiveStores(orgId)]);
+  const [items, categories, stores] = await Promise.all([
+    listArchivedItems({ userId: session.user.id, householdId: orgId }),
+    fetchCategories({ userId: session.user.id, householdId: orgId }),
+    listActiveStores({ userId: session.user.id, householdId: orgId }),
+  ]);
   const categoryNames = new Map(categories.map((category) => [category.id, category.name]));
   const storeNames = new Map(stores.map((store) => [store.id, store.name]));
   const historyItems = items.map((item) => ({

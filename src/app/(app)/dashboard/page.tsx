@@ -14,11 +14,13 @@ export default async function DashboardPage() {
   const orgId = session.session.activeOrganizationId;
   if (!orgId) redirect("/onboarding");
 
+  const scope = { userId: session.user.id, householdId: orgId };
+
   const [, categories, initialItems, storeList] = await Promise.all([
-    ensureDefaultCategories(orgId),
-    fetchCategories(orgId),
-    listActiveItems(orgId),
-    listActiveStores(orgId),
+    ensureDefaultCategories(scope),
+    fetchCategories(scope),
+    listActiveItems(scope),
+    listActiveStores(scope),
   ]);
 
   return (

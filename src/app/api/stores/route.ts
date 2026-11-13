@@ -1,5 +1,5 @@
-import { db } from "@/db";
 import { stores } from "@/db/schema";
+import { withScope, type Scope } from "@/db/scope";
 import { requireActiveOrganization } from "@/lib/request-auth";
 import { and, eq, asc } from "drizzle-orm";
 import { NextRequest } from "next/server";
@@ -15,12 +15,19 @@ export async function GET() {
     return authContext;
   }
 
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
+
   try {
-    const storeList = await db
-      .select()
-      .from(stores)
-      .where(and(eq(stores.householdId, authContext.orgId), eq(stores.isActive, true)))
-      .orderBy(asc(stores.name));
+    const storeList = await withScope(scope, (tx) =>
+      tx
+        .select()
+        .from(stores)
+        .where(and(eq(stores.householdId, scope.householdId), eq(stores.isActive, true)))
+        .orderBy(asc(stores.name)),
+    );
 
     return Response.json(storeList, { status: 200 });
   } catch {
@@ -43,14 +50,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
+
   try {
-    const [store] = await db
-      .insert(stores)
-      .values({
-        householdId: authContext.orgId,
-        name: parsed.data.name,
-      })
-      .returning();
+    const [store] = await withScope(scope, (tx) =>
+      tx
+        .insert(stores)
+        .values({
+          householdId: scope.householdId,
+          name: parsed.data.name,
+        })
+        .returning(),
+    );
 
     return Response.json(store, { status: 201 });
   } catch {
