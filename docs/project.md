@@ -3471,29 +3471,53 @@ member of the household the cookie names, the request is rejected (§12.5).
 caller may.** This is the same rule §12.1 applies to the cached client
 session, one level up.
 
-### 12.1b The optimistic guard does not run
+### 12.1b The optimistic guard runs, and it carries a returnTo
 
-- **The repository's root `middleware.ts` never runs.** The application lives
-  under `src/`, so Next.js looks for the middleware in `src/` — at
-  `src/middleware.ts`, which does not exist. The file in the repository root is
-  dead code: Next.js does not load it, and nothing in it executes.
-- **The guard that does run is server-side.** `src/app/(app)/layout.tsx` calls
-  `getRequestSession()` and, when there is no session, `redirect("/sign-in")`.
-  Several pages in the same group repeat the check themselves.
-- **The two guards do not behave alike.** The root file redirects to
-  `/sign-in` **with** a `returnTo` parameter, so it would send the user back
-  to the page they asked for. The layout guard redirects **without**
-  `returnTo`, so that behaviour does not exist in the application today.
-- **The file's own security note is right, and that is the point.** It calls
-  the middleware an optimistic guard only — the session must also be validated
-  in the server components, which the layout does. SEC-01 is unaffected: every
-  API route verifies the session server-side.
+- **The repository's root `middleware.ts` runs.** Next.js builds it: the
+  build's edge-chunk source map names the source
+  `turbopack:///[project]/middleware.ts`, and `.next/server/middleware-manifest.json`
+  registers it with the root file's matcher,
+  `/((?!api|_next/static|_next/image|favicon.ico).*)`. The resolver accepts
+  the file in the project root as well as in `src/`
+  (`next/dist/build/utils.js`: `isMiddlewareFile()` and
+  `getPossibleMiddlewareFilenames()`).
+- **Why the belief existed, so it does not come back.**
+  `next/dist/build/index.js` computes
+  `rootDir = path.join(pagesDir || appDir, '..')`, which with the app under
+  `src/` is `<root>/src`; the scan of *that* directory never sees the root
+  file. That is a true statement about that scan and a false conclusion about
+  the file — the root folder is scanned by a second path. The specification
+  asserted the conclusion without the measurement, and the assertion was
+  repeated until it looked like a fact.
+- **What the running guard does.** It reads the session cookie's *presence*.
+  An unauthenticated visitor to a protected prefix (`/dashboard`,
+  `/household`, `/settings`) is redirected to `/sign-in` **with** a `returnTo`
+  parameter naming the path they asked for; a visitor with a cookie on an
+  auth route (`/sign-in`, `/sign-up`) is redirected to `/dashboard`. Measured
+  against the built app: `/sign-up` with a session cookie → **307 →
+  `/dashboard`**; `/dashboard` without one → **307 →
+  `/sign-in?returnTo=%2Fdashboard`**. Those are the file's two branches, and
+  nothing else produces that shape.
+- **It is an optimistic guard, and it is not the authorization layer.** The
+  file's own security note is right: the cookie's presence is not a session,
+  and the session must also be validated server-side. SEC-01 stands: every
+  API route verifies the session server-side, and the app layout's
+  server-side check (`src/app/(app)/layout.tsx`) validates it for the pages
+  under it.
+- **Both guards run, and they do not behave alike.** The middleware carries
+  the `returnTo`; the layout's `redirect("/sign-in")` does not, so a visitor
+  the layout sends to the sign-in page does not come back to the page they
+  asked for.
+- **A visitor whose access token has lapsed is caught in a redirect loop.**
+  The middleware bounces `/sign-in` → `/dashboard` on the cookie's presence
+  while the layout's server-side check bounces `/dashboard` → `/sign-in`.
+  This is pre-existing — the middleware before the auth swap read the
+  cookie's presence the same way — and it is being fixed in task P0S-T21.
 - **What happens to the file is a cutover decision.** Whether the guard moves
   to `src/middleware.ts`, is replaced, or is deleted is decided with the
-  cutover (§13.2); the specification records the state and does not pre-empt
-  the choice. Until it is decided, the file must not be read as a description
-  of how the application behaves: it looks authoritative and is not, and task
-  0b.7 must not land the new session handling next to it as if it were live.
+  cutover (§13.2; D-11, backlog item B1-T01). Until it is decided the file
+  stays where it is, and it keeps running: it reads like the authorization
+  layer, and it is not one.
 
 ### 12.2 Offline session expiry (scenario 13)
 
@@ -3807,6 +3831,11 @@ been signed into, it verifies the password against the legacy hash, gives the
 GoTrue account that same password, and signs the user in. The plaintext
 exists for exactly one request, over TLS, and is never logged.
 
+**The route does not redirect.** It answers, and the client decides where to
+go next — so it neither depends on nor assumes the middleware's `returnTo`
+behaviour (§12.1b), which the middleware carries and the layout's
+server-side check does not.
+
 **The condition on the GoTrue account is what keeps the two sides apart.** The
 cutover provisions a GoTrue user for every legacy user, with a random
 unusable password, so *"a GoTrue account exists for this email"* is true of
@@ -3850,7 +3879,7 @@ not a permanent second authentication system.
 
 | ID | Requirement |
 | --- | --- |
-| SEC-01 | Every API route MUST verify the session server-side. The middleware is an optimistic redirect only and MUST NOT be treated as an authorization layer — and the repository's root `middleware.ts` does not run at all (§12.1b); the guard that runs is the server-side one in `src/app/(app)/layout.tsx`. |
+| SEC-01 | Every API route MUST verify the session server-side. The middleware is an optimistic redirect only and MUST NOT be treated as an authorization layer — it reads the session cookie's *presence*, and the repository's root `middleware.ts` **does** run (§12.1b). The session is validated server-side by the app layout's check and by every API route. |
 | SEC-02 | Every household-scoped query MUST be scoped by `household_id`, enforced by a shared scope helper that is the only sanctioned access path to household-scoped tables. Row-level security is a **second** layer on top of it, not a replacement (ADR-12, §9.2b). |
 | SEC-03 | Only owners/admins may invite, mint join links, or remove members — enforced server-side, with **403** responses (not 500). |
 | SEC-04 | No endpoint may return data without a session check. `GET /api/invitation-email` must require a session or be removed. |
