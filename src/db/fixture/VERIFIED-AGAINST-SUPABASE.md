@@ -8,6 +8,14 @@ Everything below was run against the instance. The scratch schema it ran in
 and the throwaway `auth.users` row used for the foreign keys were **dropped
 afterwards**; the instance's pre-existing `public` tables were not touched.
 
+> **Which instance this was verified against.** The MCP was aimed at a
+> *different* project when these checks were run, so the inventory below — the
+> schemas in §1, the roles in §2, and the other application's tables in §8 —
+> describes that project and not necessarily the development instance. The
+> three §10.8 statements are the same statements everywhere, and they were
+> verified against a PostgreSQL 17.11; the inventory has to be taken again
+> against the development instance.
+
 > **No identifiers.** The project's ref, the scratch schema's name, the
 > instance's role names and the names of the other application's tables are
 > deliberately not in this file: a committed document is a public document,
