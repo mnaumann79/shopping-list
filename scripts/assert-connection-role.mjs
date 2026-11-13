@@ -35,22 +35,42 @@ const { Client } = pg;
 // rule decides, and everything else refuses.
 const PRIVILEGED = "PRIV1";
 
+// The advice the role finding gives. A finding about the connection itself
+// gives advice about the connection instead, so this is the default rather
+// than the rule.
+const ROLE_ADVICE =
+  "Set DATABASE_URL to the non-owner role the migrations create (`app`), or to a\n" +
+  "role with the same privileges.";
+
 /**
  * What the findings mean for the operator.
  *
  * The refusal says what was found and what it costs, because a deployment
  * that refuses to start is only useful if the operator can see why.
  */
-function refuse(message, cost) {
+function refuse(message, cost, advice = ROLE_ADVICE) {
   console.error(`Refusing to serve: ${message}.`);
   if (cost) {
     console.error(cost);
   }
-  console.error(
-    "Set DATABASE_URL to the non-owner role the migrations create (`app`), or to a\n" +
-      "role with the same privileges.",
-  );
+  console.error(advice);
   return 1;
+}
+
+/**
+ * Whether this is a deployment rather than a developer's machine.
+ *
+ * The host decides it when there is one: isDevelopmentHost already draws
+ * that line for the privileged role. With no DATABASE_URL there is no host
+ * to read, so the environment decides instead - the deployment runs with
+ * NODE_ENV=production, which the cutover checklist tells the operator to
+ * override for the install alone, and a developer's machine does not.
+ */
+function isDeployment(host) {
+  if (host === undefined) {
+    return process.env.NODE_ENV === "production";
+  }
+  return !isDevelopmentHost(host);
 }
 
 function report(error, host) {
@@ -88,9 +108,20 @@ async function main() {
   const connectionString = process.env.DATABASE_URL?.trim();
 
   if (!connectionString) {
+    if (isDeployment()) {
+      // Against a deployment the variable is not optional: there is no role
+      // to check, and every request that needs the database fails.
+      return refuse(
+        "DATABASE_URL is not set",
+        "A deployment needs it: the connection role cannot be checked without it,\n" +
+          "and every request that needs the database fails without it.",
+        "Set DATABASE_URL to the non-owner role the migrations create (`app`), and to a\n" +
+          "reachable instance.",
+      );
+    }
     // The application builds its client lazily, so a missing DATABASE_URL is
-    // a request-time error today. The check does not change that: there is no
-    // role to look at.
+    // a request-time error on a developer's machine. The check does not change
+    // that: there is no role to look at.
     console.warn(
       "DATABASE_URL is not set: the connection role cannot be checked. The\n" +
         "application will fail on the first request that needs the database.",
@@ -103,6 +134,20 @@ async function main() {
   try {
     await client.connect();
   } catch (error) {
+    if (isDeployment(client.connectionParameters.host)) {
+      // Against a deployment, a database it cannot reach is the same shape of
+      // harm as a privileged role: the process would start, the health check
+      // would pass, and every request would fail.
+      return refuse(
+        `the database could not be reached: ${error.message}`,
+        "A deployment that cannot reach its database serves nothing, and it fails\n" +
+          "on every request instead of on start.",
+        "Check that DATABASE_URL names a reachable database, and that\n" +
+          "NODE_EXTRA_CA_CERTS points at Supabase's root certificate: the pooler's\n" +
+          "certificate chains to it, and without it the connection is refused with\n" +
+          '"self-signed certificate in certificate chain".',
+      );
+    }
     // The database is unreachable, so nothing is served against it either
     // way. The application reports the connection itself, on the first
     // request that needs it.
