@@ -76,14 +76,19 @@ Each of these cost an hour:
 
 ### On a fresh instance, in this order
 
-1. **Apply the repository's migrations first.** Migration `0005` creates the
-   `app` role — and creates it without a password.
+1. **Apply the repository's migrations first, with the owner's
+   connection.** Migration `0005` creates the `app` role — and creates it
+   without a password. The files go in with `psql`, as the owner: the
+   runner is a development-side tool, it refuses a host it cannot prove is
+   local (`DB_MIGRATE_ALLOW_ANY_HOST=1` is its opt-in), and the cutover
+   does not run it against the target in any case.
 2. **Then set the role's password**, through the flow that re-syncs the
    pooler. The pooler authenticates the application role by fetching the
    role's credential, and it does not always see the instance's copy: the
    credential on the instance and the pooler's copy of it can come apart,
    and a change to the role's password alone does not re-sync it.
-3. **Then put the connection string in `DATABASE_URL`.**
+3. **Then put the connection string in `DATABASE_URL`** — the
+   application's role, not the owner's.
 
 ---
 
@@ -141,13 +146,20 @@ Each of these cost an hour:
         --target "postgresql://…@the-instance…/postgres"
       ```
 
-- [ ] **The rehearsal's guards were not tripped.** It refuses the Neon
-      **production** host family — these scripts move data and may only
-      touch the development instance — it writes only to a scratch
-      database whose name starts with `cutover_rehearsal_` (it creates
-      one), and it refuses a target without an `auth` schema, because a
-      plain PostgreSQL would take the data and silently lose the
-      identities.
+- [ ] **The rehearsal's guards were not tripped, and its writes were
+      expected.** It refuses the Neon **production** host family — these
+      scripts move data and may only touch the development instance — it
+      writes to a scratch database whose name starts with
+      `cutover_rehearsal_` (it creates one), and it refuses a target
+      without an `auth` schema, because a plain PostgreSQL would take the
+      data and silently lose the identities.
+      **It also writes to the target, and that write stays.** The GoTrue
+      accounts the rehearsal needs are inserted into the target's
+      `auth.users` — an account that already exists is reused, so a
+      rehearsal may be run more than once — and those rows are not in the
+      scratch database, so dropping the scratch does not remove them. The
+      target is therefore the **development instance**, and the rehearsal
+      is not something to point at production.
 - [ ] **The rehearsal passes.** It compares the row counts of six tables —
       `items`, `categories`, `stores`, `household_join_links`, `item_stores`
       and the legacy `user` — checks that no identity is orphaned, and fails
@@ -287,9 +299,13 @@ This is the one step nothing else can do for you — see the last section.
 - [ ] **The legacy tables are dropped** — Better Auth's `user`, `session`,
       `account`, `verification`, `organization`, `member` and `invitation`.
       Seven, and the list is the repository's own: `scripts/cutover/lib.mjs`
-      exports it as `RESTORED_TABLES`, and `db/init.sql` creates all seven.
-      A decommission that named five of them would leave two behind,
-      holding whatever was in them.
+      exports it as `RESTORED_TABLES`, and those seven are its **Better
+      Auth** entries. The export also lists the application's own five —
+      `items`, `categories`, `stores`, `household_join_links` and
+      `item_stores` — and **those are not part of this list**: the
+      decommission drops the seven legacy tables and nothing else.
+      `db/init.sql` creates all seven. A decommission that named five of
+      them would leave two behind, holding whatever was in them.
 - [ ] **The transitional sign-in route is removed**:
       `src/app/api/auth/legacy-signin/` and everything under
       `src/lib/legacy-auth/`.
