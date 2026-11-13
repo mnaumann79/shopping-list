@@ -1,5 +1,6 @@
-import { test, expect } from "@playwright/test";
-import { PASSWORD, registerUser, submitForm, trackRequests, uniqueEmail } from "./helpers";
+import { test } from "@playwright/test";
+import { expect, PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
+import { registerUser, trackRequests } from "./helpers";
 
 // AUTH-01: User can sign up with email and password
 //
