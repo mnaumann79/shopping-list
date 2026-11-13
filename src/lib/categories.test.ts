@@ -60,7 +60,7 @@ describe("ensureDefaultCategories", () => {
         where: vi.fn().mockResolvedValue(
           DEFAULT_CATEGORY_NAMES.map((name, i) => ({
             id: `cat-${i}`,
-            organizationId: "org-1",
+            householdId: "org-1",
             name,
             isDefault: true,
             isActive: true,

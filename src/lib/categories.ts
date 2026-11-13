@@ -21,7 +21,7 @@ export async function ensureDefaultCategories(orgId: string) {
     .from(categories)
     .where(
       and(
-        eq(categories.organizationId, orgId),
+        eq(categories.householdId, orgId),
         eq(categories.isDefault, true),
         eq(categories.isActive, true)
       )
@@ -32,7 +32,7 @@ export async function ensureDefaultCategories(orgId: string) {
   }
 
   const rows = DEFAULT_CATEGORIES.map((name) => ({
-    organizationId: orgId,
+    householdId: orgId,
     name,
     isDefault: true,
   }));
@@ -47,7 +47,7 @@ export async function fetchCategories(orgId: string) {
     .select()
     .from(categories)
     .where(
-      and(eq(categories.organizationId, orgId), eq(categories.isActive, true))
+      and(eq(categories.householdId, orgId), eq(categories.isActive, true))
     );
 
   const defaults = allCategories.filter((category) => category.isDefault);

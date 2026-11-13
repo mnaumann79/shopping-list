@@ -19,7 +19,7 @@ const MOCK_ITEM = {
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
   createdById: "u1",
-  organizationId: "org-1",
+  householdId: "org-1",
   storeIds: ["store-1"],
 };
 

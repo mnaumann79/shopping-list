@@ -34,7 +34,7 @@ export async function PATCH(req: NextRequest, { params }: RouteContext) {
     const [store] = await db
       .update(stores)
       .set({ name: parsed.data.name, updatedAt: new Date() })
-      .where(and(eq(stores.id, id), eq(stores.organizationId, authContext.orgId)))
+      .where(and(eq(stores.id, id), eq(stores.householdId, authContext.orgId)))
       .returning();
 
     if (!store) {
@@ -58,7 +58,7 @@ export async function DELETE(_req: NextRequest, { params }: RouteContext) {
   try {
     const [deleted] = await db
       .delete(stores)
-      .where(and(eq(stores.id, id), eq(stores.organizationId, authContext.orgId)))
+      .where(and(eq(stores.id, id), eq(stores.householdId, authContext.orgId)))
       .returning();
 
     if (!deleted) {

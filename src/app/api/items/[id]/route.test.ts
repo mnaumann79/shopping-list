@@ -77,7 +77,7 @@ describe("PATCH /api/items/[id]", () => {
           returning: vi.fn().mockResolvedValue([
             {
               id: "item-1",
-              organizationId: "org-1",
+              householdId: "org-1",
               name: "Whole Milk",
               isActive: true,
               isChecked: false,
@@ -105,7 +105,7 @@ describe("PATCH /api/items/[id]", () => {
           returning: vi.fn().mockResolvedValue([
             {
               id: "item-1",
-              organizationId: "org-1",
+              householdId: "org-1",
               name: "Milk",
               isActive: true,
               isChecked: true,
@@ -135,7 +135,7 @@ describe("PATCH /api/items/[id]", () => {
           returning: vi.fn().mockResolvedValue([
             {
               id: "item-1",
-              organizationId: "org-1",
+              householdId: "org-1",
               name: "Milk",
               isActive: true,
               isChecked: false,
@@ -164,7 +164,7 @@ describe("PATCH /api/items/[id]", () => {
         returning: vi.fn().mockResolvedValue([
           {
             id: "item-1",
-            organizationId: "org-1",
+            householdId: "org-1",
             name: "Milk",
             isActive: true,
             isChecked: false,
@@ -202,7 +202,7 @@ describe("PATCH /api/items/[id]", () => {
     const updateReturning = vi.fn().mockResolvedValue([
       {
         id: "item-1",
-        organizationId: "org-1",
+        householdId: "org-1",
         name: "Milk",
         isActive: true,
         isChecked: false,

@@ -8,7 +8,6 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { organization, user } from "./auth";
 import { authUsers } from "./supabase";
 
 // The household is the tenant. It was Better Auth's `organization` table;
@@ -90,12 +89,12 @@ export const householdInvitations = pgTable(
 export const householdJoinLinks = pgTable("household_join_links", {
   id: uuid("id").primaryKey().defaultRandom(),
   token: text("token").notNull().unique(),
-  organizationId: text("organization_id")
+  householdId: uuid("household_id")
     .notNull()
-    .references(() => organization.id, { onDelete: "cascade" }),
-  createdById: text("created_by_id")
+    .references(() => households.id, { onDelete: "cascade" }),
+  createdById: uuid("created_by_id")
     .notNull()
-    .references(() => user.id),
+    .references(() => authUsers.id),
   expiresAt: timestamp("expires_at").notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });

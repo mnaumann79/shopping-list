@@ -75,7 +75,7 @@ describe("POST /api/categories", () => {
         returning: vi.fn().mockResolvedValue([
           {
             id: "cat-1",
-            organizationId: "org-1",
+            householdId: "org-1",
             name: "Bakery",
             isDefault: false,
             isActive: true,
@@ -90,7 +90,7 @@ describe("POST /api/categories", () => {
     const json = await res.json();
     expect(json.id).toBeDefined();
     expect(json.name).toBe("Bakery");
-    expect(json.organizationId).toBe("org-1");
+    expect(json.householdId).toBe("org-1");
   });
 
   it("returns 409 when category name already exists in this org", async () => {
