@@ -312,12 +312,19 @@ END $$;
 -- The privileges `authenticated` needs on the auth schema, granted only
 -- where the migrating role owns that schema.
 --
--- On the instance the auth schema belongs to supabase_admin, and the grant
--- is refused with "permission denied for schema auth" - there `authenticated`
--- already has what it needs, because Supabase granted it. On a plain
--- PostgreSQL the migrating role owns the schema and the grant is the one that
--- gives `authenticated` - and through it the app role - the USAGE and the
--- EXECUTE that the policies below call.
+-- On a plain PostgreSQL the migrating role owns the schema and the grant is
+-- the one that gives `authenticated` - and through it the app role - the
+-- USAGE and the EXECUTE that the policies below call.
+--
+-- On a hosted instance the auth schema belongs to supabase_admin, so this
+-- block is skipped: the guard is the schema's ownership, and the migrating
+-- role does not own it there. No statement runs, no warning is emitted and
+-- nothing fails. A grant issued by hand is accepted - the statement
+-- succeeds - and PostgreSQL declines it in a warning, no privileges were
+-- granted for "auth", so it grants nothing. `authenticated` already has
+-- what it needs there, because Supabase granted it. Measured on the
+-- development instance; the account is in
+-- db/migrations/0008_auth_schema_grant_account.sql.
 DO $$
 BEGIN
   IF EXISTS (
@@ -334,11 +341,11 @@ END $$;
 -- The app role inherits the authenticated role, and with it the USAGE on the
 -- auth schema and the EXECUTE on auth.uid() that the policies call.
 --
--- The obvious grant - GRANT USAGE ON SCHEMA auth TO app - does not work on
--- the instance: the auth schema belongs to supabase_admin, the postgres role
--- is not a superuser there, and the grant is refused with a warning that
--- says no privileges were granted. The inherited role is what actually
--- carries them.
+-- The obvious grant - GRANT USAGE ON SCHEMA auth TO app - grants nothing on
+-- the instance: the auth schema belongs to supabase_admin, the migrating
+-- role has no grant option on it, and the grant is accepted and then
+-- declined in a warning - no privileges were granted for "auth" - so it
+-- changes nothing. The inherited role is what actually carries them.
 GRANT authenticated TO app;
 
 GRANT USAGE ON SCHEMA public TO app;
