@@ -4,12 +4,24 @@ Auth-aware Lighthouse audit on `/dashboard`. Budgets: **LCP < 2500 ms**, **CLS <
 
 ## What it is
 
-`scripts/verify-perf-07.mjs` drives a real Lighthouse run against the authenticated dashboard. It signs up a fresh user via the better-auth API, captures the post-login cookies, injects them into a headless Chrome instance, runs Lighthouse against `/dashboard`, and exits non-zero if either budget is exceeded. The full Lighthouse JSON is written to `lighthouse-report-<timestamp>.json` at the repo root.
+`scripts/verify-perf-07.mjs` drives a real Lighthouse run against the authenticated dashboard. It signs up a fresh user against the Supabase Auth server, creates a household through the application's own route, seeds three items in it, captures the cookies the application set, injects them into a headless Chrome instance, runs Lighthouse against `/dashboard`, and exits non-zero if either budget is exceeded. The full Lighthouse JSON is written to `lighthouse-report-<timestamp>.json` at the repo root.
+
+**The setup is the product's own journey**, not a stand-in for it: a Supabase Auth sign-up, then `POST /api/households`, which creates the household, makes the caller its owner, and leaves that household active in the `sb-household` cookie. That cookie is what Better Auth's `session.activeOrganizationId` used to do, and the household is what its organization was: one tenant, one list, one signed-in member.
+
+**What is measured has not changed.** Lighthouse runs on the authenticated dashboard with the same emulation (mobile, simulated 4G), the same budgets, and the same numbers read out of the report — LCP, CLS, FCP, TBT, Speed Index and the performance score.
 
 ## Trigger
 
 - **Scheduled**: GitHub Actions cron — `0 3 1 1/2 *` (03:00 UTC on the 1st of every other month: Jan / Mar / May / Jul / Sep / Nov).
 - **Manual**: GitHub → Actions → `perf-audit` → Run workflow.
+
+## How the run is set up
+
+The job starts the **Supabase local stack** (`supabase start`, the same version the integration job uses) and runs the audit against it. The stack brings both halves of the platform the journey needs: GoTrue, which owns the `auth` schema and writes the signed-up user into the database, and the Postgres the application connects to — the same database, so the household's foreign key resolves.
+
+**The gateway must not be excluded.** The Supabase client addresses the gateway, and the gateway is what serves `/auth/v1`: without it, the browser signs nobody in, and the specs fail in a way that looks like a product defect rather than a missing container. The integration job excludes it because the application there is not exercised over HTTP.
+
+The job takes the two public values the browser client signs up with from the stack itself (`supabase status -o env`: `API_URL` and `PUBLISHABLE_KEY`), so there are no secrets in it and nothing to keep in step. The schema comes from `db/migrations/**` through `pnpm db:migrate` — the migration folder is the source of truth, and the flat snapshot `db/init.sql` is a mirror of it.
 
 ## Owner
 
@@ -31,20 +43,25 @@ Both also appear in the run's stdout under "Core Web Vitals (mobile, simulated 4
 3. Run the script locally to reproduce:
 
    ```bash
+   # The local stack: GoTrue, and the Postgres the application connects to.
+   npx supabase start
+   eval "$(npx supabase status -o env)"
+   export NEXT_PUBLIC_SUPABASE_URL="$API_URL"
+   export NEXT_PUBLIC_SUPABASE_ANON_KEY="$PUBLISHABLE_KEY"
+
+   # The schema, from the migrations.
+   export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+   pnpm db:migrate
+
    # In one terminal
    pnpm build
-   pnpm db:push           # or: pnpm exec drizzle-kit push
-   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/shopping_list_perf \
-     BETTER_AUTH_SECRET=ci-perf-audit-secret \
-     BETTER_AUTH_URL=http://localhost:3000 \
-     NEXT_PUBLIC_APP_URL=http://localhost:3000 \
-     pnpm start
+   pnpm start
 
    # In another terminal
    pnpm exec node scripts/verify-perf-07.mjs
    ```
 
-   (Or use `docker run --rm -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16` to provide the DB.)
+   (The script writes `lighthouse-report-*.json` to the current directory.)
 4. `git log --since="<last-good-run-date>" --until="<failure-date>"` to find candidate commits.
 5. If the failure is a flake (transient DB / network), close the issue — the next scheduled run will re-verify.
 
@@ -54,12 +71,13 @@ GitHub → Actions → `perf-audit` → run → **Re-run all jobs**. The comment
 
 ## Common failure modes
 
-- **DB unreachable** — `services.postgres` health check failed. Retry the run; if persistent, the Postgres image or runner image may have shifted.
-- **Signup fails** (`signup failed: 4xx`) — better-auth config drift. Verify `BETTER_AUTH_SECRET` and `BETTER_AUTH_URL` env vars are set in the workflow.
+- **The local stack does not start** — the health check failed. Retry the run; if persistent, the runner image may have shifted.
+- **Signup fails** (`signup failed: 4xx`) — the Supabase configuration is wrong: `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` must name the project the application signs up against. In the workflow they come from `supabase status`; locally, from the same command.
+- **Sign-up succeeds but the household is not created** (`household create failed`) — the application could not write to the database. Check `DATABASE_URL` and that the schema is applied (`pnpm db:migrate`).
+- **The readiness probe times out** — the application did not answer `/api/categories` with 401 or 200 within 60 seconds. The step prints the tail of the app log.
 - **Cookies not injected** — `chrome-remote-interface` connection error. Confirm Chrome launched; the script's `chromeFlags` (`--headless=new --no-sandbox`) are required for the CI runner.
 - **LCP exceeded at random** — cold-start variance. Re-run once; if it persists past three runs, it's a real regression and warrants investigation.
 - **`pnpm install --frozen-lockfile` fails** — lockfile out of sync with `package.json`. Run `pnpm install` locally and commit the updated `pnpm-lock.yaml`.
-- **drizzle-kit push fails** — schema migration drift. Run `pnpm exec drizzle-kit push` locally to verify, then commit any new migration files.
 
 ## Adding this to a new repo
 
@@ -68,6 +86,8 @@ The workflow is self-contained but assumes:
 - `pnpm` as the package manager.
 - `scripts/verify-perf-07.mjs` exists and writes `lighthouse-report-*.json` to the cwd.
 - The app uses Postgres (or a Postgres-compatible service) accessible via `DATABASE_URL`.
-- The app exposes `/api/auth/get-session` for the readiness probe.
+- The app authenticates against Supabase Auth, and the audit can sign up against it with the publishable key.
+- The app creates a household through `POST /api/households`, and that route leaves the household active in the `sb-household` cookie.
+- The app exposes a route the readiness probe can ask — the workflow probes `/api/categories` and accepts `401` (the route wants a session) or `200`.
 
 If any of these don't apply, the workflow needs adaptation before reuse.

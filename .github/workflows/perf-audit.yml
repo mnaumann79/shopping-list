@@ -17,35 +17,30 @@ concurrency:
 
 jobs:
   perf-07:
-    # Hard cap so a runaway job doesn't burn the whole Actions quota.
-    timeout-minutes: 20
+    # Hard cap so a runaway job doesn't burn the whole Actions quota. The
+    # local stack starts containers, so the budget is the integration job's.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
 
-    # The verify script signs up a real user via the API, so the app needs a
-    # writable Postgres. We spin up an ephemeral one per run — no pollution
-    # in production, no shared state between runs.
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: shopping_list_perf
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
+    # The verify script signs up a real user and creates a household, so the
+    # job needs both halves of the platform: a Supabase Auth server to sign
+    # up against, and a Postgres to hold the household. The local stack
+    # brings both — GoTrue owns the `auth` schema and writes the user into
+    # the same database the application reads — so the run is hermetic: no
+    # pollution in production, no shared state between runs, and no secrets.
+    #
+    # The stack's Postgres is the one the application connects to, which is
+    # what makes the journey work: GoTrue's user row and the household's
+    # foreign key are in the same database.
     env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/shopping_list_perf
-      BETTER_AUTH_SECRET: ci-perf-audit-secret
+      # The local stack's own Postgres, as its owner. The owner bypasses RLS,
+      # which is what this audit measured before the auth swap as well.
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
       BETTER_AUTH_URL: http://localhost:3000
       NEXT_PUBLIC_APP_URL: http://localhost:3000
-      # Verify script never creates an invitation, so these are never read —
-      # but the better-auth plugin is registered at startup and tolerates
-      # placeholder values just fine.
+      # The verify script never creates an invitation, so these are never
+      # read — but the invitation mailer is configured at startup and
+      # tolerates placeholder values just fine.
       RESEND_API_KEY: ci-dummy-not-used
       RESEND_FROM_EMAIL: noreply@example.com
       NODE_ENV: production
@@ -63,6 +58,32 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      # The CLI version is pinned so the local stack does not change shape
+      # under the job. It is the version the config in supabase/ was written
+      # for.
+      - uses: supabase/setup-cli@v1
+        with:
+          version: v3.1.0
+
+      - name: Start the local stack
+        # Postgres and GoTrue, and the API gateway the browser client talks
+        # to. The rest of the platform is not involved in an audit.
+        run: |
+          supabase start \
+            --exclude studio,edge-runtime,logflare,vector,imgproxy,storage-api,realtime,postgrest,postgres-meta,supavisor,mailpit
+
+      - name: Export the stack's public configuration
+        # The application's own two values, taken from the stack that is
+        # running: the URL the browser client signs up against and the
+        # publishable key it signs up with. Both are public by design.
+        #
+        # PUBLISHABLE_KEY, not ANON_KEY: the CLI prints both, and the
+        # publishable key is the one the browser client is meant to use.
+        run: |
+          eval "$(supabase status -o env)"
+          echo "NEXT_PUBLIC_SUPABASE_URL=$API_URL" >> "$GITHUB_ENV"
+          echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$PUBLISHABLE_KEY" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         # Override NODE_ENV for install only — pnpm skips devDependencies
         # when NODE_ENV=production, and we need @playwright/test + the
@@ -73,6 +94,12 @@ jobs:
 
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
+
+      - name: Apply the schema
+        # The migration folder is the source of truth for the schema; the
+        # flat snapshot is a mirror of it. The runner records a checksum of
+        # every migration it applies, so a second run is a no-op.
+        run: pnpm db:migrate
 
       - name: Build app
         run: pnpm build
@@ -90,8 +117,8 @@ jobs:
         id: run-audit
         # `pnpm start` and the audit must share a shell so the backgrounded
         # server isn't reaped when the step's command line returns. We poll
-        # `/api/auth/get-session` to confirm the app is ready, run the audit,
-        # then shut the server down.
+        # one of the application's own routes to confirm the app is ready,
+        # run the audit, then shut the server down.
         run: |
           pnpm start >/tmp/app.log 2>&1 &
           APP_PID=$!
@@ -107,15 +134,25 @@ jobs:
           }
           trap on_exit EXIT
 
+          # The readiness probe answers "is the application up?". The route
+          # it asks is one that needs a session, so 401 is the answer for a
+          # running application — and 404 would mean the route is gone,
+          # which is exactly what a probe for a deleted route must catch
+          # rather than wait out the timeout for.
+          ready() {
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/api/categories)
+            [ "$code" = "401" ] || [ "$code" = "200" ]
+          }
+
           for i in $(seq 1 60); do
-            if curl -fsS http://localhost:3000/api/auth/get-session >/dev/null 2>&1; then
+            if ready; then
               echo "App ready after ${i}s"
               break
             fi
             sleep 1
           done
 
-          if ! curl -fsS http://localhost:3000/api/auth/get-session >/dev/null 2>&1; then
+          if ! ready; then
             echo "App did not start within 60s"
             tail -50 /tmp/app.log
             exit 1
