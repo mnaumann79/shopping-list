@@ -5,8 +5,24 @@ import {
   verifyLegacyPassword,
 } from "./verify-password";
 
+/**
+ * A hash Better Auth made, with its own implementation
+ * (@better-auth/utils 0.4.2): the salt is the hex string it stored, and
+ * the key is the scrypt of the password over it.
+ */
+const BETTER_AUTH_HASH =
+  "2010d1d955e974bacb70481d7b1492d7:d63ba50956d1db877e674684932d69f2c6efb1c756e74f14316f69fbf7acee41a8eb0fecad8a55d6c9432cd4dbe90936876906597acd60bc69ba24e37a0f0d1e";
+
 describe("the legacy password verification", () => {
-  test("accepts the password the hash was made from", async () => {
+  test("accepts a hash Better Auth made", async () => {
+    expect(await verifyLegacyPassword(BETTER_AUTH_HASH, "correct horse")).toBe(true);
+  });
+
+  test("refuses the wrong password for a hash Better Auth made", async () => {
+    expect(await verifyLegacyPassword(BETTER_AUTH_HASH, "wrong horse")).toBe(false);
+  });
+
+  test("accepts the password a hash was made from", async () => {
     const hash = await hashLegacyPassword("correct horse");
 
     expect(await verifyLegacyPassword(hash, "correct horse")).toBe(true);

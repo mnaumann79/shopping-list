@@ -13,6 +13,11 @@ import {
 } from "@/lib/legacy-auth/supabase";
 import { signInWithPassword } from "@/lib/legacy-auth/sign-in";
 import { setActiveHousehold } from "@/lib/legacy-auth/active-household";
+import {
+  isAdmitted,
+  recordFailure,
+  recordSuccess,
+} from "@/lib/legacy-auth/attempt-limit";
 
 const credentialsSchema = z.object({
   email: z.string().email("Invalid email address"),
@@ -41,13 +46,23 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { email, password } = parsed.data;
+  const { password } = parsed.data;
+  const email = parsed.data.email.toLowerCase();
+  const client = clientKey(req);
+
+  // The admission limit runs before anything expensive: the route is
+  // unauthenticated, and every failed attempt costs a scrypt and a lookup
+  // of the GoTrue accounts.
+  if (!isAdmitted(client, email)) {
+    return Response.json({ error: "Too many attempts" }, { status: 429 });
+  }
 
   // The sign-in the application uses, and the only one that is not
   // transitional. An account that already works is signed in here, and the
   // legacy path is never reached.
   const signedIn = await signInWithPassword(email, password);
   if (signedIn) {
+    recordSuccess(client, email);
     await setActiveHousehold(signedIn);
     return Response.json({ ok: true }, { status: 200 });
   }
@@ -61,6 +76,7 @@ export async function POST(req: NextRequest) {
     : await verifyAgainstNothing(password);
 
   if (!legacy || !verified) {
+    recordFailure(client, email);
     return unauthorized();
   }
 
@@ -70,6 +86,7 @@ export async function POST(req: NextRequest) {
     // an account that has signed in is never taken over from the legacy
     // password, and no second account is ever made for the address.
     if (!mayTakeOver(existing)) {
+      recordFailure(client, email);
       return unauthorized();
     }
 
@@ -82,8 +99,11 @@ export async function POST(req: NextRequest) {
 
   const userId = await signInWithPassword(email, password);
   if (!userId) {
+    recordFailure(client, email);
     return unauthorized();
   }
+
+  recordSuccess(client, email);
 
   // The household the membership rows point at: a migrated user lands in
   // their household, not in an empty one.
@@ -103,7 +123,9 @@ export async function POST(req: NextRequest) {
  * doing.
  */
 function mayTakeOver(user: User): boolean {
-  return user.last_sign_in_at === null;
+  // The timestamp is optional in the SDK: an account that has never signed
+  // in has none, and an omitted one says the same.
+  return user.last_sign_in_at === null || user.last_sign_in_at === undefined;
 }
 
 /**
@@ -114,4 +136,15 @@ function mayTakeOver(user: User): boolean {
  */
 function unauthorized(): Response {
   return Response.json({ error: "Invalid email or password" }, { status: 401 });
+}
+
+/**
+ * The client the attempt belongs to.
+ *
+ * The address the request came from, as the proxy in front of the
+ * application reports it. It is a hint, not an identity: the limit counts
+ * the address too, so a caller that changes it still meets the limit.
+ */
+function clientKey(req: NextRequest): string {
+  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
 }

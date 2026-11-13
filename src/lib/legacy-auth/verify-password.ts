@@ -3,8 +3,8 @@ import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
 /**
  * The parameters Better Auth hashed with (§13.2c).
  *
- * The stored hash is `<saltHex>:<keyHex>`: a 16-byte random salt and a
- * 64-byte key, the key being scrypt over the password normalised NFKC.
+ * The stored hash is `<saltHex>:<keyHex>`: the salt is 16 random bytes in
+ * hex, and the key is 64 bytes in hex.
  */
 const N = 16384;
 const r = 16;
@@ -20,11 +20,15 @@ const SALT_LENGTH = 16;
  */
 const MAX_MEM = 128 * N * r * 2;
 
+const HEX = /^[0-9a-f]+$/i;
+
 /**
  * Whether the plaintext is the legacy password.
  *
- * The comparison is a constant-time one, so a wrong password is not
- * distinguishable from a right one by how long the comparison took.
+ * The salt is the *hex string* — Better Auth passes it to scrypt as it is
+ * stored, so its UTF-8 bytes are the salt — and the key is compared in
+ * constant time, so a wrong password is not distinguishable from a right
+ * one by how long the comparison took.
  */
 export async function verifyLegacyPassword(
   hash: string,
@@ -35,14 +39,16 @@ export async function verifyLegacyPassword(
     return false;
   }
 
-  const salt = Buffer.from(saltHex, "hex");
-  const expected = Buffer.from(keyHex, "hex");
-  if (salt.length !== SALT_LENGTH || expected.length !== KEY_LENGTH) {
+  if (saltHex.length !== SALT_LENGTH * 2 || !HEX.test(saltHex)) {
     return false;
   }
 
-  const derived = await deriveKey(password.normalize("NFKC"), salt);
-  return timingSafeEqual(derived, expected);
+  if (keyHex.length !== KEY_LENGTH * 2 || !HEX.test(keyHex)) {
+    return false;
+  }
+
+  const derived = await deriveKey(password.normalize("NFKC"), saltHex);
+  return timingSafeEqual(derived, Buffer.from(keyHex, "hex"));
 }
 
 /**
@@ -57,10 +63,10 @@ export async function verifyAgainstNothing(password: string): Promise<boolean> {
 }
 
 /** A hash of a password nobody has: a salt and a key of zeros. */
-const DUMMY_HASH = `${"00".repeat(SALT_LENGTH)}:${"00".repeat(KEY_LENGTH)}`;
+const DUMMY_HASH = `${"0".repeat(SALT_LENGTH * 2)}:${"0".repeat(KEY_LENGTH * 2)}`;
 
 /** The key for the password and the salt. */
-function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
+function deriveKey(password: string, salt: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     scrypt(password, salt, KEY_LENGTH, { N, r, p, maxmem: MAX_MEM }, (error, key) => {
       if (error) {
@@ -74,7 +80,7 @@ function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
 
 /** The legacy hash of a password, in Better Auth's format. */
 export async function hashLegacyPassword(password: string): Promise<string> {
-  const salt = randomBytes(SALT_LENGTH);
+  const salt = randomBytes(SALT_LENGTH).toString("hex");
   const key = await deriveKey(password.normalize("NFKC"), salt);
-  return `${salt.toString("hex")}:${key.toString("hex")}`;
+  return `${salt}:${key.toString("hex")}`;
 }

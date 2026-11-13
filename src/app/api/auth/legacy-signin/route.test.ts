@@ -24,6 +24,12 @@ vi.mock("@/lib/legacy-auth/active-household", () => ({
   setActiveHousehold: vi.fn(),
 }));
 
+vi.mock("@/lib/legacy-auth/attempt-limit", () => ({
+  isAdmitted: vi.fn(),
+  recordFailure: vi.fn(),
+  recordSuccess: vi.fn(),
+}));
+
 import { findLegacyAccount } from "@/lib/legacy-auth/legacy-account";
 import { verifyLegacyPassword } from "@/lib/legacy-auth/verify-password";
 import {
@@ -33,6 +39,7 @@ import {
 } from "@/lib/legacy-auth/supabase";
 import { signInWithPassword } from "@/lib/legacy-auth/sign-in";
 import { setActiveHousehold } from "@/lib/legacy-auth/active-household";
+import { isAdmitted } from "@/lib/legacy-auth/attempt-limit";
 import { POST } from "./route";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -58,6 +65,7 @@ describe("POST /api/auth/legacy-signin", () => {
     // Default: Supabase Auth accepts the credentials, so the legacy path is
     // never reached.
     vi.mocked(signInWithPassword).mockResolvedValue(USER_ID);
+    vi.mocked(isAdmitted).mockReturnValue(true);
   });
 
   test("returns 400 for a body that is not an email and a password", async () => {
@@ -134,6 +142,36 @@ describe("POST /api/auth/legacy-signin", () => {
     expect(res.status).toBe(401);
     expect(setGoTruePassword).not.toHaveBeenCalled();
     expect(provisionGoTrueUser).not.toHaveBeenCalled();
+  });
+
+  test("takes over an account whose sign-in timestamp is missing", async () => {
+    // The timestamp is optional in the SDK: an omitted one says the account
+    // has never signed in.
+    vi.mocked(signInWithPassword)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(USER_ID);
+    vi.mocked(findLegacyAccount).mockResolvedValue(LEGACY_ACCOUNT);
+    vi.mocked(verifyLegacyPassword).mockResolvedValue(true);
+    vi.mocked(findGoTrueUser).mockResolvedValue({
+      id: USER_ID,
+      email: "person@example.test",
+    } as never);
+
+    const res = await POST(request({ email: "person@example.test", password: "secret" }));
+
+    expect(res.status).toBe(200);
+    expect(setGoTruePassword).toHaveBeenCalledWith(USER_ID, "secret");
+  });
+
+  test("answers 429 when the caller is over the limit", async () => {
+    // The route is unauthenticated and every failed attempt costs a scrypt,
+    // so the admission limit runs before anything expensive.
+    vi.mocked(isAdmitted).mockReturnValue(false);
+
+    const res = await POST(request({ email: "person@example.test", password: "secret" }));
+
+    expect(res.status).toBe(429);
+    expect(signInWithPassword).not.toHaveBeenCalled();
   });
 
   test("the failures answer alike", async () => {
