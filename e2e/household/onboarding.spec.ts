@@ -60,15 +60,6 @@ test.describe("Household onboarding", () => {
   });
 
   test("household switcher shows created household name in header", async ({ browser }) => {
-    // KNOWN DEFECT (reported, not worked around): src/components/household-switcher.tsx
-    // has never been rendered by any route, so the header shows "Shopping List"
-    // and the account avatar - never the household name. The assertion below is
-    // the requirement as written; test.fail keeps the spec in the suite as a
-    // tracked failure instead of deleting it or weakening it. Fixing it means
-    // mounting <HouseholdSwitcher /> in a layout, which is outside the
-    // e2e/household/** file scope of this task.
-    test.fail(true, "HouseholdSwitcher is dead code - the header never renders it");
-
     const { context, page } = await newUserContext(browser);
     try {
       await signUp(page, { name: "Switcher", email: uniqueEmail("switcher") }, /\/onboarding/);

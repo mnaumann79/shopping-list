@@ -2,18 +2,17 @@ import { expect, type Browser, type BrowserContext, type Page } from "@playwrigh
 import { config as loadEnv } from "dotenv";
 import path from "path";
 import { Pool } from "pg";
+import { PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
 
-// PASSWORD, uniqueEmail and submitForm are the same three helpers that
-// e2e/auth/helpers.ts exports. They are copied here only until that file is
-// on main (PR #12); importing from it now would break the type-check.
-// When #12 merges, drop the three copies here and import them instead.
-//
+// PASSWORD, uniqueEmail and submitForm are shared with the auth specs, so
+// they live in e2e/support/helpers.ts. They are re-exported here so the
+// household specs keep a single import path.
+export { PASSWORD, submitForm, uniqueEmail };
+
 // The Playwright config loads .env.test too; loading it here keeps this
 // module self-contained, and dotenv never overrides a variable that is
 // already set, so CI's explicit environment still wins.
 loadEnv({ path: path.resolve(__dirname, "../../.env.test") });
-
-export const PASSWORD = process.env.TEST_PASSWORD ?? "TestPassword123!";
 
 // playwright.config.ts falls back to the same URL when PLAYWRIGHT_BASE_URL is
 // unset. browser.newContext() does not inherit the config's baseURL, so the
@@ -46,12 +45,6 @@ export type Invitation = {
   organization_id: string;
 };
 
-// An address can only be registered once, so every spec signs up its own
-// users with a unique address.
-export function uniqueEmail(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
-}
-
 /**
  * A browser context that is signed out. The shared storageState belongs to
  * the setup user, so every second identity in these specs needs its own
@@ -67,26 +60,6 @@ export async function newUserContext(
     storageState: { cookies: [], origins: [] },
   });
   return { context, page: await context.newPage() };
-}
-
-/**
- * Clicks a button and waits for the request its handler sends. A click
- * before React hydrates is swallowed, so the click is repeated when nothing
- * went out.
- */
-export async function submitForm(
-  page: Page,
-  buttonName: string,
-  endpoint: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const sent = page
-      .waitForRequest((request) => request.url().includes(endpoint), { timeout: 10_000 })
-      .then(() => true, () => false);
-    await page.getByRole("button", { name: buttonName }).click();
-    if (await sent) return;
-  }
-  throw new Error(`The "${buttonName}" form sent no request to ${endpoint}`);
 }
 
 /** Signs a new user up and waits for the page the app sends them to. */
@@ -224,4 +197,23 @@ function getPool(): Pool {
 export async function queryRows<T>(sql: string, values: unknown[] = []): Promise<T[]> {
   const result = await getPool().query(sql, values);
   return result.rows as T[];
+}
+
+/**
+ * Closes the pool.
+ *
+ * The pool holds a Postgres socket, so without this the worker keeps one
+ * open for the whole run. The pool is dropped instead of ended in place, so
+ * a spec that runs after this one opens a fresh pool rather than an ended
+ * one.
+ *
+ * The specs that use the pool register the teardown themselves. A
+ * `test.afterAll` in this module would bind to the first spec file that
+ * imports it and to no other: Node caches the module for the whole worker,
+ * and the hook lands on whichever file happened to be loaded first.
+ */
+export async function closePool(): Promise<void> {
+  const open = pool;
+  pool = undefined;
+  await open?.end();
 }
