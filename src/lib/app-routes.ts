@@ -1,7 +1,19 @@
 const DEFAULT_APP_URL = "http://localhost:3000";
 
+/**
+ * The base URL the application builds its own links against.
+ *
+ * One name, `NEXT_PUBLIC_APP_URL`. There used to be two: the Better Auth
+ * one won, and Better Auth is gone — so a deployment that followed the old
+ * template sent every join link and every invitation link to the
+ * placeholder in the template while the real value sat next to it,
+ * ignored.
+ *
+ * It is a `NEXT_PUBLIC_` variable, so Next.js inlines it at build time:
+ * changing it means a new build, not a restart.
+ */
 export function getAppBaseUrl() {
-  return process.env.BETTER_AUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? DEFAULT_APP_URL;
+  return process.env.NEXT_PUBLIC_APP_URL ?? DEFAULT_APP_URL;
 }
 
 export function getAcceptInvitePath(invitationId: string, email?: string) {
