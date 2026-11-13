@@ -118,6 +118,32 @@ application start: the local stack's own `postgres` is a superuser, and the
 developer asked for it. A deployment is not local, and against one the
 check refuses to serve.
 
+### The certificate at runtime
+
+The repository path is not the runtime path. `deploy/prod-ca-2021.crt` is on
+disk in a checkout, and `deploy/` is not `public/`, so `next build` copies
+none of it into the build output. The runtime image has to carry the file,
+and `NODE_EXTRA_CA_CERTS` must carry its **absolute** path there. A relative
+path works only while the application runs from the repository root: Node
+resolves it against the process's working directory, so the same string
+connects from there and is refused from anywhere else.
+
+Node reads `NODE_EXTRA_CA_CERTS` when the process starts, so the variable
+has to be in the deployment's environment before the application starts.
+The application cannot set it for itself.
+
+**Read "self-signed certificate in certificate chain" as "the path is
+wrong", not as "the certificate is absent"** — the two are the same
+message. The application still starts: the check at the door warns that the
+database could not be reached and continues, because nothing is served
+against it either way. The deployment then looks healthy, the process is up,
+and every request that touches the database fails with the same message.
+
+The alternative is an image that installs the certificate into the system's
+trust store. With `NODE_OPTIONS=--use-openssl-ca` (Node 22 and later) Node
+uses OpenSSL's store instead of its own bundled roots, and then no path is
+needed anywhere.
+
 ### The URL rules
 
 Each of these cost an hour:
