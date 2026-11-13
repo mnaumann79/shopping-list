@@ -69,9 +69,8 @@ export async function createSupabaseServerClient() {
           // a Route Handler or a Server Action write cookies. The browser
           // owns the session and refreshes it, so a refresh that cannot be
           // written here is not lost work — it is work the browser was going
-          // to do anyway. The repository's root `middleware.ts` never runs
-          // (there is no `src/middleware.ts`), and B1-T01 decides what
-          // replaces it.
+          // to do anyway. The repository's root `middleware.ts` runs as the
+          // edge middleware, and B1-T01 decides what replaces it.
         }
       },
     },
