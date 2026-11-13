@@ -62,21 +62,34 @@ function refuse(message, cost, advice = ROLE_ADVICE) {
  *
  * The host decides it when there is one, and the host is what decides the
  * case that matters: the pooler's host is not a development host, so a
- * deployment that cannot reach it refuses to serve whatever NODE_ENV says.
+ * deployment that cannot reach it refuses to serve whatever the environment
+ * says.
  *
  * With no DATABASE_URL there is no host to read, so the environment decides
- * instead - the deployment runs with NODE_ENV=production, which the cutover
- * checklist tells the operator to override for the install alone, and a
- * developer's machine does not. This is the corner case: the shell that runs
- * `pnpm start` need not carry NODE_ENV, because Next.js sets it when it
- * starts and this check runs before that, so a deployment whose environment
- * does not set it gets a warning here rather than a refusal.
+ * instead - and it decides on an explicit signal of development, not on the
+ * absence of one. The lifecycle event is the signal: `pnpm dev` is a
+ * developer's command and `pnpm start` is the deployment's, and pnpm sets
+ * it before this script runs. NODE_ENV counts as well, because a developer
+ * may set it. Everything else is a deployment: a deployment with no
+ * DATABASE_URL must not start, and one that does not happen to set NODE_ENV
+ * must not be let through either. It is the rule the repository already uses
+ * for a host - only a provably local one counts.
  */
 function isDeployment(host) {
   if (host === undefined) {
-    return process.env.NODE_ENV === "production";
+    return !isDevelopment();
   }
   return !isDevelopmentHost(host);
+}
+
+/**
+ * Whether the environment says, explicitly, that this is a development
+ * machine.
+ */
+function isDevelopment() {
+  return (
+    process.env.npm_lifecycle_event === "dev" || process.env.NODE_ENV === "development"
+  );
 }
 
 function report(error, host) {
@@ -119,8 +132,10 @@ async function main() {
       // to check, and every request that needs the database fails.
       return refuse(
         "DATABASE_URL is not set",
-        "A deployment needs it: the connection role cannot be checked without it,\n" +
-          "and every request that needs the database fails without it.",
+        "The connection role cannot be checked without it, and every request that\n" +
+          "needs the database fails without it. A deployment must not start in that\n" +
+          "state; on a developer's machine, `pnpm dev` starts the application with a\n" +
+          "warning instead.",
         "Set DATABASE_URL to the non-owner role the migrations create (`app`), and to a\n" +
           "reachable instance.",
       );
