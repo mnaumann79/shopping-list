@@ -6,7 +6,13 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useRouter } from "next/navigation";
-import { authClient } from "@/lib/auth-client";
+import {
+  acceptInvitation,
+  createHousehold,
+  listHouseholds,
+  setActiveHousehold,
+  useSession,
+} from "@/lib/auth-client";
 import { MinimalHeader } from "@/components/MinimalHeader";
 import {
   Card,
@@ -35,16 +41,9 @@ const onboardingSchema = z.object({
 
 type OnboardingValues = z.infer<typeof onboardingSchema>;
 
-function slugify(name: string) {
-  return name
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "");
-}
-
 export default function OnboardingPage() {
   const router = useRouter();
-  const { data: session, isPending } = authClient.useSession();
+  const { isPending } = useSession();
   const [isResolvingHousehold, setIsResolvingHousehold] = useState(true);
 
   const form = useForm<OnboardingValues>({
@@ -57,11 +56,6 @@ export default function OnboardingPage() {
       return;
     }
 
-    if (session?.session?.activeOrganizationId) {
-      router.replace("/dashboard");
-      return;
-    }
-
     let cancelled = false;
 
     async function restoreExistingHousehold() {
@@ -70,41 +64,37 @@ export default function OnboardingPage() {
       if (pendingInvitationId) {
         sessionStorage.removeItem("pendingInvitationId");
         try {
-          await authClient.organization.acceptInvitation({ invitationId: pendingInvitationId });
+          const accepted = await acceptInvitation(pendingInvitationId);
           if (cancelled) return;
-          router.replace("/dashboard");
-          return;
+          if (accepted) {
+            router.replace("/dashboard");
+            return;
+          }
         } catch {
-          // Invitation expired/invalid — continue to check existing orgs
+          // Invitation expired/invalid — continue to check existing households
         }
       }
 
       if (cancelled) return;
 
-      const result = await authClient.organization.list();
-      const organizations = Array.isArray(result.data)
-        ? result.data
-        : [];
+      const households = await listHouseholds();
 
       if (cancelled) {
         return;
       }
 
-      if (organizations.length === 0) {
+      if (households.length === 0) {
         setIsResolvingHousehold(false);
         return;
       }
 
-      const existingOrg = organizations[0];
-      const activeResult = await authClient.organization.setActive({
-        organizationId: existingOrg.id,
-      });
+      const switched = await setActiveHousehold(households[0].id);
 
       if (cancelled) {
         return;
       }
 
-      if (activeResult.error) {
+      if (!switched) {
         form.setError("root", {
           message: "Failed to restore your existing household",
         });
@@ -120,26 +110,21 @@ export default function OnboardingPage() {
     return () => {
       cancelled = true;
     };
-  }, [form, isPending, router, session]);
+  }, [form, isPending, router]);
 
   async function onSubmit(values: OnboardingValues) {
-    const org = await authClient.organization.create({
-      name: values.name,
-      slug: slugify(values.name),
-    });
+    const created = await createHousehold(values.name);
 
-    if (org.error || !org.data) {
-      form.setError("root", {
-        message: org.error?.message ?? "Failed to create household",
-      });
+    if ("error" in created) {
+      form.setError("root", { message: created.error });
       return;
     }
 
-    const activeResult = await authClient.organization.setActive({ organizationId: org.data.id });
+    const switched = await setActiveHousehold(created.householdId);
 
-    if (activeResult.error) {
+    if (!switched) {
       form.setError("root", {
-        message: `Failed to activate household: ${activeResult.error.message}`,
+        message: "Failed to activate household",
       });
       return;
     }
@@ -148,7 +133,7 @@ export default function OnboardingPage() {
   }
 
   // Don't render form while checking session or restoring an existing household
-  if (isPending || isResolvingHousehold || session?.session?.activeOrganizationId) {
+  if (isPending || isResolvingHousehold) {
     return null;
   }
 

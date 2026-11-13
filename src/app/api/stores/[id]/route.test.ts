@@ -5,13 +5,14 @@ vi.mock("next/headers", () => ({
   headers: vi.fn().mockResolvedValue(new Headers()),
 }));
 
-// Mock auth
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      getSession: vi.fn(),
-    },
-  },
+// Mock the request seam.
+//
+// A route test fakes the caller here, not at the auth provider: what is
+// under test is the route's contract, not the provider's. The seam answers
+// with the caller and the household they are acting on.
+vi.mock("@/lib/request-auth", () => ({
+  requireActiveOrganization: vi.fn(),
+  requireRequestSession: vi.fn(),
 }));
 
 // Mock db
@@ -35,7 +36,7 @@ const { dbMock } = vi.hoisted(() => {
 
 vi.mock("@/db", () => ({ db: dbMock }));
 
-import { auth } from "@/lib/auth";
+import { requireActiveOrganization } from "@/lib/request-auth";
 import { PATCH, DELETE } from "@/app/api/stores/[id]/route";
 import { NextRequest } from "next/server";
 
@@ -54,27 +55,37 @@ describe("PATCH /api/stores/[id]", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }),
+    );
     const req = makeRequest("PATCH", { name: "Trader Joe's" });
     const res = await PATCH(req, { params: Promise.resolve({ id: "store-1" }) });
     expect(res.status).toBe(401);
   });
 
   it("returns 400 when name is missing", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const req = makeRequest("PATCH", {});
     const res = await PATCH(req, { params: Promise.resolve({ id: "store-1" }) });
     expect(res.status).toBe(400);
   });
 
   it("returns 200 and renames store", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const { db } = await import("@/db");
     vi.mocked(db.update).mockReturnValue({
       set: vi.fn().mockReturnValue({
@@ -105,17 +116,23 @@ describe("DELETE /api/stores/[id]", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }),
+    );
     const req = makeRequest("DELETE");
     const res = await DELETE(req, { params: Promise.resolve({ id: "store-1" }) });
     expect(res.status).toBe(401);
   });
 
   it("returns 200 and hard-deletes store", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    });
     const { db } = await import("@/db");
     vi.mocked(db.delete).mockReturnValue({
       where: vi.fn().mockReturnValue({

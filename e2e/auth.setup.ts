@@ -1,4 +1,4 @@
-import { expect, test as setup, type Page } from "@playwright/test";
+import { test as setup, type Page } from "@playwright/test";
 import fs from "fs";
 import path from "path";
 import { config as loadEnv } from "dotenv";
@@ -9,6 +9,12 @@ loadEnv({ path: path.join(__dirname, "../.env.test") });
 
 const authFile = path.join(__dirname, "../playwright/.auth/user.json");
 const SIGNED_IN_URL = /\/(onboarding|dashboard)$/;
+
+/** The GoTrue endpoint the browser client signs up against. */
+const SIGN_UP_ENDPOINT = "/auth/v1/signup";
+
+/** The GoTrue endpoint the browser client signs in against. */
+const SIGN_IN_ENDPOINT = "/auth/v1/token";
 
 // The setup drives three forms against a dev server that compiles routes on
 // demand, so it needs more than the default 30s.
@@ -34,7 +40,7 @@ async function authenticate(page: Page, email: string, password: string) {
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(password);
 
-  if (!(await submitForm(page, "Sign up", "/api/auth/sign-up/email"))) {
+  if (!(await submitForm(page, "Sign up", SIGN_UP_ENDPOINT))) {
     throw new Error(`The sign-up form sent no request: ${(await formError(page)) ?? "no error shown"}`);
   }
   if ((await outcome(page)) === "in") return;
@@ -49,7 +55,7 @@ async function signIn(page: Page, email: string, password: string, signUpError: 
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(password);
 
-  const sent = await submitForm(page, "Sign in", "/api/auth/sign-in/email");
+  const sent = await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
   if (sent && (await outcome(page)) === "in") return;
 
   const signInError = await formError(page);
@@ -59,40 +65,18 @@ async function signIn(page: Page, email: string, password: string, signUpError: 
   );
 }
 
+/**
+ * Creates the household through the onboarding form.
+ *
+ * The onboarding page creates the household and makes it the session's
+ * active household, so the setup drives the product rather than reaching for
+ * an endpoint of its own.
+ */
 async function createHousehold(page: Page, householdName: string) {
-  // The onboarding page redirects to /dashboard when the user already has a
-  // household and shows the form when it does not.
   await page.goto("/onboarding");
-  const state = await Promise.race([
-    page
-      .waitForURL(/\/dashboard$/, { timeout: 30_000 })
-      .then(() => "existing" as const)
-      .catch(() => "none" as const),
-    page
-      .getByLabel("Household name")
-      .waitFor({ state: "visible", timeout: 30_000 })
-      .then(() => "form" as const)
-      .catch(() => "none" as const),
-  ]);
-
-  if (state === "existing") {
-    await expect(page).toHaveURL(/\/dashboard$/);
-    return;
-  }
-  if (state === "none") {
-    throw new Error("The onboarding page neither showed the household form nor reached /dashboard");
-  }
-
   await page.getByLabel("Household name").fill(householdName);
-  const sent = await submitForm(page, "Create household", "/api/auth/organization/create");
-  const created =
-    sent && (await page.waitForURL(/\/dashboard$/, { timeout: 30_000 }).then(() => true, () => false));
-  if (!created) {
-    const message = await formError(page);
-    throw new Error(
-      `Household "${householdName}" was not created: ${message ?? "the page never reached /dashboard"}`,
-    );
-  }
+  await page.getByRole("button", { name: "Create household" }).click();
+  await page.waitForURL(/\/dashboard$/, { timeout: 30_000 });
 }
 
 // A click before React hydrates is swallowed, so wait for the request the
@@ -125,9 +109,11 @@ async function outcome(page: Page) {
 }
 
 async function formError(page: Page) {
-  return page
+  const error = page
     .locator("p.text-destructive")
     .first()
     .textContent({ timeout: 5_000 })
     .catch(() => null);
+
+  return error;
 }

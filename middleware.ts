@@ -1,5 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionCookie } from "better-auth/cookies";
+
+// The session cookie is Supabase's now. Better Auth's helper went with the
+// package, and this file reads the cookie itself.
+//
+// The file is dead code — the application lives under `src/`, and Next.js
+// only loads a middleware from `src/` — and it stays exactly where it is,
+// dead, because D-11 decides its fate with the cutover and not before. It
+// only has to compile.
+const SESSION_COOKIE = "sb-household-auth-token";
+
+function getSessionCookie(request: NextRequest) {
+  return request.cookies.get(SESSION_COOKIE)?.value;
+}
 
 // Routes that require authentication
 const PROTECTED_PREFIXES = ["/dashboard", "/household", "/settings"];

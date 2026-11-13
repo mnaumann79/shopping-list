@@ -1,6 +1,6 @@
 import { test } from "@playwright/test";
 import { expect, PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
-import { registerUser } from "./helpers";
+import { registerUser, SESSION_COOKIE, SIGN_IN_ENDPOINT } from "./helpers";
 
 // AUTH-02: User can log in with email and password
 //
@@ -9,30 +9,30 @@ import { registerUser } from "./helpers";
 test.describe("Login", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("valid credentials redirect to /dashboard", async ({ page, request }) => {
+  test("valid credentials redirect to /dashboard", async ({ page, browser }) => {
     const email = uniqueEmail("login");
-    await registerUser(request, { email, householdName: `Login Household ${email}` });
+    await registerUser(browser, { email, householdName: `Login Household ${email}` });
 
     await page.goto("/sign-in");
     await page.getByLabel("Email").fill(email);
     await page.getByLabel("Password").fill(PASSWORD);
 
-    await submitForm(page, "Sign in", "/api/auth/sign-in/email");
+    await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
     await expect(page).toHaveURL(/\/dashboard$/);
     // The dashboard really rendered.
     await expect(page.getByLabel("Item name")).toBeVisible();
   });
 
-  test("wrong password shows error", async ({ page, request }) => {
+  test("wrong password shows error", async ({ page, browser }) => {
     const email = uniqueEmail("login");
-    await registerUser(request, { email, householdName: `Login Household ${email}` });
+    await registerUser(browser, { email, householdName: `Login Household ${email}` });
 
     await page.goto("/sign-in");
     await page.getByLabel("Email").fill(email);
     await page.getByLabel("Password").fill("TheWrongPassword1!");
 
-    await submitForm(page, "Sign in", "/api/auth/sign-in/email");
+    await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
     await expect(page.getByText("Invalid email or password")).toBeVisible();
     await expect(page).toHaveURL(/\/sign-in$/);
@@ -46,25 +46,25 @@ test.describe("Login", () => {
     await page.getByLabel("Email").fill(email);
     await page.getByLabel("Password").fill(PASSWORD);
 
-    await submitForm(page, "Sign in", "/api/auth/sign-in/email");
+    await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
     await expect(page.getByText("Invalid email or password")).toBeVisible();
     await expect(page).toHaveURL(/\/sign-in$/);
   });
 
-  test("successful login sets session cookie", async ({ page, request }) => {
+  test("successful login sets session cookie", async ({ page, browser }) => {
     const email = uniqueEmail("login");
-    await registerUser(request, { email, householdName: `Login Household ${email}` });
+    await registerUser(browser, { email, householdName: `Login Household ${email}` });
 
     await page.goto("/sign-in");
     await page.getByLabel("Email").fill(email);
     await page.getByLabel("Password").fill(PASSWORD);
 
-    await submitForm(page, "Sign in", "/api/auth/sign-in/email");
+    await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
     await expect(page).toHaveURL(/\/dashboard$/);
     const cookies = await page.context().cookies();
-    expect(cookies.some((cookie) => cookie.name === "better-auth.session_token")).toBe(true);
+    expect(cookies.some((cookie) => cookie.name === SESSION_COOKIE)).toBe(true);
   });
 
   // The app sends a signed-out visitor to /sign-in, but it does not put the
@@ -72,9 +72,12 @@ test.describe("Login", () => {
   // The sign-in page does honour a `returnTo` when one is present in the URL
   // (see the next spec), but nothing in the app ever creates one. The gap is
   // recorded in the pull request; this spec asserts today's behaviour.
-  test("signed-out visitor is sent to /sign-in and logs in to the default page", async ({ page, request }) => {
+  test("signed-out visitor is sent to /sign-in and logs in to the default page", async ({
+    page,
+    browser,
+  }) => {
     const email = uniqueEmail("login");
-    await registerUser(request, { email, householdName: `Login Household ${email}` });
+    await registerUser(browser, { email, householdName: `Login Household ${email}` });
 
     await page.goto("/history");
 
@@ -88,7 +91,7 @@ test.describe("Login", () => {
     await page.getByLabel("Email").fill(email);
     await page.getByLabel("Password").fill(PASSWORD);
 
-    await submitForm(page, "Sign in", "/api/auth/sign-in/email");
+    await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
     // Without a returnTo there is nothing to restore, so the sign-in page
     // sends the user to its default page. A user whose session has no active
@@ -102,6 +105,6 @@ test.describe("Login", () => {
       page.getByLabel("Item name").or(page.getByText("Create your household")),
     ).toBeVisible();
     const cookies = await page.context().cookies();
-    expect(cookies.some((cookie) => cookie.name === "better-auth.session_token")).toBe(true);
+    expect(cookies.some((cookie) => cookie.name === SESSION_COOKIE)).toBe(true);
   });
 });

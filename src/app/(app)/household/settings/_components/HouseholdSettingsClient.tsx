@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { authClient } from "@/lib/auth-client";
+import { listHouseholdMembers, useSession } from "@/lib/auth-client";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -20,13 +20,9 @@ import { toastError, toastSuccess } from "@/lib/toast";
 
 interface Member {
   id: string;
-  userId: string;
+  name: string;
+  email: string;
   role: string;
-  createdAt: Date | string;
-  user: {
-    name: string;
-    email: string;
-  };
 }
 
 interface Store {
@@ -47,9 +43,12 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
-export default function HouseholdSettingsClient() {
-  const { data: activeOrg } = authClient.useActiveOrganization();
-  const { data: session } = authClient.useSession();
+export default function HouseholdSettingsClient({
+  activeHouseholdId,
+}: {
+  activeHouseholdId: string | null;
+}) {
+  const { session } = useSession();
 
   const [members, setMembers] = useState<Member[]>([]);
   const [membersLoading, setMembersLoading] = useState(false);
@@ -82,30 +81,24 @@ export default function HouseholdSettingsClient() {
   });
 
   const currentMemberRole = session
-    ? members.find((m) => m.userId === session.user.id)?.role
+    ? members.find((m) => m.id === session.user.id)?.role
     : undefined;
   const isAdmin = currentMemberRole === "owner" || currentMemberRole === "admin";
 
   const fetchMembers = useCallback(async () => {
-    if (!activeOrg?.id) return;
+    if (!activeHouseholdId) return;
     setMembersLoading(true);
     try {
-      const result = await authClient.organization.listMembers();
-      if (result.data) {
-        const list = Array.isArray(result.data)
-          ? (result.data as unknown as Member[])
-          : ((result.data as unknown as { members: Member[] }).members ?? []);
-        setMembers(list);
-      }
+      setMembers(await listHouseholdMembers());
     } catch {
       // silently fail — list will show empty
     } finally {
       setMembersLoading(false);
     }
-  }, [activeOrg?.id]);
+  }, [activeHouseholdId]);
 
   const fetchStores = useCallback(async () => {
-    if (!activeOrg?.id) return;
+    if (!activeHouseholdId) return;
     setStoresLoading(true);
     try {
       const res = await fetch("/api/stores");
@@ -118,7 +111,7 @@ export default function HouseholdSettingsClient() {
     } finally {
       setStoresLoading(false);
     }
-  }, [activeOrg?.id]);
+  }, [activeHouseholdId]);
 
   useEffect(() => {
     async function loadSettings() {
@@ -140,7 +133,7 @@ export default function HouseholdSettingsClient() {
   }, [themePreview]);
 
   async function handleInvite() {
-    if (!inviteEmail.trim() || !activeOrg?.id) return;
+    if (!inviteEmail.trim() || !activeHouseholdId) return;
     setInviting(true);
     try {
       const res = await fetch("/api/households/invite", {
@@ -163,7 +156,7 @@ export default function HouseholdSettingsClient() {
   }
 
   async function handleGenerateLink() {
-    if (!activeOrg?.id) return;
+    if (!activeHouseholdId) return;
     setGeneratingLink(true);
     try {
       const res = await fetch("/api/households/join-links", {
@@ -190,7 +183,7 @@ export default function HouseholdSettingsClient() {
   }
 
   async function handleRemoveMember(memberId: string, isSelf: boolean) {
-    if (!activeOrg?.id) return;
+    if (!activeHouseholdId) return;
     try {
       const res = await fetch("/api/households/members", {
         method: "DELETE",
@@ -413,22 +406,22 @@ export default function HouseholdSettingsClient() {
           ) : (
             <ul className="space-y-3">
               {members.map((member) => {
-                const isSelf = session?.user.id === member.userId;
+                const isSelf = session?.user.id === member.id;
                 const isOwnerOrAdmin = member.role === "owner" || member.role === "admin";
                 return (
                   <li key={member.id} className="flex items-center gap-3">
                     <Avatar>
-                      <AvatarFallback>{getInitials(member.user.name)}</AvatarFallback>
+                      <AvatarFallback>{getInitials(member.name)}</AvatarFallback>
                     </Avatar>
                     <div className="flex-1 min-w-0">
                       <span className="block text-sm font-medium truncate">
-                        {member.user.name}
+                        {member.name}
                         {isSelf && (
                           <span className="ml-1 text-muted-foreground">(you)</span>
                         )}
                       </span>
                       <span className="block text-xs text-muted-foreground truncate">
-                        {member.user.email}
+                        {member.email}
                       </span>
                     </div>
                     <span

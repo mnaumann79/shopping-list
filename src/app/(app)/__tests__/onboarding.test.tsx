@@ -5,23 +5,27 @@ import { ThemeProvider } from "@/components/ThemeProvider";
 
 const mockPush = vi.fn();
 const mockReplace = vi.fn();
+const mockRouter = { push: mockPush, replace: mockReplace };
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: mockPush, replace: mockReplace }),
+  useRouter: () => mockRouter,
   useSearchParams: () => new URLSearchParams(),
 }));
 
 vi.mock("@/lib/auth-client", () => ({
-  authClient: {
-    organization: {
-      create: vi.fn(),
-      list: vi.fn(),
-      setActive: vi.fn(),
-    },
-    useSession: vi.fn(),
-  },
+  useSession: vi.fn(),
+  listHouseholds: vi.fn(),
+  createHousehold: vi.fn(),
+  setActiveHousehold: vi.fn(),
+  acceptInvitation: vi.fn(),
 }));
 
-import { authClient } from "@/lib/auth-client";
+import {
+  acceptInvitation,
+  createHousehold,
+  listHouseholds,
+  setActiveHousehold,
+  useSession,
+} from "@/lib/auth-client";
 
 // The onboarding page renders MinimalHeader -> DarkModeToggle, which reads the
 // theme context. Without a ThemeProvider above it, useTheme() throws.
@@ -48,12 +52,11 @@ describe("OnboardingPage", () => {
       removeListener: () => {},
       dispatchEvent: () => false,
     }));
-    // Default: no active organization (new user)
-    vi.mocked(authClient.useSession).mockReturnValue({
-      data: { session: { activeOrganizationId: null }, user: { name: "Alice" } },
-      isPending: false,
-    } as never);
-    vi.mocked(authClient.organization.list).mockResolvedValue({ data: [], error: null } as never);
+    // Default: no session yet, and no household to restore.
+    vi.mocked(useSession).mockReturnValue({ session: null, isPending: false });
+    vi.mocked(listHouseholds).mockResolvedValue([]);
+    vi.mocked(acceptInvitation).mockResolvedValue(null);
+    vi.mocked(setActiveHousehold).mockResolvedValue(true);
   });
 
   it("renders household name input and submit button", () => {
@@ -73,36 +76,30 @@ describe("OnboardingPage", () => {
     });
   });
 
-  it("calls organization.create with name and slug on submit", async () => {
-    vi.mocked(authClient.organization.create).mockResolvedValueOnce({ data: { id: "org-1" }, error: null } as never);
-    vi.mocked(authClient.organization.setActive).mockResolvedValueOnce({ data: {}, error: null } as never);
+  it("creates the household with the name on submit", async () => {
+    vi.mocked(createHousehold).mockResolvedValueOnce({ householdId: "household-1" });
     renderOnboarding();
     await screen.findByLabelText(/household name/i);
     fireEvent.change(screen.getByLabelText(/household name/i), { target: { value: "Smith Family" } });
     fireEvent.click(screen.getByRole("button", { name: /create household/i }));
     await waitFor(() => {
-      expect(authClient.organization.create).toHaveBeenCalledWith({
-        name: "Smith Family",
-        slug: "smith-family",
-      });
+      expect(createHousehold).toHaveBeenCalledWith("Smith Family");
     });
   });
 
-  it("calls organization.setActive with new org id after create", async () => {
-    vi.mocked(authClient.organization.create).mockResolvedValueOnce({ data: { id: "org-1" }, error: null } as never);
-    vi.mocked(authClient.organization.setActive).mockResolvedValueOnce({ data: {}, error: null } as never);
+  it("makes the new household the active one after create", async () => {
+    vi.mocked(createHousehold).mockResolvedValueOnce({ householdId: "household-1" });
     renderOnboarding();
     await screen.findByLabelText(/household name/i);
     fireEvent.change(screen.getByLabelText(/household name/i), { target: { value: "Test Household" } });
     fireEvent.click(screen.getByRole("button", { name: /create household/i }));
     await waitFor(() => {
-      expect(authClient.organization.setActive).toHaveBeenCalledWith({ organizationId: "org-1" });
+      expect(setActiveHousehold).toHaveBeenCalledWith("household-1");
     });
   });
 
   it("redirects to /dashboard after creating household", async () => {
-    vi.mocked(authClient.organization.create).mockResolvedValueOnce({ data: { id: "org-1" }, error: null } as never);
-    vi.mocked(authClient.organization.setActive).mockResolvedValueOnce({ data: {}, error: null } as never);
+    vi.mocked(createHousehold).mockResolvedValueOnce({ householdId: "household-1" });
     renderOnboarding();
     await screen.findByLabelText(/household name/i);
     fireEvent.change(screen.getByLabelText(/household name/i), { target: { value: "Test Household" } });
@@ -112,31 +109,16 @@ describe("OnboardingPage", () => {
     });
   });
 
-  it("redirects to /dashboard if user already has active org", async () => {
-    vi.mocked(authClient.useSession).mockReturnValue({
-      data: { session: { activeOrganizationId: "existing-org-123" }, user: { name: "Alice" } },
-      isPending: false,
-    } as never);
-    renderOnboarding();
-    await waitFor(() => {
-      expect(mockReplace).toHaveBeenCalledWith("/dashboard");
-    });
-  });
-
-  it("restores the first existing household when membership exists but no active org is set", async () => {
-    vi.mocked(authClient.organization.list).mockResolvedValue({
-      data: [{ id: "org-existing", name: "Existing Household" }],
-      error: null,
-    } as never);
-    vi.mocked(authClient.organization.setActive).mockResolvedValue({ data: {}, error: null } as never);
+  it("restores the first existing household when the user has one", async () => {
+    vi.mocked(listHouseholds).mockResolvedValue([
+      { id: "household-existing", name: "Existing Household", role: "owner" },
+    ]);
 
     renderOnboarding();
 
     await waitFor(() => {
-      expect(authClient.organization.list).toHaveBeenCalled();
-      expect(authClient.organization.setActive).toHaveBeenCalledWith({
-        organizationId: "org-existing",
-      });
+      expect(listHouseholds).toHaveBeenCalled();
+      expect(setActiveHousehold).toHaveBeenCalledWith("household-existing");
       expect(mockReplace).toHaveBeenCalledWith("/dashboard");
     });
   });

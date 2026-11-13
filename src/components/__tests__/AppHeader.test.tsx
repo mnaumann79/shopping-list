@@ -9,9 +9,7 @@ vi.mock('next/navigation', () => ({
 }))
 
 vi.mock('@/lib/auth-client', () => ({
-  authClient: {
-    signOut: vi.fn().mockResolvedValue(undefined),
-  },
+  signOut: vi.fn().mockResolvedValue({ error: null }),
 }))
 
 // The switcher is a separate component with its own data fetching; stub it
@@ -45,7 +43,7 @@ vi.mock('next/link', () => ({
 }))
 
 import { AppHeader } from '../AppHeader'
-import { authClient } from '@/lib/auth-client'
+import { signOut } from '@/lib/auth-client'
 
 describe('AppHeader', () => {
   beforeEach(() => {
@@ -100,7 +98,7 @@ describe('AppHeader', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Log out' }))
 
     await waitFor(() => {
-      expect(authClient.signOut).toHaveBeenCalled()
+      expect(signOut).toHaveBeenCalled()
     })
     expect(mockPush).toHaveBeenCalledWith('/sign-in')
     expect(mockRefresh).toHaveBeenCalled()

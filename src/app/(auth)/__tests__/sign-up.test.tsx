@@ -11,15 +11,13 @@ vi.mock("next/navigation", () => ({
 
 // Mock auth client — factory must not reference outer variables (vi.mock is hoisted)
 vi.mock("@/lib/auth-client", () => ({
-  authClient: {
-    signUp: {
-      email: vi.fn(),
-    },
-  },
+  signUpWithPassword: vi.fn(),
+  setActiveHousehold: vi.fn(),
+  acceptInvitation: vi.fn(),
 }));
 
 // Import after mock to get mocked version
-import { authClient } from "@/lib/auth-client";
+import { signUpWithPassword } from "@/lib/auth-client";
 
 describe("SignUpPage", () => {
   beforeEach(() => {
@@ -63,24 +61,24 @@ describe("SignUpPage", () => {
     });
   });
 
-  it("calls authClient.signUp.email on valid submit", async () => {
-    vi.mocked(authClient.signUp.email).mockResolvedValueOnce({ data: {}, error: null } as never);
+  it("calls signUpWithPassword on valid submit", async () => {
+    vi.mocked(signUpWithPassword).mockResolvedValueOnce({ error: null });
     render(<SignUpPage />);
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "Alice" } });
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "alice@example.com" } });
     fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "password123" } });
     fireEvent.click(screen.getByRole("button", { name: /sign up/i }));
     await waitFor(() => {
-      expect(authClient.signUp.email).toHaveBeenCalledWith({
-        name: "Alice",
-        email: "alice@example.com",
-        password: "password123",
-      });
+      expect(signUpWithPassword).toHaveBeenCalledWith(
+        "Alice",
+        "alice@example.com",
+        "password123",
+      );
     });
   });
 
   it("redirects to /onboarding on success", async () => {
-    vi.mocked(authClient.signUp.email).mockResolvedValueOnce({ data: {}, error: null } as never);
+    vi.mocked(signUpWithPassword).mockResolvedValueOnce({ error: null });
     render(<SignUpPage />);
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "Alice" } });
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "alice@example.com" } });
@@ -92,10 +90,9 @@ describe("SignUpPage", () => {
   });
 
   it("shows error message on sign up failure", async () => {
-    vi.mocked(authClient.signUp.email).mockResolvedValueOnce({
-      data: null,
+    vi.mocked(signUpWithPassword).mockResolvedValueOnce({
       error: { message: "Email already in use" },
-    } as never);
+    });
     render(<SignUpPage />);
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "Alice" } });
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "alice@example.com" } });
