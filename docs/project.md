@@ -3785,6 +3785,10 @@ Auth to Supabase Auth (ADR-16, ADR-17). The two happen in one window,
 because the auth change rewrites the identity columns the data move has to
 map anyway.
 
+**The checklist for the person performing the cutover is
+[`docs/cutover-checklist.md`](./cutover-checklist.md).** This section is the
+procedure; that is the list.
+
 #### The cutover, in order
 
 | # | Step | When | Reversible? |
@@ -3801,6 +3805,13 @@ map anyway.
 **The rollback is a configuration change, not a restore — for fourteen days.**
 That is the single most important property of this design, and it is why
 step 7 exists. Nothing is deleted from Neon until the rollback window closes.
+
+**Two things the phrase does not say.** The previous application release goes
+back with the configuration: the release this cutover deploys authenticates
+through Supabase Auth and expects the new schema, so against Neon's data it
+cannot sign users in. And the writes made on the instance after the cutover
+are not in Neon — a rollback stops the application from seeing them, unless
+they are reconciled into Neon first or the loss is recorded as accepted.
 
 **The restore is scoped to the shopping list's tables. The dump of the
 source may be whole-database; the restore may not be.** Three reasons, all
