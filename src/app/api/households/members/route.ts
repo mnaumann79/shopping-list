@@ -1,33 +1,30 @@
 import { requireActiveOrganization } from "@/lib/request-auth";
-import { removeHouseholdMember } from "@/server/services/households";
-import { ServiceError } from "@/server/services/service-error";
-import { NextRequest } from "next/server";
+import { listMembers } from "@/server/services/households";
+import type { Scope } from "@/db/scope";
 
-export async function DELETE(req: NextRequest) {
+/**
+ * The household's members.
+ *
+ * The list is scoped to the *user*, not to a household, so it goes through
+ * the read-only membership scope. It is one of the two callers of that
+ * scope, and there is no third.
+ */
+export async function GET() {
   const authContext = await requireActiveOrganization();
   if (authContext instanceof Response) {
     return authContext;
   }
 
-  const body = await req.json().catch(() => null);
-  if (!body?.memberId) {
-    return Response.json({ error: "memberId is required" }, { status: 400 });
-  }
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
 
   try {
-    await removeHouseholdMember({
-      memberId: body.memberId,
-      orgId: authContext.orgId,
-      requestHeaders: authContext.requestHeaders,
-    });
-
-    return Response.json({ success: true }, { status: 200 });
+    const members = await listMembers(scope);
+    return Response.json(members, { status: 200 });
   } catch (error) {
-    if (error instanceof ServiceError) {
-      return Response.json({ error: error.message }, { status: error.status });
-    }
-
     console.error(error);
-    return Response.json({ error: "Failed to remove member" }, { status: 500 });
+    return Response.json({ error: "Failed to fetch members" }, { status: 500 });
   }
 }
