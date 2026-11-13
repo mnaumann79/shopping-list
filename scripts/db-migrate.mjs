@@ -35,6 +35,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { isDevelopmentHost } from './local-host.mjs';
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'db', 'migrations');
 const ledgerSchema = 'db_migrate';
@@ -91,26 +92,6 @@ try {
 } catch {
   console.error('Cannot migrate: the DATABASE_URL is not a valid Postgres connection string.');
   process.exit(1);
-}
-
-/**
- * The hosts the runner may migrate.
- *
- * An allowlist, not a denylist. This project's production database is a Neon
- * host (ep-....aws.neon.tech), and no "prod" or "prd" substring would ever
- * catch it - the runner would migrate production and call it a day. So the
- * rule is the other way round: only a host that is provably local is
- * migrated, and every other host is refused unless the operator opts in.
- */
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
-
-function isDevelopmentHost(host) {
-  const name = host.toLowerCase();
-  // A Unix socket is a path on this machine, so it is local by definition.
-  if (name.startsWith('/')) {
-    return true;
-  }
-  return LOCAL_HOSTS.has(name) || name.endsWith('.local') || name.endsWith('.localhost');
 }
 
 /** The operator's explicit opt-in: migrate a host that is not on the allowlist. */

@@ -49,6 +49,9 @@ and the rest of this section is what was learned the hard way.
 - **There is no `output: 'standalone'`** in `next.config.ts`, so a
   standalone-style Dockerfile will not work: the image needs `node_modules`
   and `pnpm start`.
+- **The build needs no database.** The check that refuses a privileged
+  connection runs when the application starts, not when it is built, so
+  `pnpm build` works with no `DATABASE_URL` at all.
 
 ### The two connection strings
 
@@ -61,6 +64,31 @@ Two, for two different jobs:
   backup-restore rehearsal create a scratch database and their own schema,
   which the application role may not do. The owner bypasses row-level
   security, which is exactly why it is not what the application uses.
+
+### The check at the door
+
+The application refuses to serve when the role `DATABASE_URL` names is
+privileged, because then the policies are not enforced at all.
+
+The check runs before the server accepts a request — `pnpm start` and
+`pnpm dev` both run it first — and it asks the same assertions the
+migrations' own check uses (`scripts/app-role.sql`), against the role the
+connection actually authenticated as. A role that is a superuser, has
+`BYPASSRLS`, or owns a table in `public` ends the process, with a message
+that names the role and says what it costs: the household isolation is not
+being enforced by the database, and the connection sees every household's
+rows.
+
+It is runnable by hand against any database:
+
+```bash
+DATABASE_URL="postgresql://…" node scripts/assert-connection-role.mjs
+```
+
+Against a **local** host it reports the same finding and lets the
+application start: the local stack's own `postgres` is a superuser, and the
+developer asked for it. A deployment is not local, and against one the
+check refuses to serve.
 
 ### The URL rules
 
