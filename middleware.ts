@@ -1,13 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
+import { AUTH_COOKIE_NAME } from "@/lib/supabase/config";
 
 // The session cookie is Supabase's now. Better Auth's helper went with the
-// package, and this file reads the cookie itself.
+// package, and this file reads the cookie itself. The name comes from the
+// one place it is defined, so the cookie this file guards and the cookie the
+// application reads cannot drift apart.
 //
-// The file is dead code — the application lives under `src/`, and Next.js
-// only loads a middleware from `src/` — and it stays exactly where it is,
-// dead, because D-11 decides its fate with the cutover and not before. It
-// only has to compile.
-const SESSION_COOKIE = "sb-household-auth-token";
+// This file is the application's edge middleware: Next.js loads a
+// `middleware.ts` from the project root as well as from `src/`, and this one
+// runs. Its guard is optimistic — it goes by the cookie's presence, not by a
+// verified session — and the real guard is server-side, in the app layout.
+//
+// What replaces it is D-11's decision.
+const SESSION_COOKIE = AUTH_COOKIE_NAME;
 
 function getSessionCookie(request: NextRequest) {
   return request.cookies.get(SESSION_COOKIE)?.value;
@@ -15,8 +20,6 @@ function getSessionCookie(request: NextRequest) {
 
 // Routes that require authentication
 const PROTECTED_PREFIXES = ["/dashboard", "/household", "/settings"];
-// Auth routes (redirect away if already logged in)
-const AUTH_ROUTES = ["/sign-in", "/sign-up"];
 // Onboarding route — allow even without active household
 // const ONBOARDING_ROUTE = "/onboarding"; // (reserved for Plan 04 use)
 
@@ -28,7 +31,6 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   const isProtected = PROTECTED_PREFIXES.some((p) => pathname.startsWith(p));
-  const isAuthRoute = AUTH_ROUTES.some((p) => pathname.startsWith(p));
 
   // Not authenticated + protected route → redirect to /sign-in with returnTo
   if (!session && isProtected) {
@@ -37,10 +39,13 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
-  // Already authenticated + auth route → redirect to /dashboard
-  if (session && isAuthRoute) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
-  }
+  // A visitor who is already signed in is not redirected away from the sign-in
+  // page. The page owns that check, and it owns it better: it asks the
+  // browser for the session, and the browser can renew a session whose access
+  // token lapsed while the browser was closed. A check on the cookie's
+  // presence cannot do that, and redirecting on it sent such a visitor round
+  // in a circle — the app layout sends them back to the sign-in page when the
+  // token is expired, and the middleware sent them to the dashboard again.
 
   return NextResponse.next();
 }
