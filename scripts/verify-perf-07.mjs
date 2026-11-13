@@ -2,17 +2,43 @@
  * PERF-07: Lighthouse on the authenticated dashboard.
  *
  * Runs a Lighthouse audit against http://localhost:3000/dashboard with the
- * better-auth session cookies pre-set in the Chrome instance, so the
- * middleware lets the request through to the actual dashboard render.
+ * session cookies pre-set in the Chrome instance, so the middleware lets the
+ * request through to the actual dashboard render.
+ *
+ * The setup is the product's own: a Supabase Auth sign-up, a household
+ * created through the application's own route, and three items in it. That
+ * is what Better Auth's sign-up, organization and set-active used to stand
+ * for, and the replacement is not a likeness - it is the same journey, one
+ * household at a time, with the active household carried by the
+ * `sb-household` cookie.
+ *
+ * The measurement is unchanged: Lighthouse on the authenticated dashboard,
+ * the same budgets, and the same numbers read out of the report.
  */
 import lighthouse from 'lighthouse';
 import { launch } from 'chrome-launcher';
 import CDP from 'chrome-remote-interface';
 import { writeFileSync } from 'node:fs';
 import { chromium } from 'playwright';
+import { AUTH_COOKIE_NAME } from '../src/lib/supabase/config.ts';
 
 const BASE_URL = process.env.BASE_URL ?? 'http://localhost:3000';
 const DASHBOARD_URL = `${BASE_URL}/dashboard`;
+
+/**
+ * The Supabase project the application authenticates against.
+ *
+ * The same two values the browser client uses, so the session this script
+ * signs up with is the session the application will verify.
+ */
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  throw new Error(
+    'NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY must be set. ' +
+      'They name the Supabase project the application authenticates against.',
+  );
+}
 
 const PERF_BUDGETS = {
   'largest-contentful-paint': 2500,    // ms, LCP < 2.5s
@@ -26,8 +52,8 @@ const PERF_BUDGETS = {
   console.log(`Lighthouse on ${DASHBOARD_URL}\n`);
 
   // Step 1: Auth setup via Playwright. Playwright captures cookies from all
-  // API responses correctly (including the session_data refresh after
-  // set-active). Node fetch loses that update because Set-Cookie headers from
+  // API responses correctly (including the one the household creation sets).
+  // Node fetch loses that update because Set-Cookie headers from
   // non-initial responses aren't always carried forward.
   console.log('Setting up authenticated session via Playwright...');
   const setupBrowser = await chromium.launch({ headless: true });
@@ -37,30 +63,71 @@ const PERF_BUDGETS = {
   const email = `lighthouse-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@example.com`.toLowerCase();
   const slug = `lh-${Date.now().toString(36)}`.toLowerCase();
 
-  const signup = await request.post(`${BASE_URL}/api/auth/sign-up/email`, {
-    headers: { Origin: BASE_URL, 'Content-Type': 'application/json' },
-    data: { email, password: 'LighthousePass!', name: 'Lighthouse Verify' },
+  // The sign-up goes to the auth server, the same way the browser's sign-up
+  // form does it. The response is a session: the access token is what the
+  // application reads, and the refresh token is what lets the browser renew
+  // it.
+  const signup = await request.post(`${SUPABASE_URL}/auth/v1/signup`, {
+    headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    data: { email, password: 'LighthousePass!' },
   });
-  if (!signup.ok()) throw new Error(`signup failed: ${signup.status()} ${await signup.text()}`);
+  if (!signup.ok()) {
+    throw new Error(`signup failed: ${signup.status()} ${await signup.text()}`);
+  }
+  const session = await signup.json();
+  if (!session?.access_token) {
+    throw new Error(`signup returned no session: ${JSON.stringify(session)}`);
+  }
 
-  const orgCreate = await request.post(`${BASE_URL}/api/auth/organization/create`, {
+  // The session cookie, in the shape @supabase/ssr writes it and the
+  // application reads it (src/lib/supabase/server.ts): the prefix, then the
+  // session base64url-encoded.
+  await setupContext.addCookies([
+    {
+      name: AUTH_COOKIE_NAME,
+      value:
+        'base64-' +
+        Buffer.from(
+          JSON.stringify({
+            access_token: session.access_token,
+            token_type: session.token_type ?? 'bearer',
+            expires_in: session.expires_in,
+            expires_at: session.expires_at,
+            refresh_token: session.refresh_token,
+            user: session.user,
+          }),
+        ).toString('base64url'),
+      url: BASE_URL,
+      httpOnly: true,
+      sameSite: 'Lax',
+    },
+  ]);
+
+  // The household, through the application's own route: it creates the
+  // household, makes the caller its owner, and leaves the household active
+  // in the `sb-household` cookie - the one thing Better Auth's
+  // `activeOrganizationId` used to do.
+  const household = await request.post(`${BASE_URL}/api/households`, {
     headers: { Origin: BASE_URL, 'Content-Type': 'application/json' },
-    data: { name: `LH ${slug}`, slug },
+    data: { name: `LH ${slug}` },
   });
-  if (!orgCreate.ok()) throw new Error(`org create failed: ${orgCreate.status()} ${await orgCreate.text()}`);
-  const { id: organizationId } = await orgCreate.json();
+  if (!household.ok()) {
+    throw new Error(
+      `household create failed: ${household.status()} ${await household.text()}`,
+    );
+  }
+  const { householdId } = await household.json();
 
-  const setActive = await request.post(`${BASE_URL}/api/auth/organization/set-active`, {
-    headers: { Origin: BASE_URL, 'Content-Type': 'application/json' },
-    data: { organizationId },
-  });
-  if (!setActive.ok()) throw new Error(`set-active failed: ${setActive.status()} ${await setActive.text()}`);
-
-  // Sanity check: dashboard must be reachable with the session.
-  const getSession = await request.get(`${BASE_URL}/api/auth/get-session`);
-  const sessionBody = await getSession.json();
-  if (!sessionBody?.session?.activeOrganizationId) {
-    throw new Error(`session missing activeOrganizationId: ${JSON.stringify(sessionBody)}`);
+  // Sanity check: the application must see the session and the household.
+  const householdList = await request.get(`${BASE_URL}/api/households`);
+  if (!householdList.ok()) {
+    throw new Error(
+      `household list failed: ${householdList.status()} ${await householdList.text()}`,
+    );
+  }
+  const households = await householdList.json();
+  if (!Array.isArray(households) || households.length === 0) {
+    throw new Error(`the application sees no household: ${JSON.stringify(households)}`);
   }
 
   // Add 3 items so the dashboard has actual content to render (LCP needs a
@@ -79,10 +146,14 @@ const PERF_BUDGETS = {
     });
   }
 
-  // Capture the final cookies from Playwright's context (these reflect the
-  // post-set-active session).
+  // Capture the final cookies from Playwright's context (these include the
+  // active-household cookie the household creation set).
   const playwrightCookies = await setupContext.cookies();
-  console.log(`Auth setup complete; cookies: ${playwrightCookies.map((c) => c.name).join(', ')}`);
+  console.log(
+    `Auth setup complete; household ${householdId}; cookies: ${playwrightCookies
+      .map((c) => c.name)
+      .join(', ')}`,
+  );
   await setupContext.close();
   await setupBrowser.close();
 
