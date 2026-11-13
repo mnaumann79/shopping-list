@@ -75,7 +75,7 @@ describe("POST /api/items", () => {
         returning: vi.fn().mockResolvedValue([
           {
             id: "item-1",
-            organizationId: "org-1",
+            householdId: "org-1",
             name: "Milk",
             quantity: null,
             note: null,
@@ -95,7 +95,7 @@ describe("POST /api/items", () => {
     const json = await res.json();
     expect(json.id).toBeDefined();
     expect(json.name).toBe("Milk");
-    expect(json.organizationId).toBe("org-1");
+    expect(json.householdId).toBe("org-1");
   });
 
   it("returns 201 when quantity is null", async () => {
@@ -107,7 +107,7 @@ describe("POST /api/items", () => {
     const returning = vi.fn().mockResolvedValue([
       {
         id: "item-2",
-        organizationId: "org-1",
+        householdId: "org-1",
         name: "Bananas",
         quantity: null,
         note: null,

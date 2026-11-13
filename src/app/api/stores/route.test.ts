@@ -75,7 +75,7 @@ describe("POST /api/stores", () => {
         returning: vi.fn().mockResolvedValue([
           {
             id: "store-1",
-            organizationId: "org-1",
+            householdId: "org-1",
             name: "Costco",
             isActive: true,
             createdAt: new Date(),
@@ -90,6 +90,6 @@ describe("POST /api/stores", () => {
     const json = await res.json();
     expect(json.id).toBeDefined();
     expect(json.name).toBe("Costco");
-    expect(json.organizationId).toBe("org-1");
+    expect(json.householdId).toBe("org-1");
   });
 });

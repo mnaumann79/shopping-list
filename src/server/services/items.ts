@@ -80,7 +80,7 @@ async function assertCategoryInOrganization(orgId: string, categoryId: string) {
   const [category] = await db
     .select({ id: categories.id })
     .from(categories)
-    .where(and(eq(categories.id, categoryId), eq(categories.organizationId, orgId)))
+    .where(and(eq(categories.id, categoryId), eq(categories.householdId, orgId)))
     .limit(1);
 
   if (!category) {
@@ -97,7 +97,7 @@ async function assertStoresInOrganization(orgId: string, storeIds: string[]) {
   const matchingStores = await db
     .select({ id: stores.id })
     .from(stores)
-    .where(and(eq(stores.organizationId, orgId), eq(stores.isActive, true)));
+    .where(and(eq(stores.householdId, orgId), eq(stores.isActive, true)));
 
   const validStoreIds = new Set(matchingStores.map((store) => store.id));
   if (uniqueStoreIds.some((storeId) => !validStoreIds.has(storeId))) {
@@ -112,7 +112,7 @@ async function listItemRows(orgId: string) {
     .select({ item: items, storeId: itemStores.storeId })
     .from(items)
     .leftJoin(itemStores, eq(itemStores.itemId, items.id))
-    .where(and(eq(items.organizationId, orgId), eq(items.isActive, true), isNull(items.archivedAt)))
+    .where(and(eq(items.householdId, orgId), eq(items.isActive, true), isNull(items.archivedAt)))
     .orderBy(desc(items.createdAt));
 
   const grouped = new Map<string, { item: ItemRow; storeIds: string[] }>();
@@ -145,7 +145,7 @@ export async function listArchivedItems(orgId: string): Promise<ItemDto[]> {
     .select({ item: items, storeId: itemStores.storeId })
     .from(items)
     .leftJoin(itemStores, eq(itemStores.itemId, items.id))
-    .where(and(eq(items.organizationId, orgId), isNotNull(items.archivedAt)))
+    .where(and(eq(items.householdId, orgId), isNotNull(items.archivedAt)))
     .orderBy(desc(items.archivedAt));
 
   const grouped = new Map<string, { item: ItemRow; storeIds: string[] }>();
@@ -165,7 +165,7 @@ export async function listActiveStores(orgId: string): Promise<StoreDto[]> {
   const storeRows = await db
     .select()
     .from(stores)
-    .where(and(eq(stores.organizationId, orgId), eq(stores.isActive, true)))
+    .where(and(eq(stores.householdId, orgId), eq(stores.isActive, true)))
     .orderBy(asc(stores.name));
 
   return storeRows.map(serializeStore);
@@ -183,7 +183,7 @@ export async function createItem(input: CreateItemInput): Promise<ItemDto> {
   const [item] = await db
     .insert(items)
     .values({
-      organizationId: orgId,
+      householdId: orgId,
       name,
       quantity: quantity ?? null,
       note: note ?? null,
@@ -224,7 +224,7 @@ export async function updateItem(input: UpdateItemInput): Promise<ItemUpdateResu
     const [updated] = await db
       .update(items)
       .set(updateFields)
-      .where(and(eq(items.id, itemId), eq(items.organizationId, orgId)))
+      .where(and(eq(items.id, itemId), eq(items.householdId, orgId)))
       .returning();
 
     if (!updated) {
@@ -237,7 +237,7 @@ export async function updateItem(input: UpdateItemInput): Promise<ItemUpdateResu
   const [updated] = await db
     .update(items)
     .set(updateFields)
-    .where(and(eq(items.id, itemId), eq(items.organizationId, orgId)))
+    .where(and(eq(items.id, itemId), eq(items.householdId, orgId)))
     .returning();
 
   if (!updated) {
@@ -259,7 +259,7 @@ export async function softDeleteItem(orgId: string, itemId: string) {
   const [item] = await db
     .update(items)
     .set({ isActive: false, updatedAt: new Date() })
-    .where(and(eq(items.id, itemId), eq(items.organizationId, orgId)))
+    .where(and(eq(items.id, itemId), eq(items.householdId, orgId)))
     .returning();
 
   if (!item) {
@@ -272,14 +272,14 @@ export async function clearCompletedItems(orgId: string): Promise<ItemDto[]> {
     .select({ item: items, storeId: itemStores.storeId })
     .from(items)
     .leftJoin(itemStores, eq(itemStores.itemId, items.id))
-    .where(and(eq(items.organizationId, orgId), eq(items.isActive, true), eq(items.isChecked, true), isNull(items.archivedAt)));
+    .where(and(eq(items.householdId, orgId), eq(items.isActive, true), eq(items.isChecked, true), isNull(items.archivedAt)));
 
   const ids = [...new Set(rows.map((r) => r.item.id))];
   if (ids.length > 0) {
     await db
       .update(items)
       .set({ archivedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(items.organizationId, orgId), inArray(items.id, ids)));
+      .where(and(eq(items.householdId, orgId), inArray(items.id, ids)));
   }
 
   const grouped = new Map<string, { item: ItemRow; storeIds: string[] }>();
@@ -308,7 +308,7 @@ export async function reAddArchivedItem(orgId: string, itemId: string): Promise<
   const [item] = await db
     .update(items)
     .set({ archivedAt: null, isChecked: false, createdAt: now, updatedAt: now })
-    .where(and(eq(items.id, itemId), eq(items.organizationId, orgId), isNotNull(items.archivedAt)))
+    .where(and(eq(items.id, itemId), eq(items.householdId, orgId), isNotNull(items.archivedAt)))
     .returning();
 
   if (!item) throw new ServiceError(404, "Archived item not found");

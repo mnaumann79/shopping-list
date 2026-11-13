@@ -72,7 +72,7 @@ describe("PATCH /api/stores/[id]", () => {
           returning: vi.fn().mockResolvedValue([
             {
               id: "store-1",
-              organizationId: "org-1",
+              householdId: "org-1",
               name: "Trader Joe's",
               isActive: true,
             },

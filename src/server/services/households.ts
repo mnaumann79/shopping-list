@@ -110,11 +110,11 @@ export async function createJoinLink(input: CreateJoinLinkInput) {
 
   await db
     .delete(householdJoinLinks)
-    .where(eq(householdJoinLinks.organizationId, input.orgId));
+    .where(eq(householdJoinLinks.householdId, input.orgId));
 
   await db.insert(householdJoinLinks).values({
     token,
-    organizationId: input.orgId,
+    householdId: input.orgId,
     createdById: input.userId,
     expiresAt,
   });
@@ -141,13 +141,13 @@ export async function joinHousehold(input: JoinHouseholdInput) {
   await auth.api.addMember({
     body: {
       userId: input.userId,
-      organizationId: link.organizationId,
+      organizationId: link.householdId,
       role: "member",
     },
     headers: input.requestHeaders,
   });
 
-  return { organizationId: link.organizationId };
+  return { householdId: link.householdId };
 }
 
 export async function removeHouseholdMember(input: RemoveMemberInput) {

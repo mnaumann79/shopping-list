@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
     const [category] = await db
       .insert(categories)
       .values({
-        organizationId: authContext.orgId,
+        householdId: authContext.orgId,
         name: parsed.data.name,
         isDefault: false,
       })
