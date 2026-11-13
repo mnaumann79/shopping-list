@@ -62,7 +62,20 @@ export async function POST(req: NextRequest) {
 
   try {
     const household = await createHousehold(scope, parsed.data.name);
-    return Response.json(household, { status: 201 });
+
+    // The household that was just created is the active one: the client's
+    // create-then-set-active pair, in one server call. The cookie is httpOnly
+    // and SameSite=Lax, so it is server-side only — the role is never taken
+    // from it, and a household the caller is not a member of is refused by
+    // the policies rather than by the cookie.
+    const response = Response.json(household, { status: 201 });
+    response.headers.append(
+      "Set-Cookie",
+      `sb-household=${household.householdId}; Path=/; HttpOnly; SameSite=Lax${
+        process.env.NODE_ENV === "production" ? "; Secure" : ""
+      }`,
+    );
+    return response;
   } catch (error) {
     if (error instanceof ServiceError) {
       return Response.json({ error: error.message }, { status: error.status });
