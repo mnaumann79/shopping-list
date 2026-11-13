@@ -42,6 +42,12 @@ and the rest of this section is what was learned the hard way.
 - **Node 24 and pnpm 9.** The lockfile is `lockfileVersion: '9.0'`, and
   pnpm 10 and later can fail `--frozen-lockfile` against it. The CI
   workflow pins both.
+- **A build in a tree whose `node_modules` is a symlink fails as if the
+  build were broken.** Turbopack rejects a symlink pointing out of the
+  filesystem root — "Symlink [project]/node_modules is invalid, it points
+  out of the filesystem root" — so a job that ever sees a tree like that
+  fails on the build rather than on the code. Install the dependencies in
+  the tree the build runs in.
 - **The install must not run with `NODE_ENV=production`.** pnpm skips the
   devDependencies, and `pnpm build` then fails with "Cannot find module
   'typescript'". CI overrides `NODE_ENV` for the install only, and the
@@ -134,10 +140,11 @@ The application cannot set it for itself.
 
 **Read "self-signed certificate in certificate chain" as "the path is
 wrong", not as "the certificate is absent"** — the two are the same
-message. The application still starts: the check at the door warns that the
-database could not be reached and continues, because nothing is served
-against it either way. The deployment then looks healthy, the process is up,
-and every request that touches the database fails with the same message.
+message. The deployment refuses to start, and the reason is the last line in
+the log: the check at the door ends the process when it cannot reach the
+database, and says what it could not reach and why. A deployment that will
+not start is a deployment that cannot serve anybody, which is the better
+shape for this to fail in.
 
 The alternative is an image that installs the certificate into the system's
 trust store. With `NODE_OPTIONS=--use-openssl-ca` (Node 22 and later) Node
