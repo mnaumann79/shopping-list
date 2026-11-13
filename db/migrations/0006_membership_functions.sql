@@ -111,10 +111,12 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
+  -- The membership row is written only if there is none: a member who
+  -- accepts an invitation keeps the role the household gave them, because a
+  -- role is the household's to change and not the invitation's (§12.5).
   INSERT INTO household_members (household_id, user_id, role)
   VALUES (v_household, v_user, v_role)
-  ON CONFLICT (household_id, user_id) DO UPDATE
-    SET role = excluded.role;
+  ON CONFLICT (household_id, user_id) DO NOTHING;
 
   UPDATE household_invitations
      SET accepted_at = now()
