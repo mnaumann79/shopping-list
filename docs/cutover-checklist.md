@@ -120,7 +120,7 @@ The times are relative to the maintenance window (**T−0**).
 
 - [ ] **The two ledgers are not the same, and neither replaces the other.**
       The instance's schema was applied through the Supabase MCP's migration
-      tool, whose ledger is `supabase_migrations.schema_migrations` — ten
+      tool, whose ledger is `supabase_migrations.schema_migrations` — eleven
       rows, nine of them the repository's migrations and two the repository
       does not have yet (`0005a_allow_migration_role_to_assume_app` and
       `0007_no_self_delete`, being committed as P0S-T19 and P0S-T34), so the
