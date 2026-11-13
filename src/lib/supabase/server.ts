@@ -25,8 +25,6 @@ export type HouseholdClaims = {
 export type SessionUser = {
   /** The caller's verified identity. */
   userId: string;
-  /** The scope the household queries run in. */
-  claims: HouseholdClaims;
 };
 
 /**
@@ -36,12 +34,14 @@ export type SessionUser = {
  * signed. Nothing here comes from the cookie's own contents: the cookie is a
  * place a caller can write to.
  */
-export type VerifiedUser = {
+export type VerifiedSession = {
   userId: string;
   email: string | null;
   name: string | null;
   /** The household the cookie names. Not yet checked for membership. */
   householdId: string | null;
+  /** The access token's claims, as the auth server signed them. */
+  claims: Record<string, unknown>;
 };
 
 /**
@@ -121,7 +121,7 @@ async function readAccessToken(): Promise<string | null> {
  * cookie's contents: the cookie is a place a caller can write to, and the
  * claims are what the auth server signed.
  */
-export async function getVerifiedUser(): Promise<VerifiedUser | null> {
+export async function getVerifiedSession(): Promise<VerifiedSession | null> {
   const accessToken = await readAccessToken();
   if (!accessToken) return null;
 
@@ -137,25 +137,21 @@ export async function getVerifiedUser(): Promise<VerifiedUser | null> {
     email: typeof claims.email === "string" ? claims.email : null,
     name: typeof metadata?.name === "string" ? metadata.name : null,
     householdId: readHouseholdId(await cookies()),
+    claims: { ...claims },
   };
 }
 
 /**
  * The caller's verified identity, or null when there is no session.
  *
- * The claims carry the household the cookie names. They do not carry the
- * caller's role in it: that is what `household_members` says, and reading it
- * is what the scope helper does.
+ * This is the contract the scope helper sits on top of: it says who the
+ * caller is, and nothing else. The active household is a separate question —
+ * it is the cookie's pointer, and whether the caller may act on it is what
+ * `household_members` says inside the scope helper's transaction.
  */
 export async function getSessionUser(): Promise<SessionUser | null> {
-  const user = await getVerifiedUser();
-  if (!user) return null;
+  const session = await getVerifiedSession();
+  if (!session) return null;
 
-  return {
-    userId: user.userId,
-    claims: {
-      userId: user.userId,
-      householdId: user.householdId,
-    },
-  };
+  return { userId: session.userId };
 }

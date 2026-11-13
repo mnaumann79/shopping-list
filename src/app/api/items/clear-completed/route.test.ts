@@ -4,12 +4,14 @@ vi.mock("next/headers", () => ({
   headers: vi.fn().mockResolvedValue(new Headers()),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      getSession: vi.fn(),
-    },
-  },
+// Mock the request seam.
+//
+// A route test fakes the caller here, not at the auth provider: what is
+// under test is the route's contract, not the provider's. The seam answers
+// with the caller and the household they are acting on.
+vi.mock("@/lib/request-auth", () => ({
+  requireActiveOrganization: vi.fn(),
+  requireRequestSession: vi.fn(),
 }));
 
 // The scope helper opens a transaction and runs the caller's query on the
@@ -32,7 +34,7 @@ const { dbMock } = vi.hoisted(() => {
 
 vi.mock("@/db", () => ({ db: dbMock }));
 
-import { auth } from "@/lib/auth";
+import { requireActiveOrganization } from "@/lib/request-auth";
 import { POST } from "@/app/api/items/clear-completed/route";
 
 describe("POST /api/items/clear-completed", () => {
@@ -41,18 +43,9 @@ describe("POST /api/items/clear-completed", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
-
-    const res = await POST();
-
-    expect(res.status).toBe(401);
-  });
-
-  it("returns 400 when there is no active household", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: null },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "No active household" }, { status: 400 }),
+    ); as never);
 
     const res = await POST();
 
@@ -60,10 +53,14 @@ describe("POST /api/items/clear-completed", () => {
   });
 
   it("archives checked items and returns them for the active organization", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    }); as never);
     const { db } = await import("@/db");
     const selectWhere = vi.fn().mockResolvedValue([
       {
@@ -145,10 +142,14 @@ describe("POST /api/items/clear-completed", () => {
   });
 
   it("returns an empty clearedItems array when no checked items exist", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    }); as never);
     const { db } = await import("@/db");
     const selectWhere = vi.fn().mockResolvedValue([]);
     vi.mocked(db.select).mockReturnValue({

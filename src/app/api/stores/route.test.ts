@@ -5,13 +5,14 @@ vi.mock("next/headers", () => ({
   headers: vi.fn().mockResolvedValue(new Headers()),
 }));
 
-// Mock auth
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      getSession: vi.fn(),
-    },
-  },
+// Mock the request seam.
+//
+// A route test fakes the caller here, not at the auth provider: what is
+// under test is the route's contract, not the provider's. The seam answers
+// with the caller and the household they are acting on.
+vi.mock("@/lib/request-auth", () => ({
+  requireActiveOrganization: vi.fn(),
+  requireRequestSession: vi.fn(),
 }));
 
 // Mock db
@@ -35,7 +36,7 @@ const { dbMock } = vi.hoisted(() => {
 
 vi.mock("@/db", () => ({ db: dbMock }));
 
-import { auth } from "@/lib/auth";
+import { requireActiveOrganization } from "@/lib/request-auth";
 import { POST } from "@/app/api/stores/route";
 import { NextRequest } from "next/server";
 
@@ -54,8 +55,14 @@ describe("POST /api/stores", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
-    const req = makeRequest({ name: "Costco" });
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    }););
     const res = await POST(req);
     expect(res.status).toBe(401);
     const json = await res.json();
@@ -63,10 +70,14 @@ describe("POST /api/stores", () => {
   });
 
   it("returns 400 when name is missing", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    }); as never);
     const req = makeRequest({});
     const res = await POST(req);
     expect(res.status).toBe(400);
@@ -75,10 +86,14 @@ describe("POST /api/stores", () => {
   });
 
   it("returns 201 and creates store scoped to org", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" },
-      user: { id: "u1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "u1", name: "Test User", email: "u1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    }); as never);
     const { db } = await import("@/db");
     vi.mocked(db.insert).mockReturnValue({
       values: vi.fn().mockReturnValue({

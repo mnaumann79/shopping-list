@@ -22,16 +22,21 @@ const { dbMock } = vi.hoisted(() => {
 
 vi.mock("@/db", () => ({ db: dbMock }));
 
-import { auth } from "@/lib/auth";
+import { requireActiveOrganization } from "@/lib/request-auth";
 import { POST } from "@/app/api/items/[id]/re-add/route";
 
 describe("POST /api/items/[id]/re-add", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("restores an archived item with a fresh active-list timestamp", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      session: { activeOrganizationId: "org-1" }, user: { id: "user-1" },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+      session: {
+        user: { id: "user-1", name: "Test User", email: "user-1@example.com" },
+        activeHouseholdId: "org-1",
+      },
+      orgId: "org-1",
+      requestHeaders: new Headers(),
+    }); as never);
     const { db } = await import("@/db");
     const updatedItem = {
       id: "item-1", householdId: "org-1", name: "Milk", quantity: "1 gallon", note: null,
