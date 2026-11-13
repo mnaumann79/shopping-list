@@ -60,25 +60,39 @@ Two, for two different jobs:
 - **Set `DATABASE_URL` to the non-owner `app` role** — the policies apply
   to it, which is the point of them. (The application connects as whatever
   the string names; this is what makes the policies apply.)
-- **The verification needs the owner role**: the §10.8 fixture and the
-  backup-restore rehearsal create a scratch database and their own schema,
-  which the application role may not do. The owner bypasses row-level
-  security, which is exactly why it is not what the application uses.
+- **The verification needs the owner role**: the §10.8 fixture creates its
+  own schema, and the backup-restore rehearsal creates a database as well.
+  The fixture needs CREATE on the database it runs against, and with that
+  it runs as the application role — measured: 44 scenarios, 270 assertions,
+  all passed against the instance as `app` — so the next operator does not
+  go looking for an owner's password they do not need. The rehearsal is
+  what creates a database, and that is what needs the owner. The owner
+  bypasses row-level security, which is exactly why it is not what the
+  application uses.
 
 **The `sslmode` is not the same for every server and every tool.** Against
-the Supabase pooler the application wants `?sslmode=no-verify` and `psql`
-wants `?sslmode=require`: the pooler's certificate is signed by Supabase's
-own CA, which the system does not trust, so `require` — which `pg` treats
-as `verify-full` — is refused with "self-signed certificate in certificate
-chain". With Supabase's root CA supplied as the root certificate — the
-chain the pooler presents ends in it — `?sslmode=verify-full` connects and
-verifies, for a deployment that can carry the file. `psql` verifies the
-chain whenever a root certificate is configured, so an unrelated root file
-makes the connection fail.
+the Supabase pooler the deployment's `DATABASE_URL` carries
+`?sslmode=verify-full`, and the deployment points `NODE_EXTRA_CA_CERTS` at
+Supabase's root certificate — `deploy/prod-ca-2021.crt` in the repository,
+the file the dashboard offers under Project Settings -> Database -> SSL
+Configuration. The pooler's certificate chains to it and nothing else on
+the system trusts it, so without the file the connection is refused with
+"self-signed certificate in certificate chain". Node reads
+`NODE_EXTRA_CA_CERTS` when it starts, so the deployment has to have it set,
+not only the connection string.
+
+`psql` is told the same certificate its own way: `?sslmode=verify-full`
+with `sslrootcert` pointing at that file. `sslrootcert=system` does not
+help — the system's roots do not carry Supabase's.
+
+A deployment that cannot carry the file can use `?sslmode=no-verify`, which
+encrypts the traffic without authenticating the pooler: an attacker on the
+network path could impersonate it. `?sslmode=require` is not the answer
+either — `pg` treats it as `verify-full`, so the chain is refused.
 
 Against a local database there is no mode at all: the local PostgreSQL
-offers no TLS, so both modes are refused, and the connection string that
-connects is the one with no mode.
+offers no TLS, so both `verify-full` and `require` are refused, and the
+connection string that connects is the one with no mode.
 
 ### The check at the door
 
