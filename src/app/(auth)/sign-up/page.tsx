@@ -6,7 +6,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { authClient } from "@/lib/auth-client";
+import { setActiveHousehold, signUpWithPassword } from "@/lib/auth-client";
 import { getJoinPath } from "@/lib/app-routes";
 import {
   Card,
@@ -59,20 +59,17 @@ function SignUpPageContent() {
       fetch(`/api/invitation-email?id=${encodeURIComponent(pendingId)}`)
         .then((res) => res.json())
         .then((data) => {
-          console.log("[sign-up] API response:", data);
           if (data.email) setInvitationEmail(data.email);
         })
-        .catch((err) => console.error("[sign-up] fetch failed:", err));
+        .catch(() => {
+          // The invitation email is a convenience: the form can still be
+          // filled in by hand.
+        });
     }
   }, [emailParam, searchParams]);
 
   // key={email} forces the form to remount with correct defaultValues
-  return (
-    <>
-      <p className="text-xs text-red-500 mb-2">DEBUG: email=&quot;{email}&quot; invitationId=&quot;{searchParams.get("invitationId")}&quot;</p>
-      <SignUpForm key={email} initialEmail={email} />
-    </>
-  );
+  return <SignUpForm key={email} initialEmail={email} />;
 }
 
 function SignUpForm({ initialEmail }: { initialEmail: string }) {
@@ -84,33 +81,40 @@ function SignUpForm({ initialEmail }: { initialEmail: string }) {
   });
 
   async function onSubmit(values: SignUpValues) {
-    const result = await authClient.signUp.email({
-      name: values.name,
-      email: values.email,
-      password: values.password,
-    });
+    const { error } = await signUpWithPassword(values.name, values.email, values.password);
 
-    if (result.error) {
+    if (error) {
       form.setError("root", {
-        message: result.error.message ?? "Sign up failed",
+        message: error.message ?? "Sign up failed",
       });
       return;
     }
 
-    // If user arrived via invite link, accept it directly (session is live after signUp)
+    // Email confirmation is off, so the user is signed in now.
+    //
+    // If the user arrived via an invite link, accept the invitation
+    // directly. The membership lives in the household tables, so accepting is
+    // a request to the household endpoints, not a call to an auth plugin.
     const pendingInvitationId = sessionStorage.getItem("pendingInvitationId");
     if (pendingInvitationId) {
       sessionStorage.removeItem("pendingInvitationId");
       try {
-        await authClient.organization.acceptInvitation({ invitationId: pendingInvitationId });
-        router.push("/dashboard");
-        return;
+        const response = await fetch(
+          `/api/households/invitations/${encodeURIComponent(pendingInvitationId)}/accept`,
+          { method: "POST" },
+        );
+        if (response.ok) {
+          const { householdId } = (await response.json()) as { householdId: string };
+          await setActiveHousehold(householdId);
+          router.push("/dashboard");
+          return;
+        }
       } catch {
         // Invitation may be expired/invalid — fall through to onboarding
       }
     }
 
-    // If user arrived via join link, redirect back to /join so they auto-join now logged in
+    // If the user arrived via join link, redirect back to /join so they auto-join now logged in
     const pendingJoinToken = sessionStorage.getItem("pendingJoinToken");
     if (pendingJoinToken) {
       sessionStorage.removeItem("pendingJoinToken");

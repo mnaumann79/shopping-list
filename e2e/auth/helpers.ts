@@ -1,5 +1,5 @@
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
-import { appOrigin, PASSWORD } from "../support/helpers";
+import { expect, type Browser, type Page } from "@playwright/test";
+import { appOrigin, PASSWORD, submitForm } from "../support/helpers";
 
 /**
  * Helpers for the AUTH-01…04 specs.
@@ -8,34 +8,92 @@ import { appOrigin, PASSWORD } from "../support/helpers";
  * the ones that only make sense for the auth specs stay here.
  */
 
+/** The path the specs navigate by. */
+export const BASE_URL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
+
 /**
- * Registers a user and gives them a household, over the Better Auth API.
+ * The GoTrue endpoint the browser client signs up against.
  *
- * The specs arrange their state this way and then drive the UI, so the thing
- * under test is the flow and not its setup.
+ * The browser client talks to the auth server directly, so the request the
+ * specs wait for does not go through the application.
+ */
+export const SIGN_UP_ENDPOINT = "/auth/v1/signup";
+
+/** The GoTrue endpoint the browser client signs in against. */
+export const SIGN_IN_ENDPOINT = "/auth/v1/token";
+
+/**
+ * The cookie the Supabase session lives in.
+ *
+ * `@supabase/ssr` names it after the project unless one is given, and the
+ * application gives it one, so the name is the same in the browser and on the
+ * server.
+ */
+export const SESSION_COOKIE = "sb-household-auth-token";
+
+/**
+ * A browser context that is signed out.
+ *
+ * `browser.newContext()` inherits the project's storageState — the setup
+ * user's session — so the state has to be cleared explicitly.
+ */
+export async function newSignedOutContext(browser: Browser) {
+  const context = await browser.newContext({
+    baseURL: BASE_URL,
+    storageState: { cookies: [], origins: [] },
+  });
+
+  return { context, page: await context.newPage() };
+}
+
+/**
+ * Registers a user and gives them a household.
+ *
+ * The signup is driven through the real form, in a context of its own: the
+ * session lives in a cookie the browser writes, and a context the spec throws
+ * away leaves the spec's own browser signed out — which is what the sign-in
+ * and sign-up specs need.
+ *
+ * The household is created through the application's own endpoint, so the
+ * membership row is created the way the product creates it.
  */
 export async function registerUser(
-  request: APIRequestContext,
-  options: { email: string; password?: string; householdName?: string },
+  browser: Browser,
+  options: { email: string; householdName?: string },
 ): Promise<void> {
-  const password = options.password ?? PASSWORD;
-  const origin = appOrigin();
+  const { context, page } = await newSignedOutContext(browser);
 
-  const signup = await request.post("/api/auth/sign-up/email", {
-    data: { name: "Test User", email: options.email, password },
-    headers: { Origin: origin },
-  });
-  const signupBody = await signup.text();
-  expect(signup.ok(), `Could not register ${options.email}: ${signupBody}`).toBeTruthy();
+  try {
+    await signUp(page, options.email);
 
-  if (!options.householdName) return;
+    if (!options.householdName) return;
 
-  const created = await request.post("/api/auth/organization/create", {
-    data: { name: options.householdName, slug: options.email.split("@")[0] },
-    headers: { Origin: origin },
-  });
-  const createdBody = await created.text();
-  expect(created.ok(), `Could not create the household: ${createdBody}`).toBeTruthy();
+    const created = await page.request.post(`${BASE_URL.replace(/\/$/, "")}/api/households`, {
+      data: { name: options.householdName },
+      headers: { Origin: appOrigin() },
+    });
+    const createdBody = await created.text();
+    expect(
+      created.ok(),
+      `Could not create the household: ${createdBody}`,
+    ).toBeTruthy();
+  } finally {
+    await context.close();
+  }
+}
+
+/** Signs a user up through the form and waits for the page the app sends them to. */
+export async function signUp(page: Page, email: string): Promise<void> {
+  await page.goto("/sign-up");
+  await page.getByLabel("Name").fill("Test User");
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(PASSWORD);
+
+  await submitForm(page, "Sign up", SIGN_UP_ENDPOINT);
+
+  // Email confirmation is off, so the user is signed in and lands on
+  // onboarding, which asks for a household.
+  await page.waitForURL(/\/onboarding$/, { timeout: 60_000 });
 }
 
 // Collects the requests a page sends to one endpoint, so a spec can assert
@@ -73,15 +131,24 @@ export async function openAccountMenu(page: Page): Promise<void> {
  * The shared storage state holds one session for every browser project.
  * Signing out revokes the session on the server, so a spec that signs out of
  * the shared session would take it away from every other spec. A spec that
- * needs to sign out registers its own user and copies that session into the
- * browser.
+ * needs to sign out signs its own user up in its own browser, which starts
+ * signed out because the spec clears the shared state.
  */
 export async function startOwnSession(
   page: Page,
-  request: APIRequestContext,
   options: { email: string; householdName?: string },
 ): Promise<void> {
-  await registerUser(request, options);
-  const state = await request.storageState();
-  await page.context().addCookies(state.cookies);
+  await signUp(page, options.email);
+
+  if (!options.householdName) return;
+
+  const created = await page.request.post(`${BASE_URL.replace(/\/$/, "")}/api/households`, {
+    data: { name: options.householdName },
+    headers: { Origin: appOrigin() },
+  });
+  const createdBody = await created.text();
+  expect(
+    created.ok(),
+    `Could not create the household: ${createdBody}`,
+  ).toBeTruthy();
 }

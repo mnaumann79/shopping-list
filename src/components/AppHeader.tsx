@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { authClient } from '@/lib/auth-client'
+import { signOut } from '@/lib/auth-client'
 import { Settings, ArrowLeft, History } from 'lucide-react'
 import { buttonVariants } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -19,17 +19,19 @@ import {
 interface AppHeaderProps {
   userName: string
   variant?: 'default' | 'settings'
+  /** The household the session is looking at. The switcher needs it. */
+  activeHouseholdId?: string | null
 }
 
 function getInitials(name: string): string {
   return name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2)
 }
 
-export function AppHeader({ userName, variant = 'default' }: AppHeaderProps) {
+export function AppHeader({ userName, variant = 'default', activeHouseholdId = null }: AppHeaderProps) {
   const router = useRouter()
 
   async function handleLogout() {
-    await authClient.signOut()
+    await signOut()
     router.push('/sign-in')
     router.refresh()
   }
@@ -41,7 +43,7 @@ export function AppHeader({ userName, variant = 'default' }: AppHeaderProps) {
         <div className="flex min-w-0 items-center gap-3">
           <span className="text-base font-semibold">Shopping List</span>
           {/* The household the user is shopping for */}
-          <HouseholdSwitcher />
+          <HouseholdSwitcher activeHouseholdId={activeHouseholdId} />
         </div>
       ) : (
         <div className="flex items-center gap-2">

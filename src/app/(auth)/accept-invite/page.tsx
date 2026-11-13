@@ -1,7 +1,7 @@
 "use client";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { authClient } from "@/lib/auth-client";
+import { acceptInvitation, getSession, setActiveHousehold } from "@/lib/auth-client";
 import {
   Card,
   CardHeader,
@@ -29,9 +29,9 @@ function AcceptInvitePageContent() {
     }
 
     async function handleInvite() {
-      const session = await authClient.getSession();
+      const session = await getSession();
 
-      if (!session.data) {
+      if (!session) {
         // Not logged in: preserve invitationId in sessionStorage, redirect to sign-up
         sessionStorage.setItem("pendingInvitationId", invitationId!);
         const signUpParams = new URLSearchParams({ invitationId: invitationId! });
@@ -53,7 +53,18 @@ function AcceptInvitePageContent() {
 
       // Logged in: auto-accept immediately
       try {
-        await authClient.organization.acceptInvitation({ invitationId: invitationId! });
+        const accepted = await acceptInvitation(invitationId!);
+        if (!accepted) {
+          setStatus("error");
+          setErrorMessage("Failed to accept invitation");
+          return;
+        }
+
+        // Make the household the invitation named the session's active
+        // household. The client asks the server to: the cookie is httpOnly,
+        // and the server checks the membership before it writes one.
+        await setActiveHousehold(accepted.householdId);
+
         setStatus("success");
         setTimeout(() => router.push("/dashboard"), 1500);
       } catch (err: unknown) {
