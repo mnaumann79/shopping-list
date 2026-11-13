@@ -1,9 +1,8 @@
 import { randomBytes, randomUUID } from "crypto";
-import { auth } from "@/lib/auth";
 import { and, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import { householdJoinLinks, householdMembers, households } from "@/db/schema/households";
-import { withScope, type Scope } from "@/db/scope";
+import { withClaimsOnly, withMembershipScope, withScope, type Scope, type Tx } from "@/db/scope";
 import { getJoinUrl } from "@/lib/app-routes";
 import { ServiceError } from "./service-error";
 
@@ -156,138 +155,96 @@ export async function removeMember(scope: Scope, userId: string): Promise<void> 
   );
 }
 
-/**
- * An authorization failure is a 403, whatever the refusal says.
- *
- * Better Auth's own wording is "You are not allowed to invite users to this
- * organization", which the old mapping did not match, so a plain member
- * inviting somebody was answered with a 500 (S-3). The wording is not the
- * contract; the refusal is.
- */
-function mapAuthorizationError(error: unknown, fallbackMessage: string) {
-  const message = error instanceof Error ? error.message : fallbackMessage;
-  const normalized = message.toLowerCase();
-
-  if (
-    normalized.includes("not authorized") ||
-    normalized.includes("not allowed") ||
-    normalized.includes("permission") ||
-    normalized.includes("you don't have permission")
-  ) {
-    throw new ServiceError(403, fallbackMessage);
-  }
-
-  throw new ServiceError(500, fallbackMessage);
-}
-
-/**
- * The invitation, as Better Auth stores it.
- *
- * This is the path the new `household_invitations` table replaces, and it
- * stays until the membership rows move: the invitation belongs to Better
- * Auth's organization, and the organization is what the table's rows would
- * be keyed by. The role check is Better Auth's here — which is admin-only,
- * but whose refusal was reported as a 500 (S-3).
- */
-export async function inviteMember(input: {
-  email: string;
-  orgId: string;
-  requestHeaders: Headers;
-}) {
-  try {
-    return await auth.api.createInvitation({
-      body: {
-        email: input.email,
-        organizationId: input.orgId,
-        role: "member",
-      },
-      headers: input.requestHeaders,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    const normalized = message.toLowerCase();
-
-    if (
-      normalized.includes("not authorized") ||
-      normalized.includes("not allowed") ||
-      normalized.includes("permission") ||
-      normalized.includes("you don't have permission")
-    ) {
-      throw new ServiceError(403, "Only household admins can send invitations");
-    }
-
-    if (normalized.includes("already invited")) {
-      return resendInvitation(input);
-    }
-
-    throw new ServiceError(500, message || "Failed to send invitation");
-  }
-}
-
-async function resendInvitation(input: {
-  email: string;
-  orgId: string;
-  requestHeaders: Headers;
-}) {
-  const invitations = await auth.api.listInvitations({
-    query: { organizationId: input.orgId },
-    headers: input.requestHeaders,
-  });
-
-  const existing = (invitations as Array<{ id: string; email: string; status: string }>)
-    .find((inv) => inv.email === input.email && inv.status === "pending");
-
-  if (existing) {
-    await auth.api.cancelInvitation({
-      body: { invitationId: existing.id },
-      headers: input.requestHeaders,
-    });
-  }
-
-  return auth.api.createInvitation({
-    body: { email: input.email, organizationId: input.orgId, role: "member" },
-    headers: input.requestHeaders,
-  });
-}
 
 /**
  * Joins the household the link names.
  *
- * This is the path the new tables replace. Two things it needs are not
- * there yet: the link lookup, because household_join_links is readable only
- * by the household's members and the caller is not one yet; and the
- * membership row, because the membership policy lets an owner or an admin
- * add somebody, or the creator bootstrap their own first row — and a caller
- * who follows a link is neither. Both want a SECURITY DEFINER function of
- * the shape of app_household_role, in db/migrations.
+ * The membership row is written by app_join_household_by_link, a SECURITY
+ * DEFINER function. Three things make that the only way:
+ *
+ * - The caller is not a member of the household yet, so the membership
+ *   policy cannot be part of the path: it lets an owner or an admin add
+ *   somebody, and the creator bootstrap their own first row, and a caller
+ *   who follows a link is neither.
+ * - The link itself is not readable by a non-member, so the token cannot be
+ *   resolved outside the function either. On `main` the join is broken
+ *   exactly that way: the lookup returns nothing and the join answers
+ *   "Invalid join link".
+ * - The function takes no user id — it uses auth.uid() — so a caller cannot
+ *   write a membership row for somebody else.
+ *
+ * The role a link grants is 'member'. Never owner, never admin.
  */
-export async function joinHousehold(input: {
-  token: string;
-  userId: string;
-  requestHeaders: Headers;
-}) {
-  const link = await findJoinLink(input.token);
+export async function joinHousehold(input: { token: string }): Promise<{ householdId: string }> {
+  const result = await withClaimsOnly((tx: Tx) =>
+    tx.execute(sql`select app_join_household_by_link(${input.token}) as household_id`),
+  );
 
-  if (!link) {
+  const rows = (result as unknown as { rows?: Array<{ household_id?: string | null }> }).rows ?? [];
+  const householdId = rows[0]?.household_id ?? null;
+
+  if (!householdId) {
     throw new ServiceError(404, "Invalid join link");
   }
 
-  if (link.expiresAt < new Date()) {
-    throw new ServiceError(410, "This join link has expired");
-  }
+  return { householdId };
+}
 
-  try {
-    await auth.api.addMember({
-      body: {
-        userId: input.userId,
-        organizationId: link.householdId,
-        role: "member",
-      },
-      headers: input.requestHeaders,
-    });
-  } catch (error) {
-    mapAuthorizationError(error, "You cannot join this household");
-  }
+/**
+ * The households the caller belongs to.
+ *
+ * The one call in the application that is not scoped to a household: it is
+ * scoped to the *user*, and the policies' membership branch is the whole of
+ * the isolation there. The transaction is read-only, so it cannot become a
+ * write path.
+ *
+ * It exists for the household list and the members list, and for nothing
+ * else. A fourth caller would be a design question, not a convenience.
+ */
+export async function listHouseholds(
+  scope: Scope,
+): Promise<Array<{ id: string; name: string; role: HouseholdRole }>> {
+  return withMembershipScope({ userId: scope.userId }, async (tx: Tx) => {
+    const rows = await tx
+      .select({ id: households.id, name: households.name, role: householdMembers.role })
+      .from(householdMembers)
+      .innerJoin(households, eq(households.id, householdMembers.householdId))
+      .where(eq(householdMembers.userId, scope.userId));
 
-  return { householdId: link.householdId };
+    return rows.map((row: { id: string; name: string; role: string }) => ({
+      id: row.id,
+      name: row.name,
+      role: row.role as HouseholdRole,
+    }));
+  });
+}
+
+/**
+ * The household's members.
+ *
+ * The names and the emails come from app_user_display, which exposes two
+ * fields and nothing else: the application's role must not be able to reach
+ * encrypted_password, and a grant on auth.users would.
+ */
+export async function listMembers(
+  scope: Scope,
+): Promise<Array<{ id: string; name: string | null; email: string | null; role: HouseholdRole }>> {
+  return withMembershipScope({ userId: scope.userId }, async (tx: Tx) => {
+    const result = await tx.execute(sql`
+      select m.user_id as id, m.role, d.name, d.email
+        from household_members m
+        cross join lateral app_user_display(m.user_id) as d
+       where m.household_id = ${scope.householdId}::uuid`);
+
+    const rows = (result as unknown as {
+      rows?: Array<{ id: string; role: string; name: string | null; email: string | null }>;
+    }).rows ?? [];
+
+    return rows.map((row: { id: string; role: string; name: string | null; email: string | null }) => ({
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      role: row.role as HouseholdRole,
+    }));
+  });
 }

@@ -1,8 +1,17 @@
-import { getRequestHeaders, requireRequestSession } from "@/lib/request-auth";
+import { requireRequestSession } from "@/lib/request-auth";
 import { joinHousehold } from "@/server/services/households";
 import { ServiceError } from "@/server/services/service-error";
 import { NextRequest } from "next/server";
 
+/**
+ * Joins the household the link names.
+ *
+ * The membership row is written by app_join_household_by_link, with the
+ * owner's rights: the caller is not a member of the household yet, so the
+ * membership policy cannot be part of that path, and the function takes no
+ * user id — it uses auth.uid() — so a caller cannot write a membership row
+ * for somebody else.
+ */
 export async function POST(req: NextRequest) {
   const session = await requireRequestSession();
   if (session instanceof Response) {
@@ -15,11 +24,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await joinHousehold({
-      token: body.token,
-      userId: session.user.id,
-      requestHeaders: await getRequestHeaders(),
-    });
+    const result = await joinHousehold({ token: body.token });
 
     return Response.json({ success: true, householdId: result.householdId }, { status: 200 });
   } catch (error) {
