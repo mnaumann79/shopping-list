@@ -89,24 +89,29 @@ jobs:
       # containers that live for the length of one job, and nobody outside
       # the job can reach them.
       #
-      # The CLI has renamed the keys once (ANON_KEY became PUBLISHABLE_KEY),
-      # so both names are read and the step refuses to go on without them.
+      # The keys are the ones the CLI prints as PUBLISHABLE_KEY and
+      # SECRET_KEY. It also prints ANON_KEY and SERVICE_ROLE_KEY, but those
+      # two are the placeholder "***" — the CLI prints the new names, and
+      # only the new names carry the key.
       - name: Read the stack's configuration
         id: stack
         run: |
           supabase status --output env > /tmp/stack.env
           cat /tmp/stack.env
-          {
-            echo "url=$(grep -E '^API_URL=' /tmp/stack.env | cut -d= -f2- | tr -d '"')"
-            echo "anon=$(grep -E '^(ANON_KEY|PUBLISHABLE_KEY)=' /tmp/stack.env | cut -d= -f2- | tr -d '"')"
-            echo "service=$(grep -E '^(SERVICE_ROLE_KEY|SECRET_KEY)=' /tmp/stack.env | cut -d= -f2- | tr -d '"')"
-          } >> "$GITHUB_OUTPUT"
+          url=$(grep -E '^API_URL=' /tmp/stack.env | head -1 | cut -d= -f2- | tr -d '"')
+          anon=$(grep -E '^PUBLISHABLE_KEY=' /tmp/stack.env | head -1 | cut -d= -f2- | tr -d '"')
+          service=$(grep -E '^SECRET_KEY=' /tmp/stack.env | head -1 | cut -d= -f2- | tr -d '"')
           for value in url anon service; do
             if [ -z "${!value}" ]; then
               echo "::error::the local stack's $value was not read from 'supabase status --output env'"
               exit 1
             fi
           done
+          {
+            echo "url=$url"
+            echo "anon=$anon"
+            echo "service=$service"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install psql
         run: |
