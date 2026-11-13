@@ -103,7 +103,11 @@ export function assertLooksLikeSupabase(targetUrl) {
     targetUrl,
     "SELECT count(*) FROM pg_namespace WHERE nspname = 'auth'",
   );
-  if (Number(rows[0].count) === 0) {
+  // query() returns the rows as arrays -- psql's unaligned output, split on
+  // the column separator -- so the count is the first column of the first
+  // row. Reading a `.count` property off it gave undefined, and undefined
+  // is not zero, so the guard never refused anything.
+  if (Number(rows[0][0]) === 0) {
     throw new Error(
       "Refusing to run: the target has no `auth` schema, so it is not a Supabase " +
         "instance. The mapping writes identities that only GoTrue's users can hold.",

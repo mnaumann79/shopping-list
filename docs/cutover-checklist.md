@@ -14,6 +14,84 @@ The times are relative to the maintenance window (**T−0**).
 
 ---
 
+## The environment
+
+What the deployment has to be configured with, before anything else. The
+variable list is what the code reads — `git grep process.env` over `src/` —
+and the rest of this section is what was learned the hard way.
+
+### The variables
+
+| Variable | Needed | Secret | What it is for |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | yes | yes | **set it to the non-owner `app` role** — the policies apply to it, which is the point of them |
+| `NEXT_PUBLIC_SUPABASE_URL` | yes | no | the Supabase project the application authenticates against — **inlined at build time** |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | no | the publishable key (`sb_publishable_…`) — **inlined at build time** |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes, during the transitional window | **yes** | it bypasses row-level security; the transitional sign-in and the admin console read it |
+| `RESEND_API_KEY` | for invitations | **yes** | the invitation mailer |
+| `RESEND_FROM_EMAIL` | for invitations | no | the address the invitation comes from |
+| `NEXT_PUBLIC_APP_URL` | yes | no | the public base URL — join links and invitation links — **inlined at build time** |
+| `ADMIN_EMAIL` | optional | no | without it the admin console answers 403 |
+
+### The build
+
+- **The `NEXT_PUBLIC_*` variables have to be present in the build
+  environment, not only at runtime.** Next.js inlines them when the
+  application is built, so a runtime-only setting leaves the browser
+  bundle carrying `undefined`.
+- **Node 24 and pnpm 9.** The lockfile is `lockfileVersion: '9.0'`, and
+  pnpm 10 and later can fail `--frozen-lockfile` against it. The CI
+  workflow pins both.
+- **The install must not run with `NODE_ENV=production`.** pnpm skips the
+  devDependencies, and `pnpm build` then fails with "Cannot find module
+  'typescript'". CI overrides `NODE_ENV` for the install only, and the
+  deployment has to do the same.
+- **There is no `output: 'standalone'`** in `next.config.ts`, so a
+  standalone-style Dockerfile will not work: the image needs `node_modules`
+  and `pnpm start`.
+
+### The two connection strings
+
+Two, for two different jobs:
+
+- **Set `DATABASE_URL` to the non-owner `app` role** — the policies apply
+  to it, which is the point of them. (The application connects as whatever
+  the string names; this is what makes the policies apply.)
+- **The verification needs the owner role**: the §10.8 fixture and the
+  backup-restore rehearsal create a scratch database and their own schema,
+  which the application role may not do. The owner bypasses row-level
+  security, which is exactly why it is not what the application uses.
+
+### The URL rules
+
+Each of these cost an hour:
+
+- **The username is tenant-qualified**: `app.<project-ref>`, not `app`. A
+  pooler rejects a tenant-less username.
+- **The host is the pooler, on port 5432.** The direct host is IPv6-only
+  for this project.
+- **The password is percent-encoded**, and libpq splits a connection URL
+  at the **first** `@`: an unencoded `@` in a password turns the rest of it
+  into a host name. Prefer a password with no `@ : / ? # %` in it at all.
+
+### On a fresh instance, in this order
+
+1. **Apply the repository's migrations first, with the owner's
+   connection.** Migration `0005` creates the `app` role — and creates it
+   without a password. The files go in with `psql`, as the owner: the
+   runner is a development-side tool, it refuses a host it cannot prove is
+   local (`DB_MIGRATE_ALLOW_ANY_HOST=1` is its opt-in), and the cutover
+   does not run it against the target in any case.
+2. **Then set the role's password**, through the flow that re-syncs the
+   pooler. The pooler authenticates the application role by fetching the
+   role's credential, and it does not always see the instance's copy: the
+   credential on the instance and the pooler's copy of it can come apart,
+   and a change to the role's password alone does not re-sync it.
+3. **Then put the connection string in `DATABASE_URL`** — the
+   application's role, not the owner's.
+
+---
+
 ## Before the window
 
 ### T−7 days — the target is verified
@@ -35,6 +113,12 @@ The times are relative to the maintenance window (**T−0**).
       instance from `db/init.sql`**: it is a snapshot of an older schema.
 - [ ] **The application role's password is not in the ledger.** It is read
       from the environment, not written down (P0S-T26).
+- [ ] **The pooler's credential matches the instance's.** The pooler
+      authenticates the application role by fetching the role's credential,
+      and it does not always see the instance's copy of it: the credential
+      on the instance and the pooler's copy can come apart, and a change to
+      the role's password alone does not re-sync it. The application
+      connects as the role, so the pooler is what decides whether it can.
 
 ### T−1 day — the accounts are provisioned
 
@@ -62,6 +146,20 @@ The times are relative to the maintenance window (**T−0**).
         --target "postgresql://…@the-instance…/postgres"
       ```
 
+- [ ] **The rehearsal's guards were not tripped, and its writes were
+      expected.** It refuses the Neon **production** host family — these
+      scripts move data and may only touch the development instance — it
+      writes to a scratch database whose name starts with
+      `cutover_rehearsal_` (it creates one), and it refuses a target
+      without an `auth` schema, because a plain PostgreSQL would take the
+      data and silently lose the identities.
+      **It also writes to the target, and that write stays.** The GoTrue
+      accounts the rehearsal needs are inserted into the target's
+      `auth.users` — an account that already exists is reused, so a
+      rehearsal may be run more than once — and those rows are not in the
+      scratch database, so dropping the scratch does not remove them. The
+      target is therefore the **development instance**, and the rehearsal
+      is not something to point at production.
 - [ ] **The rehearsal passes.** It compares the row counts of six tables —
       `items`, `categories`, `stores`, `household_join_links`, `item_stores`
       and the legacy `user` — checks that no identity is orphaned, and fails
@@ -198,8 +296,16 @@ This is the one step nothing else can do for you — see the last section.
       route is what verifies their old one, and it is about to go. Either a
       password reset has been sent to them, or a recovery path is kept — or
       a user who returns after this day cannot get in at all.
-- [ ] **The legacy tables are dropped** — Better Auth's `user`, `account`,
-      `session`, `member` and `organization`.
+- [ ] **The legacy tables are dropped** — Better Auth's `user`, `session`,
+      `account`, `verification`, `organization`, `member` and `invitation`.
+      Seven, and the list is the repository's own: `scripts/cutover/lib.mjs`
+      exports it as `RESTORED_TABLES`, and those seven are its **Better
+      Auth** entries. The export also lists the application's own five —
+      `items`, `categories`, `stores`, `household_join_links` and
+      `item_stores` — and **those are not part of this list**: the
+      decommission drops the seven legacy tables and nothing else.
+      `db/init.sql` creates all seven. A decommission that named five of
+      them would leave two behind, holding whatever was in them.
 - [ ] **The transitional sign-in route is removed**:
       `src/app/api/auth/legacy-signin/` and everything under
       `src/lib/legacy-auth/`.
