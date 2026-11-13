@@ -3856,7 +3856,10 @@ cleanup.** An address that already has a counter keeps working, and it keeps
 its own quota, so the flood buys no extra guesses against it. The counters
 for keys that already exist in their own map keep working: a user who has
 already failed once is not locked out by somebody else's flood, and the
-target of a flood keeps its quota.
+target of a flood keeps its quota. An attempt still needs an admissible key
+in **both** maps, though: a user who has failed once and then changes
+networks arrives with a new client key, and a full client map refuses that
+key before the email counter is read.
 
 **Neither refusal reaches every caller.** What a flood costs is the keys the
 map has never seen: the callers that are new, and the addresses that are new.
