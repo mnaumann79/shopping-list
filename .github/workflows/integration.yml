@@ -113,3 +113,9 @@ jobs:
             exit 0
           fi
           python3 src/db/fixture/verify.py
+
+      # The suite that proves the policies: a member of another household gets
+      # zero rows through the scope helper, with the application-side
+      # predicate deliberately removed, and the owner still sees the row.
+      - name: Run the integration suite
+        run: pnpm test:integration
