@@ -1,4 +1,5 @@
 import { createClient, type User } from "@supabase/supabase-js";
+import { getSupabaseConfig } from "@/lib/supabase/config";
 
 /** How many users one page of the admin API holds. */
 const PER_PAGE = 1000;
@@ -6,29 +7,13 @@ const PER_PAGE = 1000;
 /** How many pages the email lookup walks before it gives up. */
 const MAX_PAGES = 20;
 
-/** The instance's URL. */
-export function supabaseUrl(): string {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  if (!url) {
-    throw new Error("NEXT_PUBLIC_SUPABASE_URL is not configured");
-  }
-  return url;
-}
-
-/** The publishable key — the one that is allowed in the browser. */
-export function supabaseAnonKey(): string {
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!key) {
-    throw new Error("NEXT_PUBLIC_SUPABASE_ANON_KEY is not configured");
-  }
-  return key;
-}
-
 /**
  * The service role key.
  *
  * It never leaves the server: it is the only way to provision a GoTrue user
- * and the only way to look one up.
+ * and the only way to look one up. The application's own configuration
+ * deliberately does not read it — a module that could read it would invite
+ * it — so it is read here, in the one place that needs it.
  */
 function serviceRoleKey(): string {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -40,7 +25,9 @@ function serviceRoleKey(): string {
 
 /** The admin client: the service role, with no session of its own. */
 function adminClient() {
-  return createClient(supabaseUrl(), serviceRoleKey(), {
+  const { url } = getSupabaseConfig();
+
+  return createClient(url, serviceRoleKey(), {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 }

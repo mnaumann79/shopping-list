@@ -13,11 +13,7 @@ import {
 } from "@/lib/legacy-auth/supabase";
 import { signInWithPassword } from "@/lib/legacy-auth/sign-in";
 import { setActiveHousehold } from "@/lib/legacy-auth/active-household";
-import {
-  isAdmitted,
-  recordFailure,
-  recordSuccess,
-} from "@/lib/legacy-auth/attempt-limit";
+import { admit, settle } from "@/lib/legacy-auth/attempt-limit";
 
 const credentialsSchema = z.object({
   email: z.string().email("Invalid email address"),
@@ -51,65 +47,68 @@ export async function POST(req: NextRequest) {
   const client = clientKey(req);
 
   // The admission limit runs before anything expensive: the route is
-  // unauthenticated, and every failed attempt costs a scrypt and a lookup
-  // of the GoTrue accounts.
-  if (!isAdmitted(client, email)) {
+  // unauthenticated, and every attempt costs a scrypt and a lookup of the
+  // GoTrue accounts. The capacity is reserved here and settled below,
+  // whatever the outcome.
+  if (!admit(client, email)) {
     return Response.json({ error: "Too many attempts" }, { status: 429 });
   }
 
-  // The sign-in the application uses, and the only one that is not
-  // transitional. An account that already works is signed in here, and the
-  // legacy path is never reached.
-  const signedIn = await signInWithPassword(email, password);
-  if (signedIn) {
-    recordSuccess(client, email);
-    await setActiveHousehold(signedIn);
-    return Response.json({ ok: true }, { status: 200 });
-  }
+  let succeeded = false;
+  try {
+    // The sign-in the application uses, and the only one that is not
+    // transitional. An account that already works is signed in here, and the
+    // legacy path is never reached.
+    const signedIn = await signInWithPassword(email, password);
+    if (signedIn) {
+      succeeded = true;
+      await setActiveHousehold(signedIn);
+      return Response.json({ ok: true }, { status: 200 });
+    }
 
-  // The transitional path. Every step below runs whatever the outcome is,
-  // so the failures cost the same as well as answer the same.
-  const legacy = await findLegacyAccount(email);
-  const existing = await findGoTrueUser(email);
-  const verified = legacy
-    ? await verifyLegacyPassword(legacy.passwordHash, password)
-    : await verifyAgainstNothing(password);
+    // The transitional path. Every step below runs whatever the outcome is,
+    // so the failures cost the same as well as answer the same.
+    const legacy = await findLegacyAccount(email);
+    const existing = await findGoTrueUser(email);
+    const verified = legacy
+      ? await verifyLegacyPassword(legacy.passwordHash, password)
+      : await verifyAgainstNothing(password);
 
-  if (!legacy || !verified) {
-    recordFailure(client, email);
-    return unauthorized();
-  }
-
-  if (existing) {
-    // The account is on the new side already. The Supabase attempt above is
-    // the one that failed, and that failure is the answer the caller gets:
-    // an account that has signed in is never taken over from the legacy
-    // password, and no second account is ever made for the address.
-    if (!mayTakeOver(existing)) {
-      recordFailure(client, email);
+    if (!legacy || !verified) {
       return unauthorized();
     }
 
-    await setGoTruePassword(existing.id, password);
-  } else {
-    // No account on the new side: GoTrue hashes the password with bcrypt,
-    // which is what the legacy scrypt hash could not be carried into.
-    await provisionGoTrueUser({ email, password, name: legacy.name });
+    if (existing) {
+      // The account is on the new side already. The Supabase attempt above
+      // is the one that failed, and that failure is the answer the caller
+      // gets: an account that has signed in is never taken over from the
+      // legacy password, and no second account is ever made for the address.
+      if (!mayTakeOver(existing)) {
+        return unauthorized();
+      }
+
+      await setGoTruePassword(existing.id, password);
+    } else {
+      // No account on the new side: GoTrue hashes the password with bcrypt,
+      // which is what the legacy scrypt hash could not be carried into.
+      await provisionGoTrueUser({ email, password, name: legacy.name });
+    }
+
+    const userId = await signInWithPassword(email, password);
+    if (!userId) {
+      return unauthorized();
+    }
+
+    succeeded = true;
+
+    // The household the membership rows point at: a migrated user lands in
+    // their household, not in an empty one.
+    await setActiveHousehold(userId);
+
+    return Response.json({ ok: true }, { status: 200 });
+  } finally {
+    settle(client, email, succeeded);
   }
-
-  const userId = await signInWithPassword(email, password);
-  if (!userId) {
-    recordFailure(client, email);
-    return unauthorized();
-  }
-
-  recordSuccess(client, email);
-
-  // The household the membership rows point at: a migrated user lands in
-  // their household, not in an empty one.
-  await setActiveHousehold(userId);
-
-  return Response.json({ ok: true }, { status: 200 });
 }
 
 /**

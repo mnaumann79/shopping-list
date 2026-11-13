@@ -6,6 +6,14 @@
  * make the server do that work on demand — and guess legacy passwords
  * without being throttled.
  *
+ * Two counters, with different rules:
+ *
+ * - **The client's** counts the failures from the whole client, and a
+ *   successful sign-in does not clear it: a working account must not be a
+ *   way to keep guessing at other addresses.
+ * - **The address's** counts the failures against that address, and a
+ *   successful sign-in does clear it.
+ *
  * The counts are in memory: the route goes with the legacy code in fourteen
  * days, and nothing here outlives the process. A deployment that fronts
  * the application with a rate limiter does not need this, but the route
@@ -25,57 +33,89 @@ const MAX_PER_EMAIL = 5;
 /** How many counters are kept before the expired ones are dropped. */
 const MAX_KEYS = 1000;
 
-type Counter = { count: number; firstAt: number };
+type Counter = {
+  /** The failures recorded in the window. */
+  failures: number;
+  /** When the window started. */
+  startedAt: number;
+  /** The attempts that were admitted and have not settled yet. */
+  inFlight: number;
+};
 
 const clients = new Map<string, Counter>();
 const emails = new Map<string, Counter>();
 
-/** Whether the request may be admitted. */
-export function isAdmitted(client: string, email: string): boolean {
-  return (
-    failures(clients, client) <= MAX_PER_CLIENT &&
-    failures(emails, email) <= MAX_PER_EMAIL
-  );
-}
+/**
+ * Admits an attempt, or refuses it.
+ *
+ * The capacity is reserved in the same step as the check: concurrent
+ * requests cannot all be admitted against a counter that has not been
+ * updated yet, which is what a check-then-record would let them do.
+ */
+export function admit(client: string, email: string): boolean {
+  const clientCounter = counter(clients, client);
+  const emailCounter = counter(emails, email);
 
-/** Counts a failed attempt. */
-export function recordFailure(client: string, email: string): void {
-  count(clients, client);
-  count(emails, email);
-}
-
-/** Forgets the failures: a sign-in that worked is not a failure any more. */
-export function recordSuccess(client: string, email: string): void {
-  clients.delete(client);
-  emails.delete(email);
-}
-
-/** The failures in the window. */
-function failures(counters: Map<string, Counter>, key: string): number {
-  const counter = counters.get(key);
-  if (!counter) {
-    return 0;
+  if (clientCounter.failures + clientCounter.inFlight >= MAX_PER_CLIENT) {
+    return false;
   }
 
-  if (Date.now() - counter.firstAt > WINDOW_MS) {
-    counters.delete(key);
-    return 0;
+  if (emailCounter.failures + emailCounter.inFlight >= MAX_PER_EMAIL) {
+    return false;
   }
 
-  return counter.count;
+  clientCounter.inFlight += 1;
+  emailCounter.inFlight += 1;
+  return true;
 }
 
-/** Counts one more failure for the key. */
-function count(counters: Map<string, Counter>, key: string): void {
-  const counter = counters.get(key);
+/**
+ * Settles an admitted attempt.
+ *
+ * A failure is counted. A success clears the failures against that address
+ * and nothing else — the client's own failures stay until the window ends.
+ */
+export function settle(client: string, email: string, succeeded: boolean): void {
+  release(clients, client, succeeded, false);
+  release(emails, email, succeeded, succeeded);
+}
 
-  if (!counter || Date.now() - counter.firstAt > WINDOW_MS) {
+/** The counter for the key, or a fresh one when the window has passed. */
+function counter(counters: Map<string, Counter>, key: string): Counter {
+  const existing = counters.get(key);
+
+  if (!existing || Date.now() - existing.startedAt > WINDOW_MS) {
+    const fresh: Counter = { failures: 0, startedAt: Date.now(), inFlight: 0 };
+    counters.set(key, fresh);
     prune(counters);
-    counters.set(key, { count: 1, firstAt: Date.now() });
+    return fresh;
+  }
+
+  return existing;
+}
+
+/** Settles one counter: the reservation is released, and the failure counted. */
+function release(
+  counters: Map<string, Counter>,
+  key: string,
+  succeeded: boolean,
+  clearFailures: boolean,
+): void {
+  const existing = counters.get(key);
+  if (!existing) {
     return;
   }
 
-  counter.count += 1;
+  existing.inFlight = Math.max(0, existing.inFlight - 1);
+
+  if (!succeeded) {
+    existing.failures += 1;
+    return;
+  }
+
+  if (clearFailures) {
+    existing.failures = 0;
+  }
 }
 
 /** Drops the counters that are out of date, so the map cannot grow for ever. */
@@ -85,8 +125,8 @@ function prune(counters: Map<string, Counter>): void {
   }
 
   const now = Date.now();
-  for (const [key, counter] of counters) {
-    if (now - counter.firstAt > WINDOW_MS) {
+  for (const [key, existing] of counters) {
+    if (now - existing.startedAt > WINDOW_MS) {
       counters.delete(key);
     }
   }

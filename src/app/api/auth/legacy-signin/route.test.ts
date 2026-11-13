@@ -25,9 +25,8 @@ vi.mock("@/lib/legacy-auth/active-household", () => ({
 }));
 
 vi.mock("@/lib/legacy-auth/attempt-limit", () => ({
-  isAdmitted: vi.fn(),
-  recordFailure: vi.fn(),
-  recordSuccess: vi.fn(),
+  admit: vi.fn(),
+  settle: vi.fn(),
 }));
 
 import { findLegacyAccount } from "@/lib/legacy-auth/legacy-account";
@@ -39,7 +38,7 @@ import {
 } from "@/lib/legacy-auth/supabase";
 import { signInWithPassword } from "@/lib/legacy-auth/sign-in";
 import { setActiveHousehold } from "@/lib/legacy-auth/active-household";
-import { isAdmitted } from "@/lib/legacy-auth/attempt-limit";
+import { admit } from "@/lib/legacy-auth/attempt-limit";
 import { POST } from "./route";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -65,7 +64,7 @@ describe("POST /api/auth/legacy-signin", () => {
     // Default: Supabase Auth accepts the credentials, so the legacy path is
     // never reached.
     vi.mocked(signInWithPassword).mockResolvedValue(USER_ID);
-    vi.mocked(isAdmitted).mockReturnValue(true);
+    vi.mocked(admit).mockReturnValue(true);
   });
 
   test("returns 400 for a body that is not an email and a password", async () => {
@@ -166,7 +165,7 @@ describe("POST /api/auth/legacy-signin", () => {
   test("answers 429 when the caller is over the limit", async () => {
     // The route is unauthenticated and every failed attempt costs a scrypt,
     // so the admission limit runs before anything expensive.
-    vi.mocked(isAdmitted).mockReturnValue(false);
+    vi.mocked(admit).mockReturnValue(false);
 
     const res = await POST(request({ email: "person@example.test", password: "secret" }));
 
