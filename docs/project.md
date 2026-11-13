@@ -3845,10 +3845,12 @@ least one failure. The email map holds one counter per address, so a hundred
 identities can fill it by spending their quota of ten on ten distinct
 addresses each — but the client map is checked first, so the refusal that
 reaches every caller is the one the thousand identities buy. With no proxy in
-front, every caller shares the key `"unknown"`, so one identity's quota of
-ten failures is not enough to fill either map. The trade-off is deliberate:
-the smaller failure is the one that cannot be repeated at will against one
-address.
+front, every caller on the same machine shares one key — the socket's
+address — so one identity's quota of ten failures is not enough to fill
+either map. The literal `"unknown"` is the fallback for a request that
+carries no header at all, which is how the route's own unit tests call it.
+The trade-off is deliberate: the smaller failure is the one that cannot be
+repeated at will against one address.
 
 #### What the rehearsal found
 
