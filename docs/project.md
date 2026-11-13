@@ -1814,6 +1814,34 @@ at runtime, on every request, as *"permission denied for schema auth"*. The
 account is in `db/migrations/0008_auth_schema_grant_account.sql`, which also
 says why 0005's own comment was not corrected in place.
 
+**The application checks the role it connects as, and refuses to serve when
+that role is privileged.** Everything above is a requirement on the operator:
+`DATABASE_URL` has to name the non-owner role, and nothing in the application
+enforced it. A connection as the owner, as a superuser, or as a role with
+`BYPASSRLS` sees every household's rows whatever the policies say, and the
+isolation falls back on the application layer alone — the one layer a bug can
+get past.
+
+So the check at the door asks the role itself, before the server accepts a
+request. `scripts/assert-connection-role.mjs` connects with the same
+`DATABASE_URL` the application uses and runs the assertions of
+`scripts/app-role.sql` against the role that connection authenticated as —
+the same assertions the CI makes about the role named `app`, with the subject
+as the only difference. The findings that mean the policies are not enforced
+at all — a superuser, a role with `BYPASSRLS`, the owner of a table in
+`public` — end the process against a deployment, and the message names the
+role and says what it costs: the household isolation is not being enforced by
+the database.
+
+**It refuses against a deployment and reports against a local database.** The
+rule for "local" is the one the migration runner already uses — `localhost`,
+`127.0.0.1`, `::1`, and anything ending in `.local` or `.localhost` —
+because the local stack's own `postgres` is a superuser and the developer
+asked for it. A deployment is not local, and against one the application does
+not start at all. The check runs when the application starts and when the
+development server starts, and **not** in the build: a build must never need a
+live database.
+
 **What RLS does and does not replace.** It replaces nothing in §12.5 and
 §12.6 — the application-layer scope helper stays, because it is what
 produces a **404** rather than an empty result, and a 404 is what tells a
