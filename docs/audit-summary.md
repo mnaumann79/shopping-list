@@ -48,7 +48,13 @@ does not reverse an archive, an explicit override that beats check-wins, five
 store-tag outcomes, a mixed bulk operation, a bulk operation where every
 candidate was skipped, a row archived before the sync model, two replays, a
 create that writes its tags, and a create whose id is already taken. **201 assertions
-pass.** The same round produced one schema change: a **tombstone on the tag
+pass.**
+
+*Those were the audit's numbers, and they have since grown: the fixture now
+covers **forty-two scenarios in eleven groups** with **248 assertions**, after
+a review found three operation types the fixture never exercised — `item.delete`,
+`item.unarchive` and `item.bulkUnarchive` — and two assertions that could not
+have failed. The audit's own text is left as it was written.* The same round produced one schema change: a **tombstone on the tag
 pairs** (`item_stores.deleted_at`),
 without which a removal's ordering key is destroyed and a long-offline device
 could resurrect a tag somebody had deliberately removed.
@@ -238,7 +244,7 @@ with the losing edit surfaced rather than discarded.
 | **Specification** | `docs/project.md` — ~3,900 lines. 31 functional requirements, 12 invariants, 18 offline scenarios, 17 operation types, 13 error codes, 17 ADRs, 38 acceptance criteria. |
 | **Roadmap** | `docs/plan.md` — ~900 lines. 9 phases, ownership matrix, merge order, 8 open decisions plus 4 in Phase 0b. |
 | **Review** | 8 rounds, by three specialists, plus 4 further verification rounds. All blocking findings applied; 22 refinements deferred to Appendix B with an owner and a phase. |
-| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 201 assertions about their outcomes pass** — extracted from the document by content, so the text that is verified is the text that is specified. **All three have also been executed against the self-hosted Supabase instance**, which is PostgreSQL 17.11 — the same version — and `auth.uid()` resolves there from a transaction-local claim, which is what the row-level security policies depend on. |
+| **Verification** | Every cross-reference resolves; no undefined identifiers, no stale vocabulary, all 18 scenarios carry behaviour, handling and acceptance criteria. **§10.8's three statements have been executed against PostgreSQL 17 with the specification's own DDL, and 248 assertions about their outcomes pass** — extracted from the document by content, so the text that is verified is the text that is specified. **All three have also been executed against the self-hosted Supabase instance**, which is PostgreSQL 17.11 — the same version — and `auth.uid()` resolves there from a transaction-local claim, which is what the row-level security policies depend on. |
 
 **Deliberate changes to the original plan, made on review:** "Keep mine" made
 an explicit **override** rather than a race; tombstones made **never
@@ -316,7 +322,7 @@ audit's findings.
 
 **One thing has been done that deserves to be called out:** the §10.8 SQL was
 executed against a real PostgreSQL with the specification's own DDL, and its
-outcomes verified — 201 assertions across 37 scenarios in 9 groups. That is
+outcomes verified — 248 assertions across 42 scenarios in 11 groups. That is
 **verification, not implementation**: no production code contains that SQL
 yet, and it will not until Phase 3.
 
