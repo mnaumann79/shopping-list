@@ -6,7 +6,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { setActiveHousehold, signUpWithPassword } from "@/lib/auth-client";
+import { getSession, setActiveHousehold, signUpWithPassword } from "@/lib/auth-client";
 import { getJoinPath } from "@/lib/app-routes";
 import {
   Card,
@@ -35,10 +35,30 @@ const signUpSchema = z.object({
 type SignUpValues = z.infer<typeof signUpSchema>;
 
 function SignUpPageContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const emailParam = searchParams.get("email");
   const [invitationEmail, setInvitationEmail] = useState("");
   const email = emailParam ?? invitationEmail;
+
+  // A visitor who already has a session has no business on this page.
+  //
+  // The middleware used to send one away from here, but it went by the
+  // cookie's presence and the two guards disagreed about what "signed in"
+  // means. The page owns the check now, and it owns it better: it asks the
+  // browser for the session, and the browser can renew a session whose access
+  // token lapsed while the browser was closed.
+  useEffect(() => {
+    let cancelled = false;
+
+    getSession().then((session) => {
+      if (!cancelled && session) router.replace("/dashboard");
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   // Persist invite/join tokens and resolve email if not in URL
   useEffect(() => {
