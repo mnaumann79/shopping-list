@@ -5,13 +5,12 @@ vi.mock("next/headers", () => ({
   headers: vi.fn().mockResolvedValue(new Headers()),
 }));
 
-// Mock auth
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      getSession: vi.fn(),
-    },
-  },
+// The caller is faked at the request-auth seam, not at the auth provider:
+// the auth swap removes the auth export from that module, and a route test
+// that mocked it would break the moment the swap lands.
+vi.mock("@/lib/request-auth", () => ({
+  requireActiveOrganization: vi.fn(),
+  requireRequestSession: vi.fn(),
 }));
 
 // Mock db. The scope helper opens a transaction and runs the caller's query
@@ -55,7 +54,7 @@ vi.mock("@/db/schema/households", () => ({
   },
 }));
 
-import { auth } from "@/lib/auth";
+import { requireActiveOrganization } from "@/lib/request-auth";
 import { db } from "@/db";
 import { DELETE } from "./route";
 
@@ -66,9 +65,10 @@ const HOUSEHOLD_ID = "44444444-4444-4444-8444-444444444444";
 
 /** A session for the given user, with the household active. */
 function signedIn(userId: string) {
-  vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-    user: { id: userId },
-    session: { activeOrganizationId: HOUSEHOLD_ID },
+  vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+    session: { user: { id: userId, name: "U", email: "u@example.test" }, activeHouseholdId: HOUSEHOLD_ID },
+    orgId: HOUSEHOLD_ID,
+    requestHeaders: new Headers(),
   } as never);
 }
 
@@ -106,7 +106,9 @@ describe("DELETE /api/households/members/:userId", () => {
   });
 
   test("returns 401 without a session", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }) as never,
+    );
 
     const res = await remove(MEMBER_ID);
 
@@ -114,10 +116,9 @@ describe("DELETE /api/households/members/:userId", () => {
   });
 
   test("returns 400 when there is no active household", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: OWNER_ID },
-      session: { activeOrganizationId: null },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "No active household" }, { status: 400 }) as never,
+    );
 
     const res = await remove(MEMBER_ID);
 

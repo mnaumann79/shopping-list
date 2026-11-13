@@ -239,8 +239,14 @@ export async function removeMember(scope: Scope, userId: string): Promise<void> 
  *
  * The role a link grants is 'member'. Never owner, never admin.
  */
-export async function joinHousehold(input: { token: string }): Promise<{ householdId: string }> {
-  const result = await withClaimsOnly((tx: Tx) =>
+export async function joinHousehold(input: {
+  token: string;
+  userId: string;
+}): Promise<{ householdId: string }> {
+  // The claims carry the caller, because auth.uid() inside the function
+  // reads them: a function that cannot resolve the caller cannot check who
+  // the caller is.
+  const result = await withClaimsOnly({ userId: input.userId }, (tx: Tx) =>
     tx.execute(sql`select app_join_household_by_link(${input.token}) as household_id`),
   );
 

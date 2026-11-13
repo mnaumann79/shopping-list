@@ -125,10 +125,25 @@ export async function cancelInvitation(scope: Scope, invitationId: string): Prom
  * invitation, and writes the row with the owner's rights. One statement
  * path, one place where the invitation is checked.
  */
-export async function acceptInvitation(invitationId: string): Promise<{ householdId: string }> {
-  const result = await withClaimsOnly((tx: Tx) =>
-    tx.execute(sql`select app_accept_household_invitation(${invitationId}::uuid) as household_id`),
-  );
+export async function acceptInvitation(
+  invitationId: string,
+  userId: string,
+): Promise<{ householdId: string }> {
+  let result: unknown;
+  try {
+    // The claims carry the caller, because auth.uid() inside the function
+    // reads them.
+    result = await withClaimsOnly({ userId }, (tx: Tx) =>
+      tx.execute(sql`select app_accept_household_invitation(${invitationId}::uuid) as household_id`),
+    );
+  } catch (error) {
+    // 42501 is the function's answer for "this invitation is addressed to
+    // somebody else": an authorization failure, so it is a 403 and not a 500.
+    if (isInsufficientPrivilege(error)) {
+      throw new ServiceError(403, "This invitation is not for you");
+    }
+    throw error;
+  }
 
   const rows = (result as unknown as { rows?: Array<{ household_id?: string | null }> }).rows ?? [];
   const householdId = rows[0]?.household_id ?? null;
@@ -138,6 +153,18 @@ export async function acceptInvitation(invitationId: string): Promise<{ househol
   }
 
   return { householdId };
+}
+
+/**
+ * Whether the database refused the statement for want of privilege.
+ *
+ * The driver reports it as the SQLSTATE 42501, and the query layer wraps
+ * the driver's error — so both places are looked at.
+ */
+function isInsufficientPrivilege(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  const cause = (error as { cause?: { code?: string } } | null)?.cause;
+  return code === "42501" || cause?.code === "42501";
 }
 
 /**

@@ -6,12 +6,12 @@ vi.mock("next/headers", () => ({
 }));
 
 // Mock auth
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      getSession: vi.fn(),
-    },
-  },
+// The caller is faked at the request-auth seam, not at the auth provider:
+// the auth swap removes the auth export from that module, and a route test
+// that mocked it would break the moment the swap lands.
+vi.mock("@/lib/request-auth", () => ({
+  requireActiveOrganization: vi.fn(),
+  requireRequestSession: vi.fn(),
 }));
 
 // Mock db. The scope helper opens a transaction and runs the caller's query
@@ -55,9 +55,18 @@ vi.mock("@/db/schema/households", () => ({
   },
 }));
 
-import { auth } from "@/lib/auth";
+import { requireActiveOrganization } from "@/lib/request-auth";
 import { db } from "@/db";
 import { POST } from "./route";
+
+// A signed-in caller with a household active.
+function signedIn(userId = "u1") {
+  vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
+    session: { user: { id: userId, name: "U", email: "u@example.test" }, activeHouseholdId: "h1" },
+    orgId: "h1",
+    requestHeaders: new Headers(),
+  } as never);
+}
 
 // The role the database reports for the caller.
 function callerIs(role: string | null) {
@@ -76,7 +85,9 @@ describe("POST /api/households/join-links", () => {
   });
 
   test("returns 401 if not authenticated", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }) as never,
+    );
     const res = await POST();
     expect(res.status).toBe(401);
     const json = await res.json();
@@ -84,10 +95,9 @@ describe("POST /api/households/join-links", () => {
   });
 
   test("returns 400 if there is no active organization", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: null },
-    } as never);
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "No active household" }, { status: 400 }) as never,
+    );
     const res = await POST();
     expect(res.status).toBe(400);
     const json = await res.json();
@@ -97,10 +107,7 @@ describe("POST /api/households/join-links", () => {
   test("returns 403 for a plain member", async () => {
     // S-1: the API does not let a plain member mint a join link. The UI hides
     // the button; this is the check that does not depend on the UI.
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: "org-1" },
-    } as never);
+    signedIn();
     callerIs("member");
 
     const res = await POST();
@@ -112,10 +119,7 @@ describe("POST /api/households/join-links", () => {
   });
 
   test("returns 403 for somebody who is not a member at all", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: "org-1" },
-    } as never);
+    signedIn();
     callerIs(null);
 
     const res = await POST();
@@ -124,10 +128,7 @@ describe("POST /api/households/join-links", () => {
   });
 
   test("returns 200 with a join URL containing a 64-char hex token", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: "org-1" },
-    } as never);
+    signedIn();
     const res = await POST();
     expect(res.status).toBe(200);
     const json = await res.json();
@@ -142,20 +143,14 @@ describe("POST /api/households/join-links", () => {
 
   test("minting a link leaves the household's other links alone", async () => {
     // S-2: several links may exist at once, and each is revocable on its own.
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: "org-1" },
-    } as never);
+    signedIn();
     await POST();
     expect(db.delete).not.toHaveBeenCalled();
   });
 
   test("returned URL uses BETTER_AUTH_URL as base", async () => {
     process.env.BETTER_AUTH_URL = "https://app.example.com";
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: "org-1" },
-    } as never);
+    signedIn();
     const res = await POST();
     const json = await res.json();
     expect(json.url).toMatch(/^https:\/\/app\.example\.com\/join\?token=/);

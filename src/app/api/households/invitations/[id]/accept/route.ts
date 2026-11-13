@@ -22,7 +22,7 @@ export async function POST(_req: Request, { params }: RouteContext) {
   const { id } = await params;
 
   try {
-    const result = await acceptInvitation(id);
+    const result = await acceptInvitation(id, session.user.id);
 
     // The household the caller was just invited into is the active one.
     return withActiveHousehold(Response.json(result, { status: 200 }), result.householdId);

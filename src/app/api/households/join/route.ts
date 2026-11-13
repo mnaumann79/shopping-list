@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await joinHousehold({ token: body.token });
+    const result = await joinHousehold({ token: body.token, userId: session.user.id });
 
     // The household the caller just joined is the active one.
     return withActiveHousehold(

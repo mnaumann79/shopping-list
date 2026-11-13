@@ -1,16 +1,12 @@
 import { describe, test, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
-vi.mock("next/headers", () => ({
-  headers: vi.fn().mockResolvedValue(new Headers()),
-}));
-
-vi.mock("@/lib/auth", () => ({
-  auth: {
-    api: {
-      getSession: vi.fn(),
-    },
-  },
+// The caller is faked at the request-auth seam, not at the auth provider:
+// the auth swap removes the auth export from that module, and a route test
+// that mocked it would break the moment the swap lands.
+vi.mock("@/lib/request-auth", () => ({
+  requireRequestSession: vi.fn(),
+  requireActiveOrganization: vi.fn(),
 }));
 
 const { dbMock } = vi.hoisted(() => {
@@ -32,14 +28,16 @@ vi.mock("@/db", () => ({ db: dbMock }));
 
 // The scope helpers live in src/db/scope.ts. The two this task adds are not
 // there yet, so the module is mocked here: the helper is somebody else's
-// unit, and the integration suite is what proves it.
+// unit, and the integration suite is what proves it. The claims-only helper
+// takes the caller with the callback — the claims have to be set for the
+// caller, because auth.uid() inside the functions reads them.
 vi.mock("@/db/scope", () => ({
   withScope: vi.fn((_scope: unknown, fn: (tx: unknown) => unknown) => fn(dbMock)),
   withMembershipScope: vi.fn((_scope: unknown, fn: (tx: unknown) => unknown) => fn(dbMock)),
-  withClaimsOnly: vi.fn((fn: (tx: unknown) => unknown) => fn(dbMock)),
+  withClaimsOnly: vi.fn((_caller: unknown, fn: (tx: unknown) => unknown) => fn(dbMock)),
 }));
 
-import { auth } from "@/lib/auth";
+import { requireRequestSession } from "@/lib/request-auth";
 import { db } from "@/db";
 import { POST } from "./route";
 
@@ -51,22 +49,28 @@ function makeRequest(body: unknown): NextRequest {
   });
 }
 
+/** A signed-in caller. */
+function signedIn() {
+  vi.mocked(requireRequestSession).mockResolvedValueOnce({
+    user: { id: "u1", name: "U", email: "u@example.test" },
+  } as never);
+}
+
 describe("POST /api/households/join", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   test("returns 401 if not authenticated", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null);
+    vi.mocked(requireRequestSession).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }) as never,
+    );
     const res = await POST(makeRequest({ token: "t" }));
     expect(res.status).toBe(401);
   });
 
   test("returns 400 if the token is missing", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: "org-1" },
-    } as never);
+    signedIn();
     const res = await POST(makeRequest({}));
     expect(res.status).toBe(400);
   });
@@ -75,10 +79,7 @@ describe("POST /api/households/join", () => {
     // The function resolves the token and writes the row in one statement
     // path, so an unknown, an expired and a revoked link are one answer:
     // nothing.
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: "org-1" },
-    } as never);
+    signedIn();
     vi.mocked(db.execute).mockResolvedValue({ rows: [{ household_id: null }] } as never);
 
     const res = await POST(makeRequest({ token: "dead-token" }));
@@ -87,10 +88,7 @@ describe("POST /api/households/join", () => {
   });
 
   test("returns 200 and the household id when the link is live", async () => {
-    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
-      user: { id: "u1" },
-      session: { activeOrganizationId: "org-1" },
-    } as never);
+    signedIn();
     vi.mocked(db.execute).mockResolvedValue({ rows: [{ household_id: "h1" }] } as never);
 
     const res = await POST(makeRequest({ token: "live-token" }));
