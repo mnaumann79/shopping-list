@@ -6,10 +6,20 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# One run per ref. A new push cancels the run it replaces.
+# One run per ref. A new push cancels the run it replaces - except on main.
+#
+# This job is a report and never a gate, and a report that is cancelled is
+# not a report: with the rule below, every merge to main cancelled the run in
+# flight and started another one, so on a busy main the job never finished at
+# all - it never produced a duration, never reported a red journey, and never
+# opened the issue that is its whole purpose. The suite step was measured
+# running for 8m04s and then 10m32s before being killed.
+#
+# A pull request keeps the old behaviour: a new push cancels the run it
+# replaces, because only the newest commit is worth testing.
 concurrency:
   group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
