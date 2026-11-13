@@ -3784,6 +3784,74 @@ So the restore is a set of `pg_restore --table=…` calls for the shopping
 list's tables, into `public`, and nothing else. The dry run (step 3) does the
 same into a scratch database, which is why it catches a missing table.
 
+#### The transitional route's client key
+
+The transitional sign-in (§13.2c) counts its failures against two things:
+the **address** being tried and the **client** doing the trying. The client
+key is the **rightmost** `x-forwarded-for` entry — the nearest hop's
+observation — so a client cannot choose its key by setting the header
+itself. Which entry that is depends on the deployment, so it is written
+down here rather than left to be rediscovered.
+
+**In the deployment the header holds one entry, and it is the platform's.**
+The application is hosted on Vercel, and Vercel **overwrites**
+`x-forwarded-for` with the client's public IP and does not forward the
+incoming value: *"we currently overwrite the X-Forwarded-For header and do
+not forward external IPs. This restriction is in place to prevent IP
+spoofing"* (Vercel's request-headers documentation). The chain the client
+sent, if any, is kept in `x-vercel-forwarded-for`, which the route does not
+read. So the rightmost entry — the only entry — is the platform's own
+observation of the client, and the key is the client's address as Vercel
+sees it. Vercel forwards the client's own value only with the Enterprise
+plan's Trusted Proxy feature; if that is ever enabled, the key becomes the
+client's to choose, and the route has to be revisited.
+
+**With no proxy in front — the local run and the CI job — Next.js fills the
+header from the socket address.** A missing `x-forwarded-for` becomes the
+socket's remote address (Next.js 16.2.11,
+`next/dist/server/base-server.js`), and a value the caller supplied is kept
+as it is. So the key is the socket's address, and every caller on the same
+machine shares one bucket: the strict direction, where one noisy caller
+costs the others their client quota while the per-address quota still
+protects the passwords. But a client that reaches the server **directly**
+can send its own `x-forwarded-for` and rotate it, so the per-client quota
+does not hold there — the per-address quota is what protects the passwords.
+The end-to-end tests give each browser profile an address of its own, so the
+limiter is exercised the way a deployment exercises it.
+
+**A deployment that is reachable without the platform rewriting the header
+breaks this.** The route trusts the rightmost entry, and Next.js keeps a
+value the caller supplied, so where the caller can reach the server directly
+— a host of its own, or a proxy that forwards the client's value unchanged
+— the client chooses its own key and can rotate it to escape the per-client
+quota. The per-address quota still protects the passwords. If the
+application ever moves to such a deployment, the client key has to be
+revisited: while the transitional route is there, and before it is
+decommissioned (step 8).
+
+#### What a full set of counters means
+
+The counters are held in memory and capped at a thousand per map, and `admit`
+checks the client map first. While the client map is full, a **new** client
+key is refused — even for an address that already has a counter of its own —
+and while the email map is full, a **new** address is refused. The counters
+for keys that already exist in their own map keep working: a user who has
+already failed once is not locked out by somebody else's flood, and the
+target of a flood keeps its quota.
+
+The two maps fill differently. The client map holds one counter per identity,
+so it takes **a thousand** distinct client identities to fill, each making at
+least one failure. The email map holds one counter per address, so a hundred
+identities can fill it by spending their quota of ten on ten distinct
+addresses each — but the client map is checked first, so the refusal that
+reaches every caller is the one the thousand identities buy. With no proxy in
+front, every caller on the same machine shares one key — the socket's
+address — so one identity's quota of ten failures is not enough to fill
+either map. The literal `"unknown"` is the fallback for a request that
+carries no header at all, which is how the route's own unit tests call it.
+The trade-off is deliberate: the smaller failure is the one that cannot be
+repeated at will against one address.
+
 #### What the rehearsal found
 
 The runbook was rehearsed end to end against a Supabase instance — the dump,
