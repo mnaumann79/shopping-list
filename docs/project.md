@@ -1503,9 +1503,11 @@ ALTER TABLE items ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY items_household_isolation ON items
   USING      (household_id IN (SELECT household_id FROM household_members
-                               WHERE user_id = auth.uid()))
+                               WHERE user_id = auth.uid())
+              AND app_household_scope(household_id))
   WITH CHECK (household_id IN (SELECT household_id FROM household_members
-                               WHERE user_id = auth.uid()));
+                               WHERE user_id = auth.uid())
+              AND app_household_scope(household_id));
 ```
 
 `household_members` gets its own policy, and it is where the design has to
@@ -1513,8 +1515,7 @@ be careful. The obvious one — `USING (user_id = auth.uid())` — makes the
 sub-query above terminate, so it does not recurse. **The recursion trap is
 real**: a policy on `items` that selects from `household_members`, where
 `household_members`'s policy selects from `items`, loops until PostgreSQL
-gives up. The membership table's policy keys only on `auth.uid()`, so it
-does not.
+gives up.
 
 That policy alone is not enough, though, because it also stops the owner
 from managing the household: with it, a user sees only their own membership
@@ -1525,7 +1526,8 @@ from inside `household_members`'s own policy is the recursion trap again.
 
 The way out is a **SECURITY DEFINER function**, owned by the table owner, so
 it reads `household_members` with the owner's rights and the policies do
-not apply to it:
+not apply to it. Three functions carry the membership rules, and the
+policies call them:
 
 ```sql
 CREATE FUNCTION app_household_role(p_household_id uuid, p_user_id uuid)
@@ -1533,22 +1535,132 @@ RETURNS text
 LANGUAGE sql
 SECURITY DEFINER
 SET search_path = public, pg_temp
-AS $$
+AS $fn$
   SELECT role FROM household_members
    WHERE household_id = p_household_id AND user_id = p_user_id;
-$$;
+$fn$;
 
-CREATE POLICY household_members_isolation ON household_members
-  USING      (user_id = auth.uid()
-               OR app_household_role(household_id, auth.uid()) IN ('owner','admin'))
-  WITH CHECK (user_id = auth.uid()
-               OR app_household_role(household_id, auth.uid()) IN ('owner','admin'));
+CREATE FUNCTION app_household_bootstrap(p_household_id uuid, p_user_id uuid)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $fn$
+  SELECT EXISTS (
+    SELECT 1
+      FROM households h
+     WHERE h.id = p_household_id
+       AND h.created_by = p_user_id
+       AND NOT EXISTS (SELECT 1 FROM household_members m
+                        WHERE m.household_id = h.id)
+  );
+$fn$;
+
+CREATE FUNCTION app_household_scope(p_household_id uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $fn$
+  SELECT COALESCE(
+    NULLIF(current_setting('app.current_household', true), '')::uuid = p_household_id,
+    true);
+$fn$;
 ```
 
-The function needs `SET search_path`: a SECURITY DEFINER function that
-resolves its names through a caller-controlled search path is a hole. And it
-has to be owned by a role that bypasses RLS — the table owner does — or it
-reads the table under the caller's rights and hits the same wall.
+The first answers *what role does this user have in this household*. The
+second answers *did this user create this household, and does it have no
+members yet* — the bootstrap case, in which the creator joins the household
+they just created. The third answers *is this transaction about this
+household*.
+
+**They are `SECURITY DEFINER` and they set `search_path`.** A SECURITY
+DEFINER function that resolves its names through a caller-controlled search
+path is a hole. And it has to be owned by a role that bypasses RLS — the
+table owner does — or it reads the table under the caller's rights and hits
+the same wall. `app_household_scope` is not `SECURITY DEFINER`: it reads a
+setting, not a table.
+
+The membership policy reads the first of them, so an owner and the admins
+can manage the membership, and the policy still terminates:
+
+```sql
+CREATE POLICY household_members_isolation ON household_members
+  USING      ((user_id = auth.uid()
+                OR app_household_role(household_id, auth.uid()) IN ('owner','admin'))
+              AND app_household_scope(household_id))
+  WITH CHECK ((app_household_role(household_id, auth.uid()) IN ('owner','admin')
+               OR (user_id = auth.uid()
+                   AND app_household_bootstrap(household_id, auth.uid())))
+              AND app_household_scope(household_id));
+```
+
+**The write check is not the read check.** A read may be answered by the
+caller's own membership row; a write may not be answered by "that is my row"
+alone, or any caller could write themselves into any household whose id they
+know — and write themselves in as its owner, which is a privilege escalation
+with a POST. The only self-write the policy allows is the bootstrap: the
+caller created the household, and it has no members yet.
+
+**Every policy honours the household the transaction is scoped to.** The
+scope helper sets `request.jwt.claims` **and** `app.current_household`,
+transaction-locally, in the one transaction — the claims first, then the
+scope, both with the transaction-local flag. A user who belongs to two
+households could otherwise read the second one while holding the first one's
+lock, and the lock is what serialises a household's writes (ADR-05). A
+transaction that sets no scope is narrowed by nothing but the membership, so
+nothing that used to work stops working.
+
+**The `households` table separates bootstrap visibility from
+authorization.** The creator has to be able to read the household back
+before the membership row exists — the onboarding flow cannot get the id it
+just created — and everything else needs a membership. A removed creator
+therefore cannot delete the household: the `SELECT` policy does not grant
+`DELETE`, and the member policy does not let them through.
+
+```sql
+CREATE POLICY households_bootstrap_insert ON households
+  FOR INSERT WITH CHECK (created_by = auth.uid());
+
+CREATE POLICY households_bootstrap_select ON households
+  FOR SELECT USING (app_household_bootstrap(id, auth.uid()));
+
+CREATE POLICY households_member ON households
+  USING      (app_household_role(id, auth.uid()) IS NOT NULL
+              AND app_household_scope(id))
+  WITH CHECK (app_household_role(id, auth.uid()) IS NOT NULL
+              AND app_household_scope(id));
+```
+
+**The `item_stores` policy reaches through both ends of the pair.** The join
+table carries no household id, so the item and the store must both belong to
+a household the caller is in. A policy that reached through one end would
+let a caller attach a store from their own household to somebody else's
+item.
+
+```sql
+CREATE POLICY item_stores_household_isolation ON item_stores
+  USING      (item_id IN (SELECT id FROM items
+                           WHERE household_id IN (SELECT household_id FROM household_members
+                                                 WHERE user_id = auth.uid())
+                             AND app_household_scope(household_id))
+              AND store_id IN (SELECT id FROM stores
+                               WHERE household_id IN (SELECT household_id FROM household_members
+                                                     WHERE user_id = auth.uid())
+                                 AND app_household_scope(household_id)))
+  WITH CHECK (item_id IN (SELECT id FROM items
+                           WHERE household_id IN (SELECT household_id FROM household_members
+                                                 WHERE user_id = auth.uid())
+                             AND app_household_scope(household_id))
+              AND store_id IN (SELECT id FROM stores
+                               WHERE household_id IN (SELECT household_id FROM household_members
+                                                     WHERE user_id = auth.uid())
+                                 AND app_household_scope(household_id)));
+```
+
+**The statements above are quoted from the migration that creates them**,
+`db/migrations/0005_rls_and_app_role.sql`, which is the source of truth. The
+migration writes them with `$fn$` rather than `$$` as the delimiter, because
+the file also carries a `DO` block; the bodies are the same either way.
 
 **The application role must not own the tables.** PostgreSQL's table owner
 bypasses RLS unless the table is marked `FORCE ROW LEVEL SECURITY`, and
