@@ -24,7 +24,7 @@ and the rest of this section is what was learned the hard way.
 
 | Variable | Needed | Secret | What it is for |
 | --- | --- | --- | --- |
-| `DATABASE_URL` | yes | yes | the application's connection string — as the **non-owner** `app` role, so the row-level security policies apply to it |
+| `DATABASE_URL` | yes | yes | **set it to the non-owner `app` role** — the policies apply to it, which is the point of them |
 | `NEXT_PUBLIC_SUPABASE_URL` | yes | no | the Supabase project the application authenticates against — **inlined at build time** |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes | no | the publishable key (`sb_publishable_…`) — **inlined at build time** |
 | `SUPABASE_SERVICE_ROLE_KEY` | yes, during the transitional window | **yes** | it bypasses row-level security; the transitional sign-in and the admin console read it |
@@ -54,8 +54,9 @@ and the rest of this section is what was learned the hard way.
 
 Two, for two different jobs:
 
-- **The application connects as the non-owner `app` role** — `DATABASE_URL`.
-  The policies apply to it, which is the point of them.
+- **Set `DATABASE_URL` to the non-owner `app` role** — the policies apply
+  to it, which is the point of them. (The application connects as whatever
+  the string names; this is what makes the policies apply.)
 - **The verification needs the owner role**: the §10.8 fixture and the
   backup-restore rehearsal create a scratch database and their own schema,
   which the application role may not do. The owner bypasses row-level
