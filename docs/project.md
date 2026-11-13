@@ -2245,7 +2245,7 @@ There are **three statement shapes**: the **item-row statement**, which applies
 every operation that touches an existing item; the **create statement**, which
 inserts one; and the **ledger statement**, which records one operation's
 outcome. All three have been **executed against PostgreSQL 17 using this
-document's own §9.1/§9.2 DDL, and their outcomes verified** — thirty-seven scenarios covering a normal update, a field lost to a concurrent write, a
+document's own §9.1/§9.2 DDL, and their outcomes verified** — forty-two scenarios covering a normal update, a field lost to a concurrent write, a
 check that loses by check-wins, a write to a tombstoned row, an undelete that
 is too old, a lost compare-and-swap, both arrival orders of an archive racing
 an uncheck, nine store-tag outcomes, a bulk operation, two replays, a create
@@ -3909,8 +3909,8 @@ This is the acceptance demonstration for the whole project.
 
 **A second, lower-level fixture sits under it.** §10.8's three statements have
 already been executed against PostgreSQL 17 with this document's own DDL,
-across **thirty-seven scenarios**, and their outcomes verified. Those
-thirty-seven scenarios are the **server-side fixture** for Phase 3: an
+across **forty-two scenarios**, and their outcomes verified. Those
+forty-two scenarios are the **server-side fixture** for Phase 3: an
 implementation that reaches a different outcome for any of them fails the test
 rather than passing review.
 
@@ -3918,17 +3918,19 @@ The list, grouped by what it proves:
 
 | Group | Scenarios | What it proves |
 | --- | --- | --- |
-| **FIELD** (7) | a normal update; a field lost to a concurrent write; a check that loses by check-wins (the retry keeps the **original** base version); a write to a tombstoned row (delete-wins, terminal); an undelete that is refused when its lamport is older than the tombstone's, and one that clears the tombstone when it is newer; a stale uncheck that does not reverse an archive; a lost compare-and-swap | per-field resolution, and that a lost CAS leaves the row untouched |
+| **FIELD** (9) | a normal update; a field lost to a concurrent write; a check that loses by check-wins (the retry keeps the **original** base version); a write to a tombstoned row (delete-wins, terminal); an undelete that is refused when its lamport is older than the tombstone's, and one that clears the tombstone when it is newer; a stale uncheck that does not reverse an archive; a lost compare-and-swap | per-field resolution; the note and the category are fields like any other, and a note lost to a concurrent write is reported as a conflict; a lost CAS leaves the row untouched |
 | **OVERRIDE** (2) | an explicit override of `isChecked` beats check-wins; an override tells the device whose value it replaced | §11.2's "Keep mine": the override bypasses the LWW comparison for the named field, and the other device is told what was replaced |
 | **PAIR** (9) | an addition whose payload key is `storeId`; a sequential removal that tombstones the pair; a concurrent removal that still wins (`removal_wins`); a concurrent re-add refused by a tombstone; a sequential removal that loses on lamport and keeps the tag; a stale add that must not overwrite the stored ordering key; two devices adding different stores, both surviving; removing a tag that is not there; the snapshot carries a REMOVED tag, so the client can send its version back | the per-tag rule of §11, in both directions, and that a removal ships to the client |
+| **DELETE** (1) | a delete tombstones the row, and the tombstone reaches the change log | delete-wins, and that the tombstone is in the log the other devices pull |
 | **ARCHIVE** (5) | the archive skipped when the item is no longer checked; the archive applying to a checked item; the uncheck arriving first and the archive second; the archive arriving first and the uncheck second; **both arrival orders converging on the same state** | §11's archive-wins-with-reversal, and its order-independence |
+| **UNARCHIVE** (2) | an unarchive clears the archive; a bulk unarchive clears every candidate | the undo of the archive, in both forms |
 | **LEDGER** (4) | a bulk operation spanning two items under one `opId`; a replay of an operation that won nothing; a replay of an applied operation; the outcome vocabulary | the idempotency ledger and the four outcomes |
 | **BULK** (4) | a mixed bulk operation — one archived, one skipped, one contested; a bulk operation where every candidate was skipped; a row archived **before** the sync model (no `field_meta` entry); a create whose id was already taken | the bulk envelope, and the case where there is no identifiable loser to notify |
 | **ENTITY** (3) | a `category.*` operation is recorded; a `store.*` operation is recorded; an operation whose compare-and-swap was **lost** is not recorded | that the ledger's decided-gate is entity-type aware |
 | **CREATE** (2) | `item.create` writes the item **and** its tags; a create whose id is already taken writes nothing, and leaves no orphan tag rows | the create statement, and its duplicate-id behaviour |
 | **LOCK** (1) | the per-household advisory lock takes a `uuid` parameter (`hashtextextended($household_id::text, 0)`): it executes, yields a 64-bit key, is deterministic for the same household, differs between households, and is transaction-scoped | ADR-05's serialisation primitive, on the parameter type §9.1a introduces |
 
-That is thirty-seven scenarios in nine groups and 201 assertions, each run
+That is forty-two scenarios in eleven groups and 248 assertions, each run
 against the document's own DDL and the document's own SQL.
 
 **The three statements have also been executed against the self-hosted

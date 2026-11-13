@@ -240,7 +240,7 @@ request, so the tasks that would otherwise share them wait for it.
 ### Deliverables
 
 - The instance is verified: PostgreSQL version recorded, the fixture passes against
-  it — 37 scenarios in 9 groups, 201 assertions — and a backup has been restored
+  it — 42 scenarios in 11 groups, 248 assertions — and a backup has been restored
   and read back.
 - The application runs on the standard `pg` driver with one connection path.
 - The schema carries `households`, `household_members`, `household_invitations`,
@@ -298,7 +298,7 @@ client components that read the session (`src/components/**`,
 
 ### Verification approach
 
-- The fixture is green against the instance: 37 scenarios in 9 groups, 201
+- The fixture is green against the instance: 42 scenarios in 11 groups, 248
   assertions.
 - The RLS cross-household test returns **zero rows** (§9.2b).
 - The migration rehearsal runs against a scratch database on the instance.
@@ -413,7 +413,7 @@ beyond the contract types themselves.
 | 2.1 | Write the ADR set from `docs/project.md` §18 into the repository, recording the decisions, the rejected alternatives, and the consequences | Lead | `ARCHITECTURE/0001…0017-*.md` |
 | 2.2 | Define the shared contract types: `SyncOperation`, `SyncRequest`, `SyncResponse`, `SyncChange`, `Conflict`, `LocalItem`, `OutboxOp`, error codes, and **`SyncOperationType` — the single authoritative operation-type union** (§10.1a). The local outbox must use these same namespaced values; a second, shorter local union is what let the vocabulary drift apart in the first place | Lead | `src/shared/sync.ts` |
 | 2.3 | Define the local IndexedDB schema and the Dexie version/migration plan | Frontend | `src/client/db/schema.ts` (design only) |
-| 2.4 | Verify the apply design on the **production driver** (ADR-14). By this phase the driver is the standard `pg` driver, so the questions are: (a) `db.transaction()` gives an all-or-nothing multi-statement write; (b) the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a transaction callback executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it; (c) the **data-modifying CTE** form makes the change-log insert conditional on the compare-and-swap having matched; (d) a per-household `pg_advisory_xact_lock` as the first statement makes `seq` allocation order equal commit order (ADR-05), proven by two concurrent applies whose commits would otherwise invert. **Much of this is already proven** — §10.8's 37 scenarios in 9 groups are executed against the §9 DDL and their outcomes verified — so this task confirms the same behaviour on the *production* instance rather than rediscovering it | Database | `src/db/**` (scratch), ADR-14 |
+| 2.4 | Verify the apply design on the **production driver** (ADR-14). By this phase the driver is the standard `pg` driver, so the questions are: (a) `db.transaction()` gives an all-or-nothing multi-statement write; (b) the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a transaction callback executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it; (c) the **data-modifying CTE** form makes the change-log insert conditional on the compare-and-swap having matched; (d) a per-household `pg_advisory_xact_lock` as the first statement makes `seq` allocation order equal commit order (ADR-05), proven by two concurrent applies whose commits would otherwise invert. **Much of this is already proven** — §10.8's 42 scenarios in 11 groups are executed against the §9 DDL and their outcomes verified — so this task confirms the same behaviour on the *production* instance rather than rediscovering it | Database | `src/db/**` (scratch), ADR-14 |
 | 2.5 | Verify the conflict-resolution matrix as a **pure function** before it is wired to the server, with a table-driven test covering every row of `docs/project.md` §11 | Backend | `src/server/sync/conflict-resolution.ts`, `src/server/sync/__tests__/conflict-resolution.test.ts` |
 | 2.6 | Prove the client-side generation of UUIDv7 ids and the Lamport clock implementation | Frontend | `src/client/db/ids.ts` (design only) |
 
@@ -487,7 +487,7 @@ proven against a real PostgreSQL.
 | 3.4 | Implement `POST /api/sync` per the frozen contract: push + pull in one round trip, batched, with `fullResyncRequired` detection | Backend | `src/app/api/sync/route.ts`, `src/server/sync/**` |
 | 3.5 | Implement the incremental pull query and the full-snapshot path; prune **only** the change log (90 days). Tombstoned item rows are never hard-deleted, and a full resync discards the client's local tombstones because the snapshot is authoritative (FR-31, §9.3) | Backend + Database | `src/server/sync/pull.ts`, `src/db/**` |
 | 3.6 | Enforce the authorization matrix on `/api/sync` and on every entity it touches | Backend | `src/app/api/sync/route.ts` |
-| 3.7 | Server-side integration tests: idempotency (repeat an op 10×), conflict resolution per §11, cross-household rejection, atomicity under induced failure, resync detection; **the 37 scenarios in 9 groups of `docs/project.md` §16.4 replayed against the implementation**; **a bulk operation sharing one `opId` across two items** (two change-log rows, one ledger row, no abort); **a replay of an operation that won nothing** (no raise, no second conflict row); **a create-then-edit and a create-then-delete in one request**; and **a legacy REST write racing a sync operation on the same entity** | Backend | `src/server/sync/__tests__/**`, `src/app/api/sync/route.test.ts` |
+| 3.7 | Server-side integration tests: idempotency (repeat an op 10×), conflict resolution per §11, cross-household rejection, atomicity under induced failure, resync detection; **the 42 scenarios in 11 groups of `docs/project.md` §16.4 replayed against the implementation**; **a bulk operation sharing one `opId` across two items** (two change-log rows, one ledger row, no abort); **a replay of an operation that won nothing** (no raise, no second conflict row); **a create-then-edit and a create-then-delete in one request**; and **a legacy REST write racing a sync operation on the same entity** | Backend | `src/server/sync/__tests__/**`, `src/app/api/sync/route.test.ts` |
 | 3.8 | Migration tests: apply to an empty DB; apply to a DB seeded with legacy rows; assert legacy content is unchanged and `is_active = false` rows became tombstones | Database | `src/db/__tests__/migrations.test.ts` |
 
 ### Deliverables
@@ -532,7 +532,7 @@ plus explicit probes:
   conflict record exists.
 - An induced failure between the entity write and the change-log write → the
   entity write is rolled back.
-- **The 37 scenarios in 9 groups §10.8's statements were verified against,
+- **The 42 scenarios in 11 groups §10.8's statements were verified against,
   replayed against the implementation.** They are the fixture, not a summary: a
   normal update, a field lost to a concurrent write, a check that loses by
   check-wins, a write to a tombstoned row, an undelete that is too old, a lost
@@ -905,7 +905,7 @@ transport (the sync protocol is transport-agnostic).
 | # | Risk | Severity | Mitigation |
 | --- | --- | --- | --- |
 | R-1 | The team discovers mid-implementation that the conflict rules are wrong for a real household scenario | High | Phase 2 proves the rules as pure functions before they are wired. The matrix is also a product decision — **the product owner is asked to approve §11 of `docs/project.md` before Phase 3 starts.** |
-| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's three statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across **37 scenarios in 9 groups**, with **201 assertions** passing. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
+| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's three statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across **42 scenarios in 11 groups**, with **248 assertions** passing. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
 | R-2 | The SSR → client-render switch causes a performance regression that damages the existing Lighthouse score | Medium | The budget is a Phase 7 gate with a documented fallback. The existing perf harness is reused, not rewritten. |
 | R-3 | iOS Safari behaves differently from the emulation (IndexedDB eviction, service worker lifecycle) | Medium | WebKit is in the Playwright matrix from Phase 0. The manual walkthrough on a real device is a Phase 7 gate. The design avoids Background Sync precisely because of iOS. |
 | R-4 | ~~The HTTP driver of the previous host cannot provide the atomicity the apply path needs~~ — **closed**: the driver is the standard `pg` driver over the self-hosted instance, and interactive transactions are the primary path rather than a fallback (ADR-14, ADR-16). Confirmed on the production instance in Phase 2 (Task 2.4) | — | Closed |
