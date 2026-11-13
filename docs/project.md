@@ -1601,18 +1601,37 @@ know — and write themselves in as its owner, which is a privilege escalation
 with a POST. The only self-write the policy allows is the bootstrap: the
 caller created the household, and it has no members yet.
 
-**These are the policies the migration has to implement, and the difference
-between them and a simplification of them is not a matter of taste.** Measured
-on the local stack as the application role: a policy set with the membership
-branch but without the scope clause lets a transaction scoped to household A
-read household B's items — one row — and delete household B, cascade and all;
-a policy set without the membership branch lets a caller who is a member of
-nothing write themselves into any household as its owner. With the policies
-above, the scoped read returns zero rows, the scoped delete returns zero
-households, and the self-write is refused — while the legitimate flows still
-work: the owner sees every member and the owner's removal of a member reaches
-the database, a plain member still sees only their own row and removes
-nothing, and the creator still bootstraps their own household.
+**The delete policy admits no self-delete.** §12.5 refuses a self-removal, and
+the reason it gives is irreversibility: the owner cannot be recreated, so a
+membership row that removes itself is not recoverable. The read check admits
+the caller's own row, which is why the delete needs a rule of its own:
+
+```sql
+-- Nobody may remove themselves. This is a RESTRICTIVE policy, so it narrows
+-- the permissive one above rather than replacing it: the owner and the
+-- admins may still remove a member, and nobody may remove themselves.
+CREATE POLICY household_members_no_self_delete ON household_members
+  AS RESTRICTIVE
+  FOR DELETE
+  USING (user_id <> auth.uid());
+```
+
+The cascade is not affected: the referential integrity checks run with the
+table owner's rights, so deleting a household still takes its membership rows
+with it.
+
+**Each of these branches is load-bearing, and the policy without them is
+exploitable.** Measured on the local stack as the application role, against a
+membership policy that carried only `user_id = auth.uid()`: a caller who was a
+member of nothing wrote themselves into a household whose id they knew **as
+its owner**, because the write check defaults to the read check; and with the
+scope clause missing from the policies, a transaction scoped to household A
+read household B's items and deleted household B, cascade and all. With the
+policies above, the self-write is refused, the scoped read returns zero rows
+and the scoped delete zero households — while the legitimate flows still work:
+the owner sees every member and the owner's removal of a member reaches the
+database, a plain member still sees only their own row and removes nothing,
+and the creator still bootstraps their own household.
 
 **What a member sees.** The members list shows every member to an owner or an
 admin, and to a plain member it shows the caller's own row and nothing else.
@@ -3564,15 +3583,16 @@ reasons, both about irreversibility:
   bootstrap makes an owner — while removing an admin is not, because the
   owner can invite them back as an admin.
 - **The row-level security delete policy is deliberately coarser.** Any
-  admin may delete any row of the household. RLS is the second layer, and
-  the fine rule — which rows an admin may remove — belongs in the
+  admin may delete any row of the household but their own. RLS is the second
+  layer, and the fine rule — which rows an admin may remove — belongs in the
   application layer, which is where every rule in this table is enforced.
 
 **Nobody may remove themselves**, for the same reason: the owner cannot be
-recreated, and the membership policy admits no self-delete either, so the
-guard and the database agree rather than one being an extra rule the other
-does not share. Leaving a household is not a capability the product has
-specified, so it is out of scope; if it is wanted, it is a product decision.
+recreated, and the membership policy admits no self-delete either — §9.2b's
+restrictive `household_members_no_self_delete` refuses it — so the guard and
+the database agree rather than one being an extra rule the other does not
+share. Leaving a household is not a capability the product has specified, so
+it is out of scope; if it is wanted, it is a product decision.
 
 **Every one of these is enforced in the server application layer, not in the UI.**
 The current gap (S-1, S-3) is closed. 📋 **SPEC**: a shared
