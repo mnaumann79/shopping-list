@@ -1,0 +1,25 @@
+-- The migrating role may assume the application role.
+--
+-- The policies apply to the application role and to nothing else: the owner
+-- bypasses row-level security by design, so a measurement taken as the owner
+-- proves nothing. Assuming the role is how a measurement is taken as the
+-- application role.
+--
+-- PostgreSQL 16 gives the role that creates a role ADMIN OPTION but not the
+-- SET option, so the role that created the application role cannot assume
+-- it:
+--
+--   SET ROLE app;
+--     ERROR:  permission denied to set role "app"
+--
+-- This grant is the answer. INHERIT FALSE keeps the migrating role from
+-- inheriting the application's privileges by default; SET TRUE lets it
+-- assume the role when a measurement needs it.
+--
+-- The statement is the one the development instance's ledger row
+-- `0005a_allow_migration_role_to_assume_app` holds, and the file is named
+-- after that row: the repository's migration list and the instance's ledger
+-- agree name for name.
+--
+-- It carries no credential: it grants a role membership, not a password.
+GRANT app TO postgres WITH INHERIT FALSE, SET TRUE;
