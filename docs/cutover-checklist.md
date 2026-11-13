@@ -65,6 +65,21 @@ Two, for two different jobs:
   which the application role may not do. The owner bypasses row-level
   security, which is exactly why it is not what the application uses.
 
+**The `sslmode` is not the same for every server and every tool.** Against
+the Supabase pooler the application wants `?sslmode=no-verify` and `psql`
+wants `?sslmode=require`: the pooler's certificate is signed by Supabase's
+own CA, which the system does not trust, so `require` — which `pg` treats
+as `verify-full` — is refused with "self-signed certificate in certificate
+chain". With Supabase's root CA supplied as the root certificate — the
+chain the pooler presents ends in it — `?sslmode=verify-full` connects and
+verifies, for a deployment that can carry the file. `psql` verifies the
+chain whenever a root certificate is configured, so an unrelated root file
+makes the connection fail.
+
+Against a local database there is no mode at all: the local PostgreSQL
+offers no TLS, so both modes are refused, and the connection string that
+connects is the one with no mode.
+
 ### The check at the door
 
 The application refuses to serve when the role `DATABASE_URL` names is
