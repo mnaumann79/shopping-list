@@ -3784,6 +3784,54 @@ So the restore is a set of `pg_restore --table=…` calls for the shopping
 list's tables, into `public`, and nothing else. The dry run (step 3) does the
 same into a scratch database, which is why it catches a missing table.
 
+#### The transitional route's client key
+
+The transitional sign-in (§13.2c) counts its failures against two things:
+the **address** being tried and the **client** doing the trying. The client
+key is the **rightmost** `x-forwarded-for` entry — the nearest hop's
+observation — so a client cannot choose its key by setting the header
+itself. Which entry that is depends on the deployment, so it is written
+down here rather than left to be rediscovered.
+
+**In the deployment the header holds one entry, and it is the platform's.**
+The application is hosted on Vercel, and Vercel **overwrites**
+`x-forwarded-for` with the client's public IP and does not forward the
+incoming value: *"we currently overwrite the X-Forwarded-For header and do
+not forward external IPs. This restriction is in place to prevent IP
+spoofing"* (Vercel's request-headers documentation). The chain the client
+sent, if any, is kept in `x-vercel-forwarded-for`, which the route does not
+read. So the rightmost entry — the only entry — is the platform's own
+observation of the client, and the key is the client's address as Vercel
+sees it. Vercel forwards the client's own value only with the Enterprise
+plan's Trusted Proxy feature; if that is ever enabled, the key becomes the
+client's to choose, and the route has to be revisited.
+
+**With no proxy in front — the local run and the CI job — the header is
+absent.** The key is then the literal `"unknown"`, and every caller shares
+one bucket. That is the strict direction: one noisy caller costs the others
+their client quota, while the per-address quota still protects the
+passwords. The end-to-end tests give each browser profile an address of its
+own, so the limiter is exercised the way a deployment exercises it.
+
+**The one deployment that would break this** is a proxy that forwards the
+client's `x-forwarded-for` unchanged — neither appending to it nor replacing
+it. Then the rightmost entry is the client's own and the client picks its
+own key. If the cutover puts the application behind such a proxy, the client
+key has to be revisited: while the transitional route is there, and before it
+is decommissioned (step 8).
+
+#### What a full set of counters means
+
+The counters are held in memory and capped at a thousand per map. A map that
+holds a thousand counters with failures refuses the addresses it has no room
+for, with the same 429 every other refusal gives — and the counters that
+already exist keep working, so a flood does not lock out the addresses it
+has already counted. Filling it takes about a hundred distinct client
+identities, each spending its own quota of ten failures on ten distinct
+addresses; with no proxy in front, one identity's ten failures are not
+enough to fill anything. The trade-off is deliberate: the smaller failure is
+the one that cannot be repeated at will against one address.
+
 #### What the rehearsal found
 
 The runbook was rehearsed end to end against a Supabase instance — the dump,
