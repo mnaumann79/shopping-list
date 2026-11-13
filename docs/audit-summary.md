@@ -302,7 +302,7 @@ audit's findings.
   a production host, and a test configuration that works from a clean
   checkout.
 - **Phase 0b is planned, not started.** The Supabase migration has a written
-  procedure, a rehearsal, and twelve tasks with owners — but **the cutover
+  procedure, a rehearsal, and fourteen tasks with owners — but **the cutover
   has not happened and no production data has moved.** The instance is
   verified — PostgreSQL 17.11, and the fixture's three statements run against
   it — and task 0b.2 re-runs both and records the outcome. It has not been
@@ -356,7 +356,7 @@ pnpm build && pnpm start
 # error page there is no app left to add an item to.)
 ```
 
-The quality gates as they stand today:
+The quality gates as they stood at the time of the audit:
 
 ```
 pnpm lint              # passes
@@ -365,8 +365,16 @@ pnpm test              # FAILS — 6 failed / 123 passed / 1 skipped
 pnpm build             # passes with DATABASE_URL set; fails without it
 ```
 
-There is no `pnpm typecheck` script yet — `package.json` has only `dev`,
-`build`, `start`, `lint` and `test`. Phase 0's task 0.1 adds one.
+**Those three failures are fixed on `main` now.** Phase 0's task 0.1 added
+the `typecheck` script (`package.json` has `dev`, `build`, `start`, `lint`,
+`test` and `typecheck`); PR #8 fixed the six failing onboarding tests; and
+PR #9 added the CI workflow that runs lint, type-check, unit tests and build
+on every pull request. The same treatment B-16 already carries — *"Fixed on
+`main` by PR #10"* — belongs on B-8, B-9 and B-10, and this paragraph is it.
+
+The numbers above are the audit's numbers, measured before those pull
+requests. They are kept as they were, because an audit that is edited to
+look current is not an audit.
 
 Phase 0 exists to make the last three green before any architecture changes,
 so that every later increment can be verified rather than asserted.

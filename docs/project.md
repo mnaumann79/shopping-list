@@ -101,9 +101,9 @@ That contradiction is the root of the problem this document resolves.
 | B-5 | **No local persistence of any kind.** `indexedDB.databases()` returned `[]`; shopping data exists only in React state. | ✅ VERIFIED in Chromium |
 | B-6 | **Quantity input silently corrupts data.** Typing `2.5 kg` yields `25`, and `25` is what the server stores. `INTEGER_ONLY = /\D/g` strips every non-digit. | ✅ VERIFIED — field value `"25"`, server row `quantity: "25"` |
 | B-7 | **Household collaboration requires a manual page reload.** An item added on device 2 never appeared on an open device 1 without navigation. There is no polling, no cache, no realtime. | ✅ VERIFIED in Chromium |
-| B-8 | **Unit tests do not pass.** `pnpm test` → 6 failed / 123 passed / 1 skipped. All six are `onboarding.test.tsx` failing because `DarkModeToggle` calls `useTheme()` outside a `ThemeProvider`. | ✅ VERIFIED |
-| B-9 | **Type-check does not pass.** `tsc --noEmit` → 9 errors, all in route test files. `next build` passes its own narrower check, so the gap is invisible in CI. | ✅ VERIFIED |
-| B-10 | **No CI quality gate.** The single workflow (`.github/workflows/perf-audit.yml`) is bi-monthly + manual, runs no unit tests, no lint, and there is no `typecheck` script. | ✅ VERIFIED by full-file search |
+| B-8 | **Unit tests do not pass.** `pnpm test` → 6 failed / 123 passed / 1 skipped. All six are `onboarding.test.tsx` failing because `DarkModeToggle` calls `useTheme()` outside a `ThemeProvider`. | ✅ VERIFIED — **fixed on `main` by PR #8**; the suite runs 130 tests and passes |
+| B-9 | **Type-check does not pass.** `tsc --noEmit` → 9 errors, all in route test files. `next build` passes its own narrower check, so the gap is invisible in CI. | ✅ VERIFIED — **fixed on `main` by PR #9**, which added the `typecheck` script |
+| B-10 | **No CI quality gate.** The single workflow (`.github/workflows/perf-audit.yml`) is bi-monthly + manual, runs no unit tests, no lint, and there is no `typecheck` script. | ✅ VERIFIED by full-file search — **fixed on `main` by PR #9**, which added `.github/workflows/ci.yml`: lint, type-check, unit tests and build on every pull request |
 | B-11 | **Deleting an item makes it unrecoverable, but clearing a completed item makes it recoverable.** `DELETE` sets `is_active = false`; history filters on `archived_at IS NOT NULL`. Two different delete mechanisms, one invisible to the user. | ✅ VERIFIED in source |
 | B-12 | **`clear-completed` archives items regardless of concurrent activity**, and the SELECT/UPDATE race was flagged HIGH by review and never fixed. | ✅ VERIFIED — `.planning/phases/10-performance-optimizations/10-REVIEWS.md:22,132,142`; implementation at `src/server/services/items.ts:270-303` |
 | B-13 | **Item-store replacement is not transactional.** `updateItem` deletes then re-inserts `item_stores` without a transaction, because the HTTP driver the app used does not support `db.transaction()`. A failure between the two leaves an item with no store tags. | ✅ VERIFIED — `drizzle-orm/neon-http/session.js:151-152` throws `"No transactions support in neon-http driver"` — **the cause is removed by the move to the standard `pg` driver** (ADR-16): `db.transaction()` becomes available, so this is fixed by the driver change rather than by a separate repair |
@@ -1508,12 +1508,47 @@ CREATE POLICY items_household_isolation ON items
                                WHERE user_id = auth.uid()));
 ```
 
-`household_members` gets its own policy — `USING (user_id = auth.uid())` —
-which is what makes the sub-query above terminate. **The recursion trap is
+`household_members` gets its own policy, and it is where the design has to
+be careful. The obvious one — `USING (user_id = auth.uid())` — makes the
+sub-query above terminate, so it does not recurse. **The recursion trap is
 real**: a policy on `items` that selects from `household_members`, where
 `household_members`'s policy selects from `items`, loops until PostgreSQL
 gives up. The membership table's policy keys only on `auth.uid()`, so it
 does not.
+
+That policy alone is not enough, though, because it also stops the owner
+from managing the household: with it, a user sees only their own membership
+row, so an owner cannot add a member and cannot remove one — the flows in
+§12.5 have nothing to work with. The membership flows need the owner to see
+and write other members' rows, and a policy that reads `household_members`
+from inside `household_members`'s own policy is the recursion trap again.
+
+The way out is a **SECURITY DEFINER function**, owned by the table owner, so
+it reads `household_members` with the owner's rights and the policies do
+not apply to it:
+
+```sql
+CREATE FUNCTION app_household_role(p_household_id uuid, p_user_id uuid)
+RETURNS text
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT role FROM household_members
+   WHERE household_id = p_household_id AND user_id = p_user_id;
+$$;
+
+CREATE POLICY household_members_isolation ON household_members
+  USING      (user_id = auth.uid()
+               OR app_household_role(household_id, auth.uid()) IN ('owner','admin'))
+  WITH CHECK (user_id = auth.uid()
+               OR app_household_role(household_id, auth.uid()) IN ('owner','admin'));
+```
+
+The function needs `SET search_path`: a SECURITY DEFINER function that
+resolves its names through a caller-controlled search path is a hole. And it
+has to be owned by a role that bypasses RLS — the table owner does — or it
+reads the table under the caller's rights and hits the same wall.
 
 **The application role must not own the tables.** PostgreSQL's table owner
 bypasses RLS unless the table is marked `FORCE ROW LEVEL SECURITY`, and
@@ -1521,6 +1556,24 @@ Supabase's `postgres` role owns everything it creates. The application
 therefore connects as a **dedicated non-owner role** (`app`), which is
 subject to RLS; `postgres` is used for migrations, backups and the Supabase
 Studio, and bypasses RLS by design.
+
+The role also needs the `authenticated` role's privileges on the `auth`
+schema, because that is where `auth.uid()` lives:
+
+```sql
+GRANT authenticated TO app;
+```
+
+**`GRANT USAGE ON SCHEMA auth TO app` does not work here, and it fails
+quietly.** The `auth` schema belongs to `supabase_admin`, and the
+instance's `postgres` role is not a superuser, so the grant is refused with
+the warning *"no privileges were granted for \"auth\""* — and grants nothing
+at all. The role membership is what works: it carries `USAGE` on the schema
+and `EXECUTE` on `auth.uid()`. `authenticated` does not have `BYPASSRLS`, so
+inheriting it does not weaken the policies. The CI job asserts
+`has_function_privilege('app', 'auth.uid()', 'EXECUTE')` and fails when the
+grant is missing, because the failure otherwise shows up at runtime, on
+every request, as *"permission denied for schema auth"*.
 
 **What RLS does and does not replace.** It replaces nothing in §12.5 and
 §12.6 — the application-layer scope helper stays, because it is what
@@ -1641,7 +1694,7 @@ outcome, so all of the request's operations can share one transaction safely.
 
 ```jsonc
 {
-  "householdId": "org_abc",
+  "householdId": "3f6a1c40-8d2e-4a77-9b0e-2c1d5e7f9a11",
   "deviceId": "uuid-v7-of-this-browser-install",
   "deviceName": "Sara's iPhone",          // upserted into devices on first sight
   "lastConflictSeq": 87,                  // cursor for conflicts this device did not create
@@ -2083,7 +2136,7 @@ outcome. All three have been **executed against PostgreSQL 17 using this
 document's own §9.1/§9.2 DDL, and their outcomes verified** — thirty-seven scenarios covering a normal update, a field lost to a concurrent write, a
 check that loses by check-wins, a write to a tombstoned row, an undelete that
 is too old, a lost compare-and-swap, both arrival orders of an archive racing
-an uncheck, eight store-tag outcomes, a bulk operation, two replays, a create
+an uncheck, nine store-tag outcomes, a bulk operation, two replays, a create
 with tags, and a create whose id is already taken. They are the normative form;
 an implementer should not have to rediscover that they parse.
 
@@ -3460,6 +3513,39 @@ So the restore is a set of `pg_restore --table=…` calls for the shopping
 list's tables, into `public`, and nothing else. The dry run (step 3) does the
 same into a scratch database, which is why it catches a missing table.
 
+#### What the rehearsal found
+
+The runbook was rehearsed end to end against a Supabase instance — the dump,
+the scoped restore, the identity mapping, the verification queries, the row
+counts compared table by table, and the rollback. The scripts are in
+`scripts/cutover/`, and they found two things this section did not say.
+
+**1. The legacy foreign keys have to go before the ids are replaced.** The
+household columns still carry foreign keys into Better Auth's `organization`
+table, and the identity columns into its `user` table. After the rename those
+constraints point at the wrong table with the wrong kind of id — a uuid in a
+column whose constraint still expects a text organization id — and the
+mapping's update fails on the *constraint*, not on the cast, with a message
+that says nothing about the mapping. So the mapping drops the six legacy
+constraints first, and the rename migration adds the new ones: to
+`households(id)` and to `auth.users(id)`.
+
+**2. The users are provisioned in the instance's main database, and the
+scratch database gets their ids and nothing else.** GoTrue owns `auth.users`
+in the instance's main database, and it does not manage a scratch database at
+all. The verification queries join against `auth.users`, so the ids have to
+be there — but copying the schema over would be exactly what the first rule
+above forbids. The scratch database therefore gets the provisioned ids, and
+the mapping's foreign keys point at those.
+
+The order is therefore: the **mapping** does the data (the ids, the rows,
+the casts, and the drop of the legacy constraints), and the **rename
+migration** does the schema (the new constraints, and the rename and the cast
+when the mapping has not already done them). The migration must therefore be
+tolerant of the mapping having run first: it renames the column only if it is
+still `organization_id`, casts it only if it is still `text`, and drops the
+legacy constraints with `IF EXISTS`.
+
 #### 13.2b The identity mapping
 
 Two mapping tables are built during the window and dropped with it:
@@ -3756,8 +3842,8 @@ make.
 | Job | Command | Gate |
 | --- | --- | --- |
 | Lint | `pnpm lint` | must pass |
-| Type-check | `pnpm typecheck` (`tsc --noEmit`) | must pass — **the script is missing today (B-9)** |
-| Unit | `pnpm test` | must pass — **fails today (B-8)** |
+| Type-check | `pnpm typecheck` (`tsc --noEmit`) | must pass — the script exists now (**fixed on `main` by PR #9**, B-9) |
+| Unit | `pnpm test` | must pass — **fixed on `main` by PR #8** (B-8) |
 | Integration | `pnpm test:integration` (real PostgreSQL, from the **Supabase local stack**) | must pass |
 | Build | `pnpm build` | must pass |
 | E2E | `pnpm test:e2e` (Playwright, chromium + webkit) | must pass |
@@ -3952,8 +4038,8 @@ Every **VERIFIED** and **DEFECT** claim in this document traces to one of:
 | --- | --- |
 | Static review of 97 source files | Schema, services, routes, components, configuration |
 | `pnpm lint` | Passes (exit 0) |
-| `npx tsc --noEmit` | **Fails** — 9 errors, all in route test files (B-9) |
-| `pnpm test` | **Fails** — 6 failed / 123 passed / 1 skipped (B-8) |
+| `npx tsc --noEmit` | **Fails** — 9 errors, all in route test files (B-9) — **fixed on `main` by PR #9** |
+| `pnpm test` | **Fails** — 6 failed / 123 passed / 1 skipped (B-8) — **fixed on `main` by PR #8** |
 | `pnpm build` (no `DATABASE_URL`) | Fails — the database client is constructed at module load and throws without a connection string (B-16) |
 | `pnpm build` (with `DATABASE_URL`) | Passes (exit 0) |
 | Real PostgreSQL 17 + `db/init.sql` | Schema applied; 12 tables created |
