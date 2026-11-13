@@ -24,7 +24,11 @@ jobs:
     # non-blocking-at-first CI job that becomes required once it has been stable
     # for a week". The job proves the row-level security policies against a
     # real GoTrue, which the bare PostgreSQL container in ci.yml cannot do.
-    continue-on-error: true
+    #
+    # It is non-blocking because branch protection does not require it — only
+    # the "lint, type-check, unit tests, build" job is required — so it must
+    # NOT carry `continue-on-error`: that would report a failed job as a
+    # successful one, and the point of the job is to be seen failing.
 
     env:
       # The owner connection: the migrations, the fixture and the seeding all
