@@ -1,31 +1,12 @@
 import { headers } from "next/headers";
-import type { Session } from "@/lib/auth";
-import { getVerifiedUser } from "@/lib/supabase/server";
+import { auth, type Session } from "@/lib/auth";
 
 export async function getRequestHeaders() {
   return headers();
 }
 
-/**
- * The caller's session, or null when there is none.
- *
- * The session is resolved from the Supabase session cookie and verified
- * against the auth server's claims. It is not read out of the cookie: the
- * cookie is a place a caller can write to, and the claims are what the auth
- * server signed.
- */
 export async function getRequestSession(): Promise<Session | null> {
-  const user = await getVerifiedUser();
-  if (!user) return null;
-
-  return {
-    user: {
-      id: user.userId,
-      name: user.name ?? "",
-      email: user.email ?? "",
-    },
-    activeHouseholdId: user.householdId,
-  };
+  return auth.api.getSession({ headers: await getRequestHeaders() });
 }
 
 export async function requireRequestSession(): Promise<Session | Response> {
@@ -40,11 +21,9 @@ export async function requireRequestSession(): Promise<Session | Response> {
 /**
  * The caller's session and the household it is looking at.
  *
- * The name and the `orgId` field are Better Auth's, and they are kept for
- * now: eleven API route files call this, and they are being rewritten with
- * the scope helper. Renaming them here would break every one of those files
- * in a pull request that is not allowed to touch them. The rename belongs
- * with the rewrite.
+ * The name and the `orgId` field are Better Auth's, and they are kept: the
+ * eleven API route files call this, and this change may not touch them.
+ * Renaming them belongs with the rewrite of those files.
  */
 export async function requireActiveOrganization(): Promise<
   { session: Session; orgId: string; requestHeaders: Awaited<ReturnType<typeof getRequestHeaders>> } | Response
@@ -55,10 +34,10 @@ export async function requireActiveOrganization(): Promise<
   }
 
   const requestHeaders = await getRequestHeaders();
-  const householdId = session.activeHouseholdId;
-  if (!householdId) {
+  const orgId = session.session.activeOrganizationId;
+  if (!orgId) {
     return Response.json({ error: "No active household" }, { status: 400 });
   }
 
-  return { session, orgId: householdId, requestHeaders };
+  return { session, orgId, requestHeaders };
 }

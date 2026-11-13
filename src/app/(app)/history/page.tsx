@@ -9,7 +9,7 @@ import { HistoryList } from "./_components/HistoryList";
 export default async function HistoryPage() {
   const session = await getRequestSession();
   if (!session) redirect("/sign-in");
-  const orgId = session.activeHouseholdId;
+  const orgId = session.session.activeOrganizationId;
   if (!orgId) redirect("/onboarding");
 
   const [items, categories, stores] = await Promise.all([
@@ -35,7 +35,7 @@ export default async function HistoryPage() {
   }));
   return (
     <div className="min-h-screen bg-background">
-      <AppHeader userName={session.user.name} activeHouseholdId={session.activeHouseholdId} />
+      <AppHeader userName={session.user.name} activeHouseholdId={session.session.activeOrganizationId} />
       <main className="mx-auto max-w-2xl space-y-4 p-4">
         <div className="space-y-2">
           <a href="/dashboard" className="-ml-2 inline-flex h-7 items-center gap-1 rounded-md px-2.5 text-sm hover:bg-muted hover:text-foreground">

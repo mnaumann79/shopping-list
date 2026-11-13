@@ -55,7 +55,7 @@ describe("OnboardingPage", () => {
     // Default: no session yet, and no household to restore.
     vi.mocked(useSession).mockReturnValue({ session: null, isPending: false });
     vi.mocked(listHouseholds).mockResolvedValue([]);
-    vi.mocked(acceptInvitation).mockResolvedValue(false);
+    vi.mocked(acceptInvitation).mockResolvedValue(null);
     vi.mocked(setActiveHousehold).mockResolvedValue(true);
   });
 
