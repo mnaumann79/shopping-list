@@ -31,7 +31,7 @@ interface Member {
 
 interface Store {
   id: string;
-  organizationId: string;
+  householdId: string;
   name: string;
   isActive: boolean;
   createdAt: string;

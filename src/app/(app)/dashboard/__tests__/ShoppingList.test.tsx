@@ -51,7 +51,7 @@ const ITEMS = [
     createdAt: "2026-03-13T00:00:00.000Z",
     updatedAt: "2026-03-13T00:00:00.000Z",
     createdById: "u1",
-    organizationId: "org-1",
+    householdId: "org-1",
     storeIds: ["store-costco"],
   },
   {
@@ -66,7 +66,7 @@ const ITEMS = [
     createdAt: "2026-03-13T00:00:00.000Z",
     updatedAt: "2026-03-13T00:00:00.000Z",
     createdById: "u1",
-    organizationId: "org-1",
+    householdId: "org-1",
     storeIds: [],
   },
   {
@@ -81,7 +81,7 @@ const ITEMS = [
     createdAt: "2026-03-13T00:00:00.000Z",
     updatedAt: "2026-03-13T00:00:00.000Z",
     createdById: "u1",
-    organizationId: "org-1",
+    householdId: "org-1",
     storeIds: ["store-costco", "store-trader-joes"],
   },
   {
@@ -96,7 +96,7 @@ const ITEMS = [
     createdAt: "2026-03-13T00:00:00.000Z",
     updatedAt: "2026-03-13T00:00:00.000Z",
     createdById: "u1",
-    organizationId: "org-1",
+    householdId: "org-1",
     storeIds: ["store-trader-joes"],
   },
 ];

@@ -30,7 +30,7 @@ vi.mock("drizzle-orm", () => ({
 
 // Mock households schema
 vi.mock("@/db/schema/households", () => ({
-  householdJoinLinks: { token: "token", organizationId: "organizationId" },
+  householdJoinLinks: { token: "token", householdId: "householdId" },
 }));
 
 import { auth } from "@/lib/auth";
@@ -49,7 +49,7 @@ function makeRequest(body: unknown): NextRequest {
 const VALID_LINK = {
   id: "link-1",
   token: "abc123",
-  organizationId: "org-1",
+  householdId: "org-1",
   createdById: "admin-1",
   expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days from now
   createdAt: new Date(),
@@ -140,7 +140,7 @@ describe("POST /api/households/join", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.success).toBe(true);
-    expect(json.organizationId).toBe("org-1");
+    expect(json.householdId).toBe("org-1");
     expect(auth.api.addMember).toHaveBeenCalledOnce();
   });
 

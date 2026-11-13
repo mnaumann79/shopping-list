@@ -24,7 +24,7 @@ type Item = {
   createdAt: string;
   updatedAt: string;
   createdById: string | null;
-  organizationId: string;
+  householdId: string;
   storeIds: string[];
 };
 
@@ -341,7 +341,7 @@ export function ShoppingList({ initialItems, categories, stores }: ShoppingListP
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       createdById: null,
-      organizationId: "",
+      householdId: "",
       storeIds: storeIds,
     };
 

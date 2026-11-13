@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
       requestHeaders: await getRequestHeaders(),
     });
 
-    return Response.json({ success: true, organizationId: result.organizationId }, { status: 200 });
+    return Response.json({ success: true, householdId: result.householdId }, { status: 200 });
   } catch (error) {
     if (error instanceof ServiceError) {
       return Response.json({ error: error.message }, { status: error.status });

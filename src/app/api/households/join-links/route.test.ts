@@ -29,7 +29,7 @@ vi.mock("drizzle-orm", () => ({
 
 // Mock households schema
 vi.mock("@/db/schema/households", () => ({
-  householdJoinLinks: { organizationId: "organizationId", token: "token" },
+  householdJoinLinks: { householdId: "householdId", token: "token" },
 }));
 
 import { auth } from "@/lib/auth";

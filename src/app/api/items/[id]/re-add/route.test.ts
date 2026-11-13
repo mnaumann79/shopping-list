@@ -16,7 +16,7 @@ describe("POST /api/items/[id]/re-add", () => {
     } as never);
     const { db } = await import("@/db");
     const updatedItem = {
-      id: "item-1", organizationId: "org-1", name: "Milk", quantity: "1 gallon", note: null,
+      id: "item-1", householdId: "org-1", name: "Milk", quantity: "1 gallon", note: null,
       categoryId: "category-1", isActive: true, isChecked: false, archivedAt: null,
       createdAt: new Date("2026-07-24T12:00:00.000Z"), updatedAt: new Date("2026-07-24T12:00:00.000Z"), createdById: "user-1",
     };

@@ -19,7 +19,7 @@ export async function GET() {
     const storeList = await db
       .select()
       .from(stores)
-      .where(and(eq(stores.organizationId, authContext.orgId), eq(stores.isActive, true)))
+      .where(and(eq(stores.householdId, authContext.orgId), eq(stores.isActive, true)))
       .orderBy(asc(stores.name));
 
     return Response.json(storeList, { status: 200 });
@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
     const [store] = await db
       .insert(stores)
       .values({
-        organizationId: authContext.orgId,
+        householdId: authContext.orgId,
         name: parsed.data.name,
       })
       .returning();

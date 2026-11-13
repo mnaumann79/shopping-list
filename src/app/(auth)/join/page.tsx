@@ -62,7 +62,7 @@ function JoinPageContent() {
 
         const data = await res.json();
         // Set the joined household as active
-        await authClient.organization.setActive({ organizationId: data.organizationId });
+        await authClient.organization.setActive({ organizationId: data.householdId });
         setStatus("success");
         setTimeout(() => {
           router.push("/dashboard");
