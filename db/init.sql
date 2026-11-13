@@ -579,7 +579,8 @@ BEGIN
    WHERE i.id = p_invitation_id
      AND i.accepted_at IS NULL
      AND i.revoked_at IS NULL
-     AND i.expires_at > now();
+     AND i.expires_at > now()
+   FOR UPDATE;
 
   IF NOT FOUND THEN
     RETURN NULL;
@@ -604,7 +605,9 @@ BEGIN
 
   UPDATE household_invitations
      SET accepted_at = now()
-   WHERE id = p_invitation_id;
+   WHERE id = p_invitation_id
+     AND accepted_at IS NULL
+     AND revoked_at IS NULL;
 
   RETURN v_household;
 END;
