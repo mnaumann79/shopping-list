@@ -34,6 +34,9 @@ writable path. The product owner merges; the lead recommends the merge order.
 Phase 0  Reliable Baseline
    │
    ▼
+Phase 0b Supabase Migration (hosting, database, auth)
+   │
+   ▼
 Phase 1  Security & Data-Integrity Repairs
    │
    ▼
@@ -71,6 +74,13 @@ it at the end of Phase 2** — after that it is read-only for everyone.
 | **Frontend** | `src/client/**`, `src/app/**` (non-`api`), `src/components/**`, `src/lib/toast.ts`, `src/lib/utils.ts`, `public/**` |
 | **Shared CI / scripts** | `.github/workflows/**`, `scripts/**`, `playwright.config.ts`, `vitest.config.ts`, `package.json`, `e2e/**` — **one owner per task**, named explicitly in each phase |
 
+**A schema change ships in two files.** The migration goes in `db/migrations/`,
+and the flat snapshot `db/init.sql` is regenerated to match it: the runner's
+invariant is that a database bootstrapped from `db/init.sql` and a database
+built by `pnpm db:migrate` end up with the same schema, constraint names
+included. `src/db/migrations/` is drizzle-kit's output folder — a hand-written
+migration placed there is overwritten by the next `drizzle-kit generate`.
+
 `package.json` and the CI configuration are touched in several phases. To avoid
 conflicts, **each phase's CI/scripts work is a single task with a single owner**,
 and the owner is named in the phase.
@@ -100,14 +110,15 @@ A phase is done when **all** of the following hold:
 | Phase | Duration (4-person team) | Primary risk |
 | --- | --- | --- |
 | 0 — Reliable Baseline | 1 week | Low |
+| 0b — Supabase Migration | 2 weeks | High (a cutover touches live data) |
 | 1 — Security & Data-Integrity Repairs | 1 week | Low |
 | 2 — Architecture Contracts | 1 week | Low (spike; resolves uncertainty) |
-| 3 — Server Sync Core | 2 weeks | Medium (atomicity on Neon HTTP) |
+| 3 — Server Sync Core | 2 weeks | Medium (atomicity of the apply transaction) |
 | 4 — Client Local-First Core | 2 weeks | Medium (hydration/rendering regressions) |
 | 5 — Sync Engine & Convergence | 2 weeks | Medium (conflict-rule correctness) |
 | 6 — Offline UX, PWA & Household Scenarios | 2 weeks | Medium (iOS Safari specifics) |
 | 7 — Hardening & Release Readiness | 1 week | Low |
-| **Total** | **≈ 12 weeks** | |
+| **Total** | **≈ 14 weeks** | |
 
 ---
 
@@ -127,10 +138,10 @@ and CI runs neither.
 | 0.2 | Fix the 6 failing `onboarding.test.tsx` tests (wrap in `ThemeProvider`) | Frontend | `src/app/(app)/__tests__/onboarding.test.tsx` |
 | 0.2b | Fix the 9 `tsc` errors in the route test files — `src/app/api/**` is Backend's, so this task sits with Backend | Backend | `src/app/api/households/join-links/route.test.ts`, `src/app/api/items/clear-completed/route.test.ts` |
 | 0.3 | Make the DB client lazy so a missing `DATABASE_URL` fails at request time, not at import time | Database | `src/db/index.ts` |
-| 0.4 | Fix the `db/init.sql` drift (constraint-name mismatch vs. the Drizzle migration) and add a `db:migrate` script that runs the real migrations | Database | `db/init.sql`, `src/db/migrations/**`, `package.json` |
+| 0.4 | Fix the `db/init.sql` drift (constraint-name mismatch vs. the Drizzle migration) and add a `db:migrate` script that runs the real migrations | Database | `db/init.sql`, `db/migrations/**`, `package.json` |
 | 0.5 | Load `.env.test` in Vitest and Playwright (the `dotenv` dependency is installed but unused) | Lead | `vitest.config.ts`, `playwright.config.ts` |
 | 0.6 | Fix `e2e/auth.setup.ts` so the E2E suite can actually sign up (the retrospective records this as broken) | Frontend | `e2e/auth.setup.ts`, `e2e/auth/**` |
-| 0.7 | Decide the fate of the 31 `test.fixme` placeholder specs: implement them or delete them. **Decision: implement the AUTH-01…04 and HSHD-01…04 matrix.** | Frontend | `e2e/auth/**`, `e2e/household/**` |
+| 0.7 | Decide the fate of the `test.fixme` placeholder specs: implement them or delete them. **Decision: implement the AUTH-01…04 and HSHD-01…04 matrix.** | Frontend | `e2e/auth/**`, `e2e/household/**` |
 
 ### Deliverables
 
@@ -156,7 +167,7 @@ verifiable, nothing more.
 | --- | --- | --- |
 | New CI is red on the first run because of pre-existing failures | High | Expected — the phase's own work is to make it green. Sequence 0.1's workflow addition *after* 0.2/0.3 land, or open the PR with the workflow but expect a red first run. |
 | `db:migrate` surfaces drift between `db/init.sql` and the Drizzle migrations | Medium | That is the point of the task. Task 0.4 reconciles them and adds a check. |
-| `pnpm db:migrate` is run against production by mistake | Low | The script must refuse to run unless `DATABASE_URL` points at a non-production host. Enforce with an explicit host check in the script. |
+| `pnpm db:migrate` is run against production by mistake | Low | The script refuses to run against anything that is not a development host: an allowlist of `localhost`, `127.0.0.1`, `::1` and anything ending in `.local` or `.localhost`, with an explicit `DB_MIGRATE_ALLOW_ANY_HOST=1` opt-in. It checks the host the driver would really connect to, not the one the URL appears to name. |
 
 ### Verification approach
 
@@ -176,8 +187,110 @@ works).
 
 - All six commands pass on `main`.
 - CI runs on `pull_request` and is a required check.
-- The 31 placeholder specs are implemented (not deleted) and passing.
+- Every `test.fixme` placeholder under `e2e/` is implemented (not deleted) and passing.
 - The Lead confirms the CI gate blocks a bad PR.
+
+---
+
+## Phase 0b — Supabase Migration (hosting, database, authentication)
+
+### Objective
+
+Move the **hosting** to the self-hosted Supabase instance, move
+**authentication** from Better Auth to Supabase Auth, and turn tenant
+isolation into a database-enforced second layer — **before any feature work
+begins**. The offline-first rebuild is the product's defining risk; it should
+not be built on a platform the product owner has already decided to leave, and
+the authentication rewrite is cheaper now than after Phase 4 has built a client
+on top of it.
+
+This phase changes the **stack**, not the product. No feature is added, and
+nothing the user sees changes — except that their passwords keep working
+(§13.2c), which is the whole point of doing the auth change before the
+cutover rather than after.
+
+### Scope
+
+| # | Task | Owner | Files |
+| --- | --- | --- | --- |
+| 0b.1 | Amend the specification for the new stack: §9.1a (identity types), §9.2 (household tables), §9.2b (RLS), §10.1/§10.8 (`household_id` rename, the interactive transaction), §12 (Supabase Auth), §13.2a–c (the cutover), §16.5 (CI), ADR-11/12/14 (amended), ADR-16/17 (new) | Lead | `docs/project.md` |
+| 0b.2 | **Re-verify the target instance.** §16.4 already records PostgreSQL 17.11 and the fixture's pass: re-run the fixture against the instance and record the version and the outcome; confirm `pg_advisory_xact_lock`, `hashtextextended`, `jsonb_to_recordset` and the data-modifying CTEs behave as expected; confirm the `auth` schema is present and `auth.uid()` resolves; take and **restore-test** a backup | Database | `src/db/fixture/**` (scratch and evidence) |
+| 0b.3 | Replace the driver with the standard `pg` driver and add `pg` and `@supabase/ssr` to `package.json` — there is one driver, so there is nothing to switch (ADR-16). Decide the pooling: direct connection to the instance, or the Supavisor pooler with `?pgbouncer=true` (the `pg` driver's named prepared statements are not compatible with transaction-mode pooling). **The advisory lock is transaction-scoped, so it is safe under a transaction-mode pooler** | Database | `src/db/index.ts`, `package.json`, `.env.local.example` |
+| 0b.4 | Create `households`, `household_members`, `household_invitations`; rename `organization_id` → `household_id` on `items`, `categories`, `stores` and `household_join_links` and retype it to `uuid`; retype `created_by_id`, `updated_by_id` and `actor_id` to `uuid` referencing `auth.users(id)`. The wire contract's `organizationId` → `householdId` **lands here** — 76 occurrences across 28 files under `src/`, measured on `main` at `0f8dd29`. Phase 4 no longer rewrites the client wholesale in a way that makes the rename free there. The rename reaches the client in `src/components/household-switcher.tsx`, `src/components/AppHeader.tsx`, `src/app/onboarding/page.tsx` and `src/app/(auth)/**`; task 0b.9 does that client work against the renamed contract | Database | `src/db/schema/**`, `db/migrations/**` |
+| 0b.5 | Enable RLS on every household-scoped table with policies keyed on `auth.uid()` (§9.2b), create the non-owner `app` role the application connects as, and add the `household_members` policy that stops the recursion; add the scope helper `src/db/scope.ts`: one `db.transaction()` that sets `request.jwt.claims` **locally** and runs the caller's query on the transaction's client | Database | `db/migrations/**`, `src/db/scope.ts` |
+| 0b.6 | Route every household-scoped query through the scope helper from task 0b.5, which is the only sanctioned path (it **is** Phase 1's task 1.4, now with RLS behind it). The household membership and invitation services move in task 0b.8 | Backend | `src/server/services/items.ts` |
+| 0b.7 | Replace Better Auth with Supabase Auth: `@supabase/ssr` server and browser clients, sign-up/sign-in/sign-out, the `sb-household` cookie, and the session helpers in `request-auth.ts` (13 API route files import them; 11 of them call `requireActiveOrganization`). **The middleware half of today's auth story is dead code**: the repository's root `middleware.ts` does not run — the app lives under `src/`, and there is no `src/middleware.ts` - while the guard that does run is `redirect("/sign-in")` in `src/app/(app)/layout.tsx`, without a `returnTo` (`docs/project.md` §12.1b). Whether that file moves to `src/`, is replaced, or is deleted is decided with the cutover, not here | Backend | `src/lib/auth.ts`, `src/lib/request-auth.ts`, `src/lib/auth-client.ts`, `src/app/api/auth/[...all]/route.ts` |
+| 0b.8 | Replace the household membership and invitation flows with the new tables: `requireHouseholdRole`, invite by email, list and cancel invitations, add and remove members. This also closes **S-1** (a plain member can mint a join link), **S-2** (a plain member invalidates the admin's link), **S-3** (403 returned as 500) and **S-4** (the unauthenticated invitation-email endpoint) | Backend | `src/server/services/households.ts`, `src/app/api/households/**`, `src/app/api/invitation-email/route.ts` |
+| 0b.9 | Mount the household switcher in the app header for the first time, and update it, the header, onboarding and the sign-in/sign-up/join/accept-invite pages against the renamed contract (task 0b.4). Add the lint rule that forbids direct access to the household-scoped tables outside the scope helper, with its protected-table list derived from the Drizzle schema | Frontend | `src/components/household-switcher.tsx`, `src/components/AppHeader.tsx`, `src/app/onboarding/page.tsx`, `src/app/(auth)/**`, `eslint.config.mjs` |
+| 0b.10 | The **transitional sign-in** that carries existing passwords across (§13.2c). Better Auth's scrypt hashes cannot be converted to GoTrue's bcrypt, so the old password is verified once and re-provisioned. Better Auth stays a dependency until the rollback window closes, and this task records its removal date. The transitional sign-in must not assume the middleware's `returnTo` behaviour: the guard that runs redirects to `/sign-in` without it (§12.1b) | Backend | `src/app/api/auth/legacy-signin/route.ts` |
+| 0b.11 | CI runs the **Supabase local stack**, not a bare PostgreSQL container — the RLS policies need `auth.uid()`, which only GoTrue provides. The local stack's PostgreSQL major version must match the production instance's, and the integration job asserts it | Lead | `.github/workflows/**`, `supabase/config.toml` |
+| 0b.12 | Rehearse the cutover runbook (§13.2a of `docs/project.md`, written in task 0b.1) and correct it where the rehearsal finds a gap: the dump, the restore, the identity mapping, the verification queries, and the rollback. **The rehearsal is a full dry run against a scratch database on the instance**, and its output is attached to the pull request | Lead | `docs/project.md` (§13.2a), `scripts/**` |
+
+**Two paths are written by two tasks in this phase**: `docs/project.md`
+(0b.1 writes the specification and the runbook, 0b.12 rehearses the runbook
+and corrects it) and `db/migrations/**` (0b.4 creates the tables, 0b.5 adds
+the RLS policies). Each pair has one owner and runs in sequence, so no two
+tasks write the same path at the same time (§0.1).
+
+### Deliverables
+
+- The instance is verified: PostgreSQL version recorded, the fixture passes against
+  it — 37 scenarios in 9 groups, 201 assertions — and a backup has been restored
+  and read back.
+- The application runs on the standard `pg` driver with one connection path.
+- The schema carries `households`, `household_members`, `household_invitations`,
+  and every identity and household id is a `uuid`.
+- Every household-scoped table is protected by RLS, and the application connects
+  as a non-owner role so the policies apply.
+- Supabase Auth issues the session; the household model is three application
+  tables; the active household is the `sb-household` cookie validated against
+  membership.
+- **No user has to reset their password** (§13.2c).
+- The cutover runbook is written **and rehearsed**.
+
+### Dependencies
+
+Phase 0 (the baseline must be green before a platform change is measured
+against it). Nothing in this phase depends on Phase 1 — but **Phase 1's task
+1.4 is absorbed into tasks 0b.5 and 0b.6**, and Phase 1's tasks 1.1–1.3 are
+closed by task 0b.8, so those three are dropped from Phase 1 rather than
+repeated.
+
+### Risks
+
+| Risk | Likelihood | Mitigation |
+| --- | --- | --- |
+| **The cutover loses data.** | Medium | The rollback is a configuration change for fourteen days (§13.2a step 7), because the old host is not modified during the window. The dry run (task 0b.12) compares row counts table by table before anything is switched. |
+| **Existing users cannot sign in** — the scrypt/bcrypt wall (§13.2c). | High | The transitional sign-in (task 0b.10) carries the password across at first sign-in. The rehearsal must include a real migrated account, not a synthetic one. |
+| **RLS silently does not apply** — the application connects as the table owner, or the claims are not set, and the policies are bypassed. | Medium | The application connects as the non-owner `app` role, and the integration test asserts a cross-household read returns **zero rows** with the application predicate deliberately removed (§9.2b). A policy that is bypassed fails that test. |
+| The instance's PostgreSQL version drifts from 17.11, the version the fixture was verified against. | Medium | Task 0b.2 re-runs the fixture against the instance and records the version; CI pins the local stack's version to match (§16.5). |
+| The `pg` driver's prepared statements break under a transaction-mode pooler. | Medium | Task 0b.3 decides the connection path explicitly and records it; `?pgbouncer=true` is the documented fix. |
+| The 76-occurrence rename touches more than the count suggests, and a missed call site becomes a silent tenant-isolation bug. | Medium | The rename is mechanical and the lint rule from task 0b.9 forbids direct access to household-scoped tables; RLS is the backstop behind it, so a missed predicate yields zero rows rather than another household's data. |
+| The identity mapping loses a household or a membership. | Medium | The mapping is done with `UPDATE … FROM map` inside the migration transaction, and the verification queries assert that every `household_id` resolves to a `households` row and every `created_by_id` to an `auth.users` row. |
+
+### Decisions needed before this phase starts
+
+| # | Decision | Note |
+| --- | --- | --- |
+| D-8 | **Does Supabase require email confirmation?** Recommendation: **no**, initially — an unconfirmed account can reach no data, because every household-scoped table is protected by RLS and a membership row is required. Turning it on later costs one click in the instance's configuration. | The instance's current setting wins if it is already configured; this decision only matters if it is not. |
+| D-9 | **The rollback window's length.** Recommendation: **14 days**, which covers a realistic "the user did not notice until next week". | Longer means Better Auth stays a dependency longer. |
+| D-10 | **Whether the legacy Better Auth tables are dropped, or left in place.** Recommendation: **dropped** at the end of the window — a table named `user` next to `auth.users` is a trap for the next developer. | Dropping is irreversible; the data is redundant once every account has been migrated. |
+| D-11 | **What happens to the repository's root `middleware.ts`** — does it move to `src/middleware.ts`, get replaced, or get deleted? The file does not run today: the app lives under `src/` and there is no `src/middleware.ts`, so the guard that runs is the server-side one in `src/app/(app)/layout.tsx`, which redirects to `/sign-in` without a `returnTo` (`docs/project.md` §12.1b). It looks authoritative and is dead code, so the cutover has to say what it is for. | Blocks task 0b.7 and the cutover (§13.2). The product decision is recorded as backlog item B1-T01. |
+
+### Verification approach
+
+- The fixture is green against the instance: 37 scenarios in 9 groups, 201
+  assertions.
+- The RLS cross-household test returns **zero rows** (§9.2b).
+- The migration rehearsal runs against a scratch database on the instance.
+- `pnpm typecheck && pnpm lint && pnpm test && pnpm build` pass.
+
+### Definition of done
+
+- The backup is restored and read back.
+- The fixture is green against the instance.
+- RLS is proven: the cross-household read returns **zero rows**.
+- The runbook is rehearsed against a scratch database.
 
 ---
 
@@ -194,14 +307,14 @@ builds the authorization helper that Phase 3 reuses.
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
-| 1.1 | Add `requireHouseholdRole(orgId, userId, roles)` and enforce it on every household-scoped route: join links, invites, member removal (closes S-1, S-2, S-3) | Backend | `src/lib/request-auth.ts`, `src/server/services/households.ts`, `src/app/api/households/**` |
-| 1.2 | Make authorization failures return **403** with a stable error code, not 500 with a raw Better Auth message | Backend | `src/server/services/service-error.ts`, `src/server/services/households.ts` |
-| 1.3 | Remove or authenticate `GET /api/invitation-email` (closes S-4) | Backend | `src/app/api/invitation-email/route.ts` |
-| 1.4 | Introduce a shared household-scope helper that is the **only** sanctioned access path to the household-scoped tables, plus a lint rule forbidding direct access to those tables outside it — `db.select()`, `db.insert()`, `db.update()`, `db.delete()` and `db.execute()` alike. A rule that covered only `db.select()` would leave the write paths unguarded: a route taking an item id could change another household's row without a household predicate (closes S-5). **The lint rule's protected-table list must be derived from the Drizzle schema, not hardcoded** — otherwise the four new household-scoped tables added in Phase 3 (§9.2) escape the rule silently. **RLS is deliberately not used** — see ADR-12 | Database | `src/db/schema/**`, `src/db/migrations/**`, `src/server/services/items.ts` (consumption) |
+| 1.1 | ~~Add `requireHouseholdRole(orgId, userId, roles)` and enforce it on every household-scoped route~~ — **absorbed into Phase 0b, task 0b.8**, which builds it against the new household tables and closes S-1, S-2, S-3 and S-4 in the same pass | Backend | — |
+| 1.2 | ~~Make authorization failures return **403** with a stable error code~~ — **absorbed into Phase 0b, task 0b.8**: the raw Better Auth message no longer exists once Better Auth does | Backend | — |
+| 1.3 | ~~Remove or authenticate `GET /api/invitation-email`~~ — **absorbed into Phase 0b, task 0b.8** (closes S-4) | Backend | — |
+| 1.4 | ~~Introduce a shared household-scope helper that is the **only** sanctioned access path to the household-scoped tables, plus a lint rule forbidding direct access to those tables outside it — `db.select()`, `db.insert()`, `db.update()`, `db.delete()` and `db.execute()` alike. A rule that covered only `db.select()` would leave the write paths unguarded~~ — **absorbed into Phase 0b, tasks 0b.5, 0b.6 and 0b.9**, which build the same helper with row-level security behind it (closes S-5 at the database as well as the application). The lint rule's protected-table list must still be derived from the Drizzle schema, not hardcoded, or the new tables escape it silently | Backend | — |
 | 1.5 | Fix the quantity input: accept free-form text end to end (closes B-6) | Frontend | `src/lib/utils.ts`, `src/app/(app)/dashboard/_components/QuickAddBar.tsx`, `src/app/(app)/dashboard/_components/ItemDialogs.tsx` |
-| 1.6 | Separate *delete* (tombstone) from *clear completed* (archive) in the **schema and migration**: add `deleted_at`, stop relying on `is_active`, backfill `is_active = false` rows as tombstones (closes B-11) | Database | `src/db/schema/items.ts`, `src/db/migrations/**` |
+| 1.6 | Separate *delete* (tombstone) from *clear completed* (archive) in the **schema and migration**: add `deleted_at`, stop relying on `is_active`, backfill `is_active = false` rows as tombstones (closes B-11) | Database | `src/db/schema/items.ts`, `db/migrations/**` |
 | 1.6b | Carry the same separation through the **service and route layer**: `deleteItem` writes a tombstone, "clear completed" writes an archive mark, and both are recoverable from History (closes B-11) | Backend | `src/server/services/items.ts`, `src/app/api/items/**` |
-| 1.7 | Make the item-store replacement atomic using `db.batch()` (closes B-13); make the bulk "clear completed" skip items changed since the request began (closes B-12) | Backend | `src/server/services/items.ts` |
+| 1.7 | Make the item-store replacement atomic using `db.transaction()` (closes B-13); make the bulk "clear completed" skip items changed since the request began (closes B-12) | Backend | `src/server/services/items.ts` |
 | 1.8 | ~~Replace the optimistic-update rollback with a per-item update that cannot clobber a concurrent edit (closes B-14, B-15)~~ — **superseded by Phase 4, task 4.4**, which rewrites `ShoppingList.tsx` and `ItemRow.tsx` wholesale. Do not implement this here; Phase 4's replacement covers it | Frontend | — |
 | 1.9 | Add integration tests against a **real PostgreSQL** that assert the tenant-isolation predicates, the authorization matrix, and the idempotency of a repeated create | Backend | `src/server/services/__tests__/**`, `src/test/**` |
 | 1.10 | ~~Replace `window.confirm` with the existing `AlertDialog` component (AC-30)~~ — **superseded by Phase 4, task 4.4**, which rewrites `ShoppingList.tsx` wholesale. Do not implement this here | Frontend | — |
@@ -231,9 +344,9 @@ new integration test suite.
 
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
-| The scope helper is bypassed by a direct query, leaking across households | Medium | The helper is the only sanctioned path; a lint rule fails the build on a direct household-table query; an integration test against a real database asserts a cross-household read, update, and delete all return 404. RLS was considered and **rejected** as unreliable on the Neon HTTP driver (ADR-12) — it would create false confidence rather than real isolation. |
+| The scope helper is bypassed by a direct query, leaking across households | Medium | The helper is the only sanctioned path; a lint rule fails the build on a direct household-table query; an integration test against a real database asserts a cross-household read, update, and delete all return 404. **RLS was rejected as unreliable on the HTTP driver of the previous host (ADR-12) — that blocker no longer exists**, and Phase 0b puts RLS behind the helper as a second layer, so a bypassed predicate yields zero rows rather than another household's data (§9.2b). |
 | The tombstone change affects the History page, which currently relies on `archived_at` semantics | Medium | Task 1.6 updates the History query in the same PR and adds an explicit test for both behaviours. |
-| The real-database integration suite is slow in CI | Low | Use a PostgreSQL service container and run the suite against a schema applied once per job, not per test. |
+| The real-database integration suite is slow in CI | Low | Use the Supabase local stack and run the suite against a schema applied once per job, not per test. |
 | The quantity change lets arbitrary text through, weakening the schema | Low | The column is already `text`; validation is length-bounded (≤ 50 chars), not format-bounded. |
 
 ### Verification approach
@@ -278,16 +391,16 @@ beyond the contract types themselves.
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
-| 2.1 | Write the ADR set from `docs/project.md` §18 into the repository, recording the decisions, the rejected alternatives, and the consequences | Lead | `ARCHITECTURE/0001…0015-*.md` |
+| 2.1 | Write the ADR set from `docs/project.md` §18 into the repository, recording the decisions, the rejected alternatives, and the consequences | Lead | `ARCHITECTURE/0001…0017-*.md` |
 | 2.2 | Define the shared contract types: `SyncOperation`, `SyncRequest`, `SyncResponse`, `SyncChange`, `Conflict`, `LocalItem`, `OutboxOp`, error codes, and **`SyncOperationType` — the single authoritative operation-type union** (§10.1a). The local outbox must use these same namespaced values; a second, shorter local union is what let the vocabulary drift apart in the first place | Lead | `src/shared/sync.ts` |
 | 2.3 | Define the local IndexedDB schema and the Dexie version/migration plan | Frontend | `src/client/db/schema.ts` (design only) |
-| 2.4 | Prototype and **verify the apply design on Neon HTTP** (ADR-14): (a) `db.batch()` gives an all-or-nothing multi-statement write; (b) the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a batch executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it; (c) the **data-modifying CTE** form makes the change-log insert conditional on the compare-and-swap having matched; (d) a per-household `pg_advisory_xact_lock` as the first statement of the batch makes `seq` allocation order equal commit order (ADR-05), proven by two concurrent applies whose commits would otherwise invert | Database | `src/db/**` (scratch), ADR-14 |
+| 2.4 | Verify the apply design on the **production driver** (ADR-14). By this phase the driver is the standard `pg` driver, so the questions are: (a) `db.transaction()` gives an all-or-nothing multi-statement write; (b) the **compare-and-swap** form (`UPDATE … WHERE id = ? AND version = ?`) correctly detects a concurrent modification — a transaction callback executes pre-built statements, so the read that conflict resolution depends on cannot sit inside it; (c) the **data-modifying CTE** form makes the change-log insert conditional on the compare-and-swap having matched; (d) a per-household `pg_advisory_xact_lock` as the first statement makes `seq` allocation order equal commit order (ADR-05), proven by two concurrent applies whose commits would otherwise invert. **Much of this is already proven** — §10.8's 37 scenarios in 9 groups are executed against the §9 DDL and their outcomes verified — so this task confirms the same behaviour on the *production* instance rather than rediscovering it | Database | `src/db/**` (scratch), ADR-14 |
 | 2.5 | Verify the conflict-resolution matrix as a **pure function** before it is wired to the server, with a table-driven test covering every row of `docs/project.md` §11 | Backend | `src/server/sync/conflict-resolution.ts`, `src/server/sync/__tests__/conflict-resolution.test.ts` |
 | 2.6 | Prove the client-side generation of UUIDv7 ids and the Lamport clock implementation | Frontend | `src/client/db/ids.ts` (design only) |
 
 ### Deliverables
 
-- 15 ADRs plus an ADR for the Neon atomicity decision.
+- The ADR set from `docs/project.md` §18, including ADR-16 (hosting) and ADR-17 (authentication).
 - `src/shared/sync.ts` — the frozen contract types.
 - A table-driven test proving the conflict-resolution matrix behaves as specified.
 - A working proof that the server can apply an operation atomically on the
@@ -309,7 +422,7 @@ dangling.
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
 | The contract types are too rigid and Phases 3–5 need to change them, causing churn | Medium | The spike deliberately exercises the *awkward* cases — conflict records, bulk archive, tombstones, resync — before freezing. |
-| `db.batch()` is not sufficient for the apply path | Medium | Task 2.4 proves it on the real driver. Fallback: the Neon WebSocket driver, which supports interactive transactions. The decision is made here, not during Phase 3. |
+| The apply transaction is not sufficient for the apply path | Low | Task 2.4 proves it on the production driver. The interactive-transaction fallback that ADR-14 used to reserve for the HTTP driver is no longer a contingency — the standard `pg` driver *is* the interactive path (ADR-16). |
 | The conflict matrix proves wrong when implemented | Medium | That is the purpose of the spike. A wrong rule found in Phase 2 costs days; the same rule found in Phase 5 costs weeks. |
 
 ### Verification approach
@@ -346,16 +459,16 @@ proven against a real PostgreSQL.
 
 | # | Task | Owner | Files |
 | --- | --- | --- | --- |
-| 3.0 | **De-duplicate the `item_stores` rows before the primary key is added.** The table has no primary key today, so a legacy database may hold duplicate tag rows; adding `PRIMARY KEY (item_id, store_id)` over them **fails and blocks the migration**. The de-duplication must be deterministic — keep the lowest `ctid` per `(item_id, store_id)` — and the legacy migration test must seed duplicate tags and assert the migration applies and the surviving row is the expected one | Database | `src/db/migrations/**`, `src/db/__tests__/migrations.test.ts` |
-| 3.1 | Additive migrations: `items.deleted_at`, `items.version`, `items.field_meta`, `items.updated_by`, `items.lamport`, `items.last_op_id`; the same set plus `deleted_at` for `stores` and `categories`; version the `item_stores` rows — add `PRIMARY KEY (item_id, store_id)` (the table has **no primary key today**, so duplicate tag rows are possible), plus `version`, `lamport`, `device_id`, and **`deleted_at`** — the *pair tombstone*, without which a removal's ordering key is lost and a long-offline device can resurrect a removed tag (§9.1, §10.8.3); create `household_sync_state`; the `is_active → deleted_at` backfill as a separate migration | Database | `src/db/schema/**`, `src/db/migrations/**` |
-| 3.2 | Create the `sync_changes`, `sync_operations`, `devices`, and `entity_conflicts` tables with their indexes | Database | `src/db/migrations/**` |
-| 3.3 | Implement the apply engine (ADR-14): deduplicate on `opId`; resolve the conflict per §11; then apply the request in **one HTTP request and one transaction** — the advisory lock (`pg_advisory_xact_lock(hashtextextended(household_id, 0))`) followed by one statement per operation, each a data-modifying CTE that performs the compare-and-swap and inserts the change-log row **only if the update matched**, plus the idempotency record. No statement in the batch may raise: validation, authorization, and duplicate-name checks run before it, a failed compare-and-swap updates zero rows, the ledger insert uses `ON CONFLICT (op_id) DO NOTHING` so it cannot raise on a replay or on a bulk operation's shared `opId`, and creates use `ON CONFLICT DO NOTHING` — so one duplicate name cannot abort its neighbours. **A zero-row compare-and-swap is not an abort and must not leave a partial record**: an `UPDATE` that matches zero rows does not fail the transaction, so the change-log insert and the ledger write are both gated on the update having matched — the change-log insert selects `FROM applied`, and the request writes no ledger row for an operation the compare-and-swap lost (§10.8.4). **Implement §10.8's two statements as written** — they are the normative form and have been executed against PostgreSQL 17 (§10.8); they are not a sketch to be re-derived. Three details are load-bearing and easy to get wrong: the `$op_base_version` / `$cas_version` split (§10.8), the quoted `"storeId"` alias in `jsonb_to_recordset` (§10.8.3), and the `flags.row_changed` gate that lets an operation win nothing, write no change-log row, and **still** be acknowledged in the idempotency ledger | Backend | `src/server/sync/apply.ts` |
+| 3.0 | **De-duplicate the `item_stores` rows before the primary key is added.** The table has no primary key today, so a legacy database may hold duplicate tag rows; adding `PRIMARY KEY (item_id, store_id)` over them **fails and blocks the migration**. The de-duplication must be deterministic — keep the lowest `ctid` per `(item_id, store_id)` — and the legacy migration test must seed duplicate tags and assert the migration applies and the surviving row is the expected one | Database | `db/migrations/**`, `src/db/__tests__/migrations.test.ts` |
+| 3.1 | Additive migrations: `items.deleted_at`, `items.version`, `items.field_meta`, `items.updated_by`, `items.lamport`, `items.last_op_id`; the same set plus `deleted_at` for `stores` and `categories`; version the `item_stores` rows — add `PRIMARY KEY (item_id, store_id)` (the table has **no primary key today**, so duplicate tag rows are possible), plus `version`, `lamport`, `device_id`, and **`deleted_at`** — the *pair tombstone*, without which a removal's ordering key is lost and a long-offline device can resurrect a removed tag (§9.1, §10.8.3); create `household_sync_state`; the `is_active → deleted_at` backfill as a separate migration | Database | `src/db/schema/**`, `db/migrations/**` |
+| 3.2 | Create the `sync_changes`, `sync_operations`, `devices`, and `entity_conflicts` tables with their indexes | Database | `db/migrations/**` |
+| 3.3 | Implement the apply engine (ADR-14): deduplicate on `opId`; resolve the conflict per §11; then apply the request in **one HTTP request and one transaction** — the advisory lock (`pg_advisory_xact_lock(hashtextextended($household_id::text, 0))`) followed by one statement per operation, each a data-modifying CTE that performs the compare-and-swap and inserts the change-log row **only if the update matched**, plus the idempotency record. No statement in the batch may raise: validation, authorization, and duplicate-name checks run before it, a failed compare-and-swap updates zero rows, the ledger insert uses `ON CONFLICT (op_id) DO NOTHING` so it cannot raise on a replay or on a bulk operation's shared `opId`, and creates use `ON CONFLICT DO NOTHING` — so one duplicate name cannot abort its neighbours. **A zero-row compare-and-swap is not an abort and must not leave a partial record**: an `UPDATE` that matches zero rows does not fail the transaction, so the change-log insert and the ledger write are both gated on the update having matched — the change-log insert selects `FROM applied`, and the request writes no ledger row for an operation the compare-and-swap lost (§10.8.4). **Implement §10.8's three statements as written** — the item-row statement (§10.8.1), the create statement (§10.8.2) and the ledger statement (§10.8.3). They are the normative form and have been executed against PostgreSQL 17 (§10.8); they are not a sketch to be re-derived. Three details are load-bearing and easy to get wrong: the `$op_base_version` / `$cas_version` split (§10.8), the quoted `"storeId"` alias in `jsonb_to_recordset` (§10.8.3), and the `flags.row_changed` gate that lets an operation win nothing, write no change-log row, and **still** be acknowledged in the idempotency ledger | Backend | `src/server/sync/apply.ts` |
 | 3.3b | **Route the legacy REST writes through the same apply engine.** The legacy item endpoints stay reachable during the transition (§13.2), and a write that commits without a `sync_changes` row leaves the change log incomplete — the log is the source of truth (INV-12), so a client that pulls from it never learns of that edit. The shared functions in `src/server/services/items.ts` that the legacy routes call must increment the row's `version`, stamp its `field_meta` and `lamport`, and append the `sync_changes` row **in the same transaction**. A legacy write that does none of those leaves the compare-and-swap unable to detect it, so a concurrent sync operation would overwrite it from stale state | Backend | `src/server/services/items.ts`, `src/app/api/items/**` |
 | 3.3c | Implement the **same-request dependency contract**: an operation that targets an entity created earlier in the same request resolves against it, because the batch's statements run in order on one connection in one transaction (§10.8.4). An operation whose target does not exist — because the create was rejected — is rejected with `ENTITY_NOT_FOUND` and surfaced, not silently dropped. The client must not reorder its outbox | Backend | `src/server/sync/apply.ts` |
 | 3.4 | Implement `POST /api/sync` per the frozen contract: push + pull in one round trip, batched, with `fullResyncRequired` detection | Backend | `src/app/api/sync/route.ts`, `src/server/sync/**` |
 | 3.5 | Implement the incremental pull query and the full-snapshot path; prune **only** the change log (90 days). Tombstoned item rows are never hard-deleted, and a full resync discards the client's local tombstones because the snapshot is authoritative (FR-31, §9.3) | Backend + Database | `src/server/sync/pull.ts`, `src/db/**` |
 | 3.6 | Enforce the authorization matrix on `/api/sync` and on every entity it touches | Backend | `src/app/api/sync/route.ts` |
-| 3.7 | Server-side integration tests: idempotency (repeat an op 10×), conflict resolution per §11, cross-household rejection, atomicity under induced failure, resync detection; **the thirty verified scenarios of `docs/project.md` §16.4 replayed against the implementation**; **a bulk operation sharing one `opId` across two items** (two change-log rows, one ledger row, no abort); **a replay of an operation that won nothing** (no raise, no second conflict row); **a create-then-edit and a create-then-delete in one request**; and **a legacy REST write racing a sync operation on the same entity** | Backend | `src/server/sync/__tests__/**`, `src/app/api/sync/route.test.ts` |
+| 3.7 | Server-side integration tests: idempotency (repeat an op 10×), conflict resolution per §11, cross-household rejection, atomicity under induced failure, resync detection; **the 37 scenarios in 9 groups of `docs/project.md` §16.4 replayed against the implementation**; **a bulk operation sharing one `opId` across two items** (two change-log rows, one ledger row, no abort); **a replay of an operation that won nothing** (no raise, no second conflict row); **a create-then-edit and a create-then-delete in one request**; and **a legacy REST write racing a sync operation on the same entity** | Backend | `src/server/sync/__tests__/**`, `src/app/api/sync/route.test.ts` |
 | 3.8 | Migration tests: apply to an empty DB; apply to a DB seeded with legacy rows; assert legacy content is unchanged and `is_active = false` rows became tombstones | Database | `src/db/__tests__/migrations.test.ts` |
 
 ### Deliverables
@@ -400,12 +513,12 @@ plus explicit probes:
   conflict record exists.
 - An induced failure between the entity write and the change-log write → the
   entity write is rolled back.
-- **The thirty scenarios §10.8's statements were verified against, replayed
-  against the implementation.** They are the fixture, not a summary: a normal
-  update, a field lost to a concurrent write, a check that loses by
+- **The 37 scenarios in 9 groups §10.8's statements were verified against,
+  replayed against the implementation.** They are the fixture, not a summary: a
+  normal update, a field lost to a concurrent write, a check that loses by
   check-wins, a write to a tombstoned row, an undelete that is too old, a lost
   compare-and-swap, **both arrival orders of an archive racing an uncheck and
-  the assertion that they converge**, five store-tag outcomes, a bulk
+  the assertion that they converge**, eight store-tag outcomes, a bulk
   operation sharing one `opId`, a replay of an operation that won nothing, a
   replay of an applied operation, the outcome vocabulary, and a create with
   tags. An implementation that reaches a different outcome fails here.
@@ -730,15 +843,14 @@ the app through adding, checking, closing, and reconnecting.
 | Order | PR | Why |
 | --- | --- | --- |
 | 1 | Phase 0 — CI gate | Everything else depends on a gate that works. |
-| 2 | Phase 1.1–1.3 — authorization | Security fixes with no dependencies; land early. |
-| 3 | Phase 1.4 — household scope helper + lint rule | Depends on 2. Land before any schema work in Phase 3. |
-| 4 | Phase 1.5–1.6, 1.10 — UX and data-integrity fixes | Independent of each other; land in any order after 3. |
-| 5 | Phase 1.7–1.9 — atomicity and integration tests | Depends on 4 (the tombstone change). |
-| 6 | Phase 2 — contracts | Must precede all of Phase 3/4/5. |
-| 7 | Phase 3 and Phase 4 in parallel | Disjoint file sets; both depend on 6. Merge 3 before 5, 4 before 5. |
-| 8 | Phase 5 — convergence | Depends on 3 and 4. |
-| 9 | Phase 6 — UX and PWA | Depends on 5. |
-| 10 | Phase 7 — hardening | Depends on everything. |
+| 2 | Phase 0b — Supabase migration | The stack moves first; Phase 1's cancelled tasks are absorbed here. |
+| 3 | Phase 1.5–1.6b — UX and data-integrity fixes | Independent of each other; land in any order after 2. |
+| 4 | Phase 1.7 and 1.9 — atomicity and integration tests | Depends on 3 (the tombstone change). |
+| 5 | Phase 2 — contracts | Must precede all of Phase 3/4/5. |
+| 6 | Phase 3 and Phase 4 in parallel | Disjoint file sets; both depend on 5. Merge Phase 3 before Phase 5, Phase 4 before Phase 5. |
+| 7 | Phase 5 — convergence | Depends on Phase 3 and Phase 4. |
+| 8 | Phase 6 — UX and PWA | Depends on 7. |
+| 9 | Phase 7 — hardening | Depends on everything. |
 
 **Blocking note:** Phase 4 (client) can be developed in parallel with Phase 3
 (server) against the frozen contract, but **Phase 5 cannot start until both
@@ -774,12 +886,12 @@ transport (the sync protocol is transport-agnostic).
 | # | Risk | Severity | Mitigation |
 | --- | --- | --- | --- |
 | R-1 | The team discovers mid-implementation that the conflict rules are wrong for a real household scenario | High | Phase 2 proves the rules as pure functions before they are wired. The matrix is also a product decision — **the product owner is asked to approve §11 of `docs/project.md` before Phase 3 starts.** |
-| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's three statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across thirty scenarios. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
+| R-8 | The apply statement is implemented from the prose rather than from §10.8's verified SQL, and the two drift | High | §10.8's three statements have been **executed against PostgreSQL 17** with the document's own DDL and their outcomes verified across **37 scenarios in 9 groups**, with **201 assertions** passing. They are the normative form; §16.4 makes them the fixture for the Phase 3 integration tests, so an implementation that differs from them fails a test rather than passing review. |
 | R-2 | The SSR → client-render switch causes a performance regression that damages the existing Lighthouse score | Medium | The budget is a Phase 7 gate with a documented fallback. The existing perf harness is reused, not rewritten. |
 | R-3 | iOS Safari behaves differently from the emulation (IndexedDB eviction, service worker lifecycle) | Medium | WebKit is in the Playwright matrix from Phase 0. The manual walkthrough on a real device is a Phase 7 gate. The design avoids Background Sync precisely because of iOS. |
-| R-4 | The Neon HTTP driver cannot provide the atomicity the apply path needs | Medium | Proved in Phase 2 (Task 2.4) with the WebSocket-driver fallback already chosen. |
+| R-4 | ~~The HTTP driver of the previous host cannot provide the atomicity the apply path needs~~ — **closed**: the driver is the standard `pg` driver over the self-hosted instance, and interactive transactions are the primary path rather than a fallback (ADR-14, ADR-16). Confirmed on the production instance in Phase 2 (Task 2.4) | — | Closed |
 | R-5 | Scope creep toward the deferred v2 features | Medium | §17 is explicit. Anything not in the phase list is out of scope for this roadmap. |
-| R-6 | The recovery takes longer than 12 weeks | Medium | Phases 0–2 are the highest-value, lowest-risk work and are valuable on their own. If the timeline slips, the team ships Phase 6's PWA and offline cold start (the user's headline requirement) before the full conflict-resolution polish. |
+| R-6 | The recovery takes longer than 14 weeks | Medium | Phases 0–2 are the highest-value, lowest-risk work and are valuable on their own. If the timeline slips, the team ships Phase 6's PWA and offline cold start (the user's headline requirement) before the full conflict-resolution polish. |
 | R-7 | The database grows in a way that degrades the sync pull | Low | The `(household_id, seq)` index, pruning, and a household-scale pull limit of 500 changes per page. |
 
 ---
