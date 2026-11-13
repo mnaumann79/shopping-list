@@ -60,11 +60,17 @@ function refuse(message, cost, advice = ROLE_ADVICE) {
 /**
  * Whether this is a deployment rather than a developer's machine.
  *
- * The host decides it when there is one: isDevelopmentHost already draws
- * that line for the privileged role. With no DATABASE_URL there is no host
- * to read, so the environment decides instead - the deployment runs with
- * NODE_ENV=production, which the cutover checklist tells the operator to
- * override for the install alone, and a developer's machine does not.
+ * The host decides it when there is one, and the host is what decides the
+ * case that matters: the pooler's host is not a development host, so a
+ * deployment that cannot reach it refuses to serve whatever NODE_ENV says.
+ *
+ * With no DATABASE_URL there is no host to read, so the environment decides
+ * instead - the deployment runs with NODE_ENV=production, which the cutover
+ * checklist tells the operator to override for the install alone, and a
+ * developer's machine does not. This is the corner case: the shell that runs
+ * `pnpm start` need not carry NODE_ENV, because Next.js sets it when it
+ * starts and this check runs before that, so a deployment whose environment
+ * does not set it gets a warning here rather than a refusal.
  */
 function isDeployment(host) {
   if (host === undefined) {
