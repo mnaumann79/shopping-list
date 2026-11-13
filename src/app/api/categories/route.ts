@@ -1,5 +1,5 @@
-import { db } from "@/db";
 import { categories } from "@/db/schema";
+import { withScope, type Scope } from "@/db/scope";
 import { ensureDefaultCategories, fetchCategories } from "@/lib/categories";
 import { requireActiveOrganization } from "@/lib/request-auth";
 import { NextRequest } from "next/server";
@@ -15,9 +15,14 @@ export async function GET() {
     return authContext;
   }
 
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
+
   try {
-    await ensureDefaultCategories(authContext.orgId);
-    const categoryList = await fetchCategories(authContext.orgId);
+    await ensureDefaultCategories(scope);
+    const categoryList = await fetchCategories(scope);
     return Response.json(categoryList, { status: 200 });
   } catch (error) {
     console.error(error);
@@ -37,15 +42,22 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "name is required and must be 1-100 characters" }, { status: 400 });
   }
 
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
+
   try {
-    const [category] = await db
-      .insert(categories)
-      .values({
-        householdId: authContext.orgId,
-        name: parsed.data.name,
-        isDefault: false,
-      })
-      .returning();
+    const [category] = await withScope(scope, (tx) =>
+      tx
+        .insert(categories)
+        .values({
+          householdId: scope.householdId,
+          name: parsed.data.name,
+          isDefault: false,
+        })
+        .returning(),
+    );
 
     return Response.json(category, { status: 201 });
   } catch (error: unknown) {

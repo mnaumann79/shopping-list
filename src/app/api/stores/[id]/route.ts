@@ -1,5 +1,5 @@
-import { db } from "@/db";
 import { stores } from "@/db/schema";
+import { withScope, type Scope } from "@/db/scope";
 import { requireActiveOrganization } from "@/lib/request-auth";
 import { and, eq } from "drizzle-orm";
 import { NextRequest } from "next/server";
@@ -30,12 +30,19 @@ export async function PATCH(req: NextRequest, { params }: RouteContext) {
 
   const { id } = await params;
 
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
+
   try {
-    const [store] = await db
-      .update(stores)
-      .set({ name: parsed.data.name, updatedAt: new Date() })
-      .where(and(eq(stores.id, id), eq(stores.householdId, authContext.orgId)))
-      .returning();
+    const [store] = await withScope(scope, (tx) =>
+      tx
+        .update(stores)
+        .set({ name: parsed.data.name, updatedAt: new Date() })
+        .where(and(eq(stores.id, id), eq(stores.householdId, scope.householdId)))
+        .returning(),
+    );
 
     if (!store) {
       return Response.json({ error: "Store not found" }, { status: 404 });
@@ -55,11 +62,18 @@ export async function DELETE(_req: NextRequest, { params }: RouteContext) {
 
   const { id } = await params;
 
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
+
   try {
-    const [deleted] = await db
-      .delete(stores)
-      .where(and(eq(stores.id, id), eq(stores.householdId, authContext.orgId)))
-      .returning();
+    const [deleted] = await withScope(scope, (tx) =>
+      tx
+        .delete(stores)
+        .where(and(eq(stores.id, id), eq(stores.householdId, scope.householdId)))
+        .returning(),
+    );
 
     if (!deleted) {
       return Response.json({ error: "Store not found" }, { status: 404 });

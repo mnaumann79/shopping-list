@@ -1,6 +1,7 @@
 import { requireActiveOrganization } from "@/lib/request-auth";
 import { createItem, listActiveItems } from "@/server/services/items";
 import { ServiceError, getErrorMessage } from "@/server/services/service-error";
+import type { Scope } from "@/db/scope";
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
@@ -18,8 +19,13 @@ export async function GET() {
     return authResult;
   }
 
+  const scope: Scope = {
+    userId: authResult.session.user.id,
+    householdId: authResult.orgId,
+  };
+
   try {
-    const itemList = await listActiveItems(authResult.orgId);
+    const itemList = await listActiveItems(scope);
     return Response.json(itemList, { status: 200 });
   } catch (error) {
     console.error(error);
@@ -42,10 +48,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const scope: Scope = {
+    userId: authResult.session.user.id,
+    householdId: authResult.orgId,
+  };
+
   try {
     const item = await createItem({
-      orgId: authResult.orgId,
-      userId: authResult.session.user.id,
+      scope,
       ...parsed.data,
     });
 

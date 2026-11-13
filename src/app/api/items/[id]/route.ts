@@ -1,6 +1,7 @@
 import { requireActiveOrganization } from "@/lib/request-auth";
 import { softDeleteItem, updateItem } from "@/server/services/items";
 import { ServiceError } from "@/server/services/service-error";
+import type { Scope } from "@/db/scope";
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
@@ -47,9 +48,14 @@ export async function PATCH(req: NextRequest, { params }: RouteContext) {
 
   const { id } = await params;
 
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
+
   try {
     const updated = await updateItem({
-      orgId: authContext.orgId,
+      scope,
       itemId: id,
       updates: parsed.data,
     });
@@ -73,8 +79,13 @@ export async function DELETE(_req: NextRequest, { params }: RouteContext) {
 
   const { id } = await params;
 
+  const scope: Scope = {
+    userId: authContext.session.user.id,
+    householdId: authContext.orgId,
+  };
+
   try {
-    await softDeleteItem(authContext.orgId, id);
+    await softDeleteItem(scope, id);
     return Response.json({ success: true }, { status: 200 });
   } catch (error) {
     if (error instanceof ServiceError) {

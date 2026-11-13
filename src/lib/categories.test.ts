@@ -1,17 +1,31 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock db
-vi.mock("@/db", () => ({
-  db: {
+// The scope helper opens a transaction and runs the caller's query on the
+// transaction's client. In a unit test that client is the mocked db itself,
+// so the mock's transaction hands the callback the same object.
+const { dbMock } = vi.hoisted(() => {
+  const mock = {
     select: vi.fn(),
     insert: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
+    execute: vi.fn(),
     transaction: vi.fn(),
-  },
-}));
+  };
+  mock.transaction.mockImplementation((callback: (tx: unknown) => unknown) =>
+    callback(mock),
+  );
+  return { dbMock: mock };
+});
+
+vi.mock("@/db", () => ({ db: dbMock }));
 
 import { ensureDefaultCategories } from "@/lib/categories";
+
+// The household the scope names. The scope helper takes the caller's id and
+// the household's, so a unit test names both.
+const SCOPE = { userId: "user-1", householdId: "org-1" };
 
 const DEFAULT_CATEGORY_NAMES = [
   "Produce",
@@ -44,7 +58,7 @@ describe("ensureDefaultCategories", () => {
       values: vi.fn().mockResolvedValue(undefined),
     } as never);
 
-    await ensureDefaultCategories("org-1");
+    await ensureDefaultCategories(SCOPE);
 
     expect(db.insert).toHaveBeenCalledOnce();
     // The values passed should include all 10 default category names
@@ -70,7 +84,7 @@ describe("ensureDefaultCategories", () => {
       }),
     } as never);
 
-    await ensureDefaultCategories("org-1");
+    await ensureDefaultCategories(SCOPE);
 
     expect(db.insert).not.toHaveBeenCalled();
   });
@@ -86,7 +100,7 @@ describe("ensureDefaultCategories", () => {
       values: vi.fn().mockResolvedValue(undefined),
     } as never);
 
-    const result = await ensureDefaultCategories("org-1");
+    const result = await ensureDefaultCategories(SCOPE);
 
     expect(Array.isArray(result)).toBe(true);
     expect(result.length).toBe(10);

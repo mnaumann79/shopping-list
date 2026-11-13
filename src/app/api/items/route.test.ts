@@ -15,15 +15,25 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 // Mock db
-vi.mock("@/db", () => ({
-  db: {
+// The scope helper opens a transaction and runs the caller's query on the
+// transaction's client. In a unit test that client is the mocked db itself,
+// so the mock's transaction hands the callback the same object.
+const { dbMock } = vi.hoisted(() => {
+  const mock = {
     select: vi.fn(),
     insert: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
+    execute: vi.fn(),
     transaction: vi.fn(),
-  },
-}));
+  };
+  mock.transaction.mockImplementation((callback: (tx: unknown) => unknown) =>
+    callback(mock),
+  );
+  return { dbMock: mock };
+});
+
+vi.mock("@/db", () => ({ db: dbMock }));
 
 import { auth } from "@/lib/auth";
 import { POST } from "@/app/api/items/route";
