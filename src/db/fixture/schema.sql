@@ -126,6 +126,22 @@ CREATE INDEX IF NOT EXISTS categories_household ON categories (household_id);
 CREATE UNIQUE INDEX IF NOT EXISTS categories_org_name_live ON categories (household_id, name)
   WHERE deleted_at IS NULL;
 
+-- The items table is created before the categories table, so its foreign key
+-- is added here - the migrated schema has it, with the same name and the same
+-- ON DELETE SET NULL.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'items_category_id_categories_id_fk'
+       AND conrelid = 'items'::regclass
+  ) THEN
+    ALTER TABLE items
+      ADD CONSTRAINT items_category_id_categories_id_fk
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
 -- Each pair is an independent entity with its own version, lamport and
 -- device (§9.1), and a removal TOMBSTONES it rather than deleting the row.
 CREATE TABLE IF NOT EXISTS item_stores (

@@ -2237,7 +2237,8 @@ wins AS (
                  COALESCE((b.field_meta->'categoryId')->>'device','')))))          AS w_category,
     (('isChecked' = ANY($fields) AND $op_type = 'item.override' AND b.deleted_at IS NULL)
       OR ($op_type = 'item.check' AND b.deleted_at IS NULL
-          AND b.uncheck_applies))                                                  AS w_is_checked,
+          AND (COALESCE(($payload->>'isChecked')::boolean, false)
+               OR b.uncheck_applies)))                                            AS w_is_checked,
     ($op_type IN ('item.archive','item.bulkArchive') AND b.deleted_at IS NULL
       AND b.is_checked)                                                            AS w_archived,
     ($op_type IN ('item.unarchive','item.bulkUnarchive') AND b.deleted_at IS NULL) AS w_unarchived,
@@ -2246,22 +2247,28 @@ wins AS (
       AND COALESCE((b.field_meta->'deletedAt')->>'lamport','0')::bigint <= $op_lamport)
                                                                                   AS w_undeleted,
     ($op_type = 'item.storeTags' AND b.deleted_at IS NULL
-      AND EXISTS (SELECT 1 FROM decide AS d WHERE d.client_wins))                AS w_store_ids,
-    -- The archive is reversed only by an uncheck that WINS. A stale uncheck
-    -- loses to check-wins, and then the item is still checked: the archive's
-    -- premise still holds, so reversing it would be wrong (§11).
-    ($op_type = 'item.check' AND b.deleted_at IS NULL
-      AND b.uncheck_applies
-      AND NOT ($payload->>'isChecked')::boolean
-      AND b.archived_at IS NOT NULL)                                              AS w_reverses_archive
+      AND EXISTS (SELECT 1 FROM decide AS d WHERE d.client_wins))                AS w_store_ids
   FROM check_wins AS b
+),
+reversal AS (
+  -- The archive is reversed only by an uncheck that WINS - and by any
+  -- accepted uncheck, whether it came as a check or as an override: the
+  -- archive's premise is that the item is checked, and an explicit override
+  -- is a user decision like any other (§11). A stale uncheck loses to
+  -- check-wins, and then the item is still checked: the archive's premise
+  -- still holds, so reversing it would be wrong.
+  SELECT w.*,
+         (w.w_is_checked
+          AND NOT COALESCE(($payload->>'isChecked')::boolean, true)
+          AND b.archived_at IS NOT NULL)                                          AS w_reverses_archive
+    FROM wins AS w, check_wins AS b
 ),
 flags AS (
   SELECT w.*,
          (w.w_name OR w.w_quantity OR w.w_note OR w.w_category OR w.w_is_checked
           OR w.w_archived OR w.w_unarchived OR w.w_deleted OR w.w_undeleted
           OR w.w_store_ids OR w.w_reverses_archive) AS row_changed
-    FROM wins AS w
+    FROM reversal AS w
 ),
 applied AS (
   UPDATE items AS t
@@ -2372,29 +2379,38 @@ archive_conflicts AS (
          $op_lamport,
          $op_id,
          NULLIF((b.field_meta -> 'archivedAt') ->> 'device', '')::uuid
-    FROM before AS b, wins AS w
+    FROM before AS b, flags AS w
    WHERE w.w_reverses_archive
      AND NULLIF((b.field_meta -> 'archivedAt') ->> 'device', '') IS NOT NULL
      AND NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
   RETURNING id, field, store_id, local_value, server_value, resolution,
             winner_device_id, winner_lamport, device_id
 ),
-override_conflicts AS (
-  -- An override discards the value it replaced, and the device that wrote
-  -- that value has to be told (§11, §11.2) - otherwise its edit vanishes
+displaced_conflicts AS (
+  -- A write that wins discards the value it replaced, and the device that
+  -- wrote that value has to be told (§11, §11.2) - otherwise its edit vanishes
   -- with no record on its side. The row is addressed to that device, so it
   -- reaches it through the conflict cursor and not through this response.
+  --
+  -- An override displaces whatever was there: it is an explicit user
+  -- decision, and the other device learns that its value was replaced. A
+  -- concurrent update displaces a value only when the two writes did not see
+  -- each other - the operation's base version is older than the row version
+  -- the displaced write produced - and then the other device's edit was
+  -- overwritten, which FR-23 does not let pass unnoticed.
   INSERT INTO entity_conflicts (household_id, entity_type, entity_id, field,
                                 local_value, server_value, store_id, resolution,
                                 winner_device_id, winner_lamport, op_id, device_id)
   SELECT $household_id, $entity_type, $entity_id, fv.field,
          fv.value, to_jsonb($payload -> fv.field),
-         NULL, 'override',
+         NULL, CASE WHEN $op_type = 'item.override' THEN 'override' ELSE 'lww' END,
          $device_id, $op_lamport, $op_id, fv.device_id
-    FROM fields_now AS fv, wins AS w
-   WHERE $op_type = 'item.override'
-     AND fv.device_id IS NOT NULL
+    FROM fields_now AS fv, wins AS w, before AS b
+   WHERE fv.device_id IS NOT NULL
      AND fv.device_id <> $device_id
+     AND ($op_type = 'item.override'
+          OR ($op_type = 'item.update'
+              AND $op_base_version < COALESCE((b.field_meta -> fv.field) ->> 'v', '0')::int))
      AND CASE fv.field
            WHEN 'name'       THEN w.w_name
            WHEN 'quantity'   THEN w.w_quantity
@@ -2402,6 +2418,28 @@ override_conflicts AS (
            WHEN 'categoryId' THEN w.w_category
            WHEN 'isChecked'  THEN w.w_is_checked
            ELSE FALSE END
+     AND NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
+  RETURNING id, field, store_id, local_value, server_value, resolution,
+            winner_device_id, winner_lamport, device_id
+),
+removal_conflicts AS (
+  -- A concurrent removal WINS (§11): the other device's add is discarded,
+  -- and that device has to be told - its add is gone, and only a conflict
+  -- says so. The row is addressed to that device, so it reaches it through
+  -- the conflict cursor and not through this response: the remover's own
+  -- response carries no conflict (§10.8.4).
+  INSERT INTO entity_conflicts (household_id, entity_type, entity_id, field,
+                                local_value, server_value, store_id, resolution,
+                                winner_device_id, winner_lamport, op_id, device_id)
+  SELECT $household_id, $entity_type, $entity_id, 'storeIds',
+         jsonb_build_object('storeId', d.store_id, 'present', true),
+         jsonb_build_object('storeId', d.store_id, 'present', false,
+                            'version', COALESCE(d.cur_version, 0)),
+         d.store_id, 'removal_wins',
+         $device_id, $op_lamport, $op_id, d.cur_device
+    FROM decide AS d
+   WHERE d.client_wins AND NOT d.present AND d.concurrent
+     AND d.cur_device IS NOT NULL AND NOT d.cur_absent
      AND NOT EXISTS (SELECT 1 FROM sync_operations o WHERE o.op_id = $op_id)
   RETURNING id, field, store_id, local_value, server_value, resolution,
             winner_device_id, winner_lamport, device_id
@@ -2516,7 +2554,9 @@ SELECT e.id AS entity_id,
              UNION ALL
              SELECT * FROM archive_conflicts
              UNION ALL
-             SELECT * FROM override_conflicts
+             SELECT * FROM displaced_conflicts
+             UNION ALL
+             SELECT * FROM removal_conflicts
            ) AS x
           WHERE x.device_id = $device_id
        ), '[]'::jsonb) AS conflicts
