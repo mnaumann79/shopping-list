@@ -162,11 +162,15 @@ await withClient(scratch, async (client) => {
     ]);
   }
 
-  for (const [oldId, name] of legacyOrganizations) {
+  // The household names are not printed. The rehearsal's output is attached
+  // to a pull request, and this repository is public: a count says what the
+  // rehearsal did without naming a household. The ids are in the mapping
+  // table, which is what the cutover needs.
+  for (const [oldId] of legacyOrganizations) {
     const newId = randomUUID();
     organizationMap.push([oldId, newId]);
-    console.log(`household ${name}: ${oldId} → ${newId}`);
   }
+  console.log(`mapped ${organizationMap.length} households`);
 });
 
 // The provisioned ids have to be real GoTrue users, not ids that merely look

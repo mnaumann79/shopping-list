@@ -3768,6 +3768,13 @@ procedure; that is the list.
 That is the single most important property of this design, and it is why
 step 7 exists. Nothing is deleted from Neon until the rollback window closes.
 
+**Two things the phrase does not say.** The previous application release goes
+back with the configuration: the release this cutover deploys authenticates
+through Supabase Auth and expects the new schema, so against Neon's data it
+cannot sign users in. And the writes made on the instance after the cutover
+are not in Neon — a rollback stops the application from seeing them, unless
+they are reconciled into Neon first or the loss is recorded as accepted.
+
 **The restore is scoped to the shopping list's tables. The dump of the
 source may be whole-database; the restore may not be.** Three reasons, all
 verified against the target instance:
