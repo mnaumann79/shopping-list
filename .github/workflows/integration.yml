@@ -1,0 +1,111 @@
+name: integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One run per ref. A new push cancels the run it replaces.
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  supabase:
+    name: supabase local stack, migrations, fixture, RLS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Non-blocking at first, as the plan's risk table prescribes: "a separate,
+    # non-blocking-at-first CI job that becomes required once it has been stable
+    # for a week". The job proves the row-level security policies against a
+    # real GoTrue, which the bare PostgreSQL container in ci.yml cannot do.
+    continue-on-error: true
+
+    env:
+      # The owner connection: the migrations, the fixture and the seeding all
+      # need to write DDL and rows the application role may not.
+      OWNER_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+      # The application's connection. It is the non-owner role the migrations
+      # create, so the policies apply to it.
+      DATABASE_URL: postgresql://app:app@127.0.0.1:54322/postgres
+      DB_DRIVER: node-postgres
+      BETTER_AUTH_SECRET: ci-secret-that-is-long-enough-to-pass-validation
+      BETTER_AUTH_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      # Placeholders: nothing is ever sent.
+      RESEND_API_KEY: ci-dummy-not-used
+      RESEND_FROM_EMAIL: noreply@example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CLI version is pinned so the local stack does not change shape
+      # under the job. It is the version the config in supabase/ was written
+      # for.
+      - uses: supabase/setup-cli@v1
+        with:
+          version: v3.1.0
+
+      # The database and GoTrue are all this job needs. GoTrue is not
+      # optional: it owns the `auth` schema, and `auth.uid()` — which every
+      # policy keys on — comes from there.
+      - name: Start the local stack
+        run: |
+          supabase start \
+            --exclude studio,edge-runtime,logflare,vector,imgproxy,storage-api,realtime,kong,postgrest,postgres-meta,supavisor,mailpit
+
+      - name: Assert the PostgreSQL major version
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: node scripts/ci/assert-postgres-version.mjs
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        # NODE_ENV is overridden for the install only: pnpm skips
+        # devDependencies when NODE_ENV=production, and the test runner lives
+        # there.
+        env:
+          NODE_ENV: development
+        run: pnpm install --frozen-lockfile
+
+      - name: Apply the migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: pnpm db:migrate
+
+      - name: Give the app role its password
+        env:
+          PGPASSWORD: postgres
+        run: |
+          if ! psql "postgresql://postgres@127.0.0.1:54322/postgres" -tAc \
+            "SELECT 1 FROM pg_roles WHERE rolname = 'app'" | grep -q 1; then
+            echo "::notice::the app role does not exist yet — the migration that creates it (P0S-T04) has not landed. Skipping the role check."
+            exit 0
+          fi
+          psql "postgresql://postgres@127.0.0.1:54322/postgres" -v ON_ERROR_STOP=1 -f scripts/ci/app-role.sql
+
+      # The fixture writes to its own schema and reads the specification
+      # document for the statements it runs, so it runs against the owner
+      # connection and against the repository's docs/project.md.
+      - name: Run the fixture
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: |
+          if [ ! -f src/db/fixture/verify.py ]; then
+            echo "::notice::the fixture has not landed (P0S-T01). Skipping."
+            exit 0
+          fi
+          python3 src/db/fixture/verify.py
