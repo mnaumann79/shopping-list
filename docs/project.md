@@ -3829,22 +3829,37 @@ application ever moves to such a deployment, the client key has to be
 revisited: while the transitional route is there, and before it is
 decommissioned (step 8).
 
+**The shared-address case is the one that could surprise.** Behind Vercel the
+key is the client's public address as the platform sees it, so a single
+office behind one NAT address shares one quota of ten failures — and ten
+failures across a whole office is not many. That is the one deployment-shaped
+way the per-client quota bites a legitimate caller rather than an attacker.
+It needs no fix in a route that goes in fourteen days; it needs a sentence,
+so that nobody reads "ten failures per client" and imagines ten failures per
+*person*.
+
 #### What a full set of counters means
 
 The counters are held in memory and capped at a thousand per map, and `admit`
-checks the client map first.
+checks the client map first. They are counted per instance: a deployment
+that runs several instances gives an address its quota on each of them.
 
-**The client map being full refuses new client identities.** A caller that
-already has a counter in the client map keeps working: its key is found, its
-own quota is what answers, and a flood of other identities does not touch it.
-And because the client map is read first, a new client identity is refused
-even when the address it is trying already has a counter of its own.
+**The client map refuses new client identities when it is still full after
+the expired and quota-free counters are gone.** A caller that already has a
+counter in the client map keeps working: its key is found, its own quota is
+what answers, and a flood of other identities does not touch it. And because
+the client map is read first, a new client identity is refused even when the
+address it is trying already has a counter of its own.
 
-**The email map being full refuses new addresses.** An address that already
-has a counter keeps working, and it keeps its own quota, so the flood buys
-no extra guesses against it. The counters for keys that already exist in
-their own map keep working: a user who has already failed once is not locked
-out by somebody else's flood, and the target of a flood keeps its quota.
+**The email map refuses new addresses when it is still full after the same
+cleanup.** An address that already has a counter keeps working, and it keeps
+its own quota, so the flood buys no extra guesses against it. The counters
+for keys that already exist in their own map keep working: a user who has
+already failed once is not locked out by somebody else's flood, and the
+target of a flood keeps its quota. An attempt still needs an admissible key
+in **both** maps, though: a user who has failed once and then changes
+networks arrives with a new client key, and a full client map refuses that
+key before the email counter is read.
 
 **Neither refusal reaches every caller.** What a flood costs is the keys the
 map has never seen: the callers that are new, and the addresses that are new.

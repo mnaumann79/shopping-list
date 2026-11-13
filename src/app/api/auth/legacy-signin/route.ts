@@ -155,8 +155,10 @@ function unauthorized(): Response {
  * The case to know about is a client that reaches the server directly: it
  * can send its own header, Next.js keeps it, and it can rotate the value to
  * escape the client quota. The per-address quota is what protects the
- * passwords there. The deployment is safe because Vercel overwrites the
- * header before Next.js ever sees it (§13.2a).
+ * passwords there, and it is scoped to one instance: the counters live in
+ * the process, so an address gets its quota on every instance a deployment
+ * runs. Vercel overwrites the client header before Next.js ever sees it
+ * (§13.2a), which is what stops the rotation.
  */
 function clientKey(req: NextRequest): string {
   const entries = req.headers
