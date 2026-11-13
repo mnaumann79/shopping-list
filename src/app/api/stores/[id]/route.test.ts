@@ -55,14 +55,10 @@ describe("PATCH /api/stores/[id]", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
-      session: {
-        user: { id: "u1", name: "Test User", email: "u1@example.com" },
-        activeHouseholdId: "org-1",
-      },
-      orgId: "org-1",
-      requestHeaders: new Headers(),
-    }););
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }),
+    );
+    const req = makeRequest("PATCH", { name: "Trader Joe's" });
     const res = await PATCH(req, { params: Promise.resolve({ id: "store-1" }) });
     expect(res.status).toBe(401);
   });
@@ -75,7 +71,7 @@ describe("PATCH /api/stores/[id]", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const req = makeRequest("PATCH", {});
     const res = await PATCH(req, { params: Promise.resolve({ id: "store-1" }) });
     expect(res.status).toBe(400);
@@ -89,7 +85,7 @@ describe("PATCH /api/stores/[id]", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const { db } = await import("@/db");
     vi.mocked(db.update).mockReturnValue({
       set: vi.fn().mockReturnValue({
@@ -120,14 +116,11 @@ describe("DELETE /api/stores/[id]", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
-      session: {
-        user: { id: "store-1", name: "Test User", email: "store-1@example.com" },
-        activeHouseholdId: "org-1",
-      },
-      orgId: "org-1",
-      requestHeaders: new Headers(),
-    }););
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }),
+    );
+    const req = makeRequest("DELETE");
+    const res = await DELETE(req, { params: Promise.resolve({ id: "store-1" }) });
     expect(res.status).toBe(401);
   });
 
@@ -139,7 +132,7 @@ describe("DELETE /api/stores/[id]", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const { db } = await import("@/db");
     vi.mocked(db.delete).mockReturnValue({
       where: vi.fn().mockReturnValue({

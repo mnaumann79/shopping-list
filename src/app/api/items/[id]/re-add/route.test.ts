@@ -36,7 +36,7 @@ describe("POST /api/items/[id]/re-add", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const { db } = await import("@/db");
     const updatedItem = {
       id: "item-1", householdId: "org-1", name: "Milk", quantity: "1 gallon", note: null,

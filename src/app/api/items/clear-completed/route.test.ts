@@ -44,8 +44,18 @@ describe("POST /api/items/clear-completed", () => {
 
   it("returns 401 when no session", async () => {
     vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }),
+    );
+
+    const res = await POST();
+
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when there is no active household", async () => {
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
       Response.json({ error: "No active household" }, { status: 400 }),
-    ); as never);
+    );
 
     const res = await POST();
 
@@ -60,7 +70,7 @@ describe("POST /api/items/clear-completed", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const { db } = await import("@/db");
     const selectWhere = vi.fn().mockResolvedValue([
       {
@@ -149,7 +159,7 @@ describe("POST /api/items/clear-completed", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const { db } = await import("@/db");
     const selectWhere = vi.fn().mockResolvedValue([]);
     vi.mocked(db.select).mockReturnValue({

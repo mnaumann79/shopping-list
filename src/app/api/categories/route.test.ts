@@ -55,14 +55,10 @@ describe("POST /api/categories", () => {
   });
 
   it("returns 401 when no session", async () => {
-    vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
-      session: {
-        user: { id: "u1", name: "Test User", email: "u1@example.com" },
-        activeHouseholdId: "org-1",
-      },
-      orgId: "org-1",
-      requestHeaders: new Headers(),
-    }););
+    vi.mocked(requireActiveOrganization).mockResolvedValueOnce(
+      Response.json({ error: "Unauthorized" }, { status: 401 }),
+    );
+    const req = makeRequest({ name: "Bakery" });
     const res = await POST(req);
     expect(res.status).toBe(401);
     const json = await res.json();
@@ -77,7 +73,7 @@ describe("POST /api/categories", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const req = makeRequest({});
     const res = await POST(req);
     expect(res.status).toBe(400);
@@ -93,7 +89,7 @@ describe("POST /api/categories", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const { db } = await import("@/db");
     vi.mocked(db.insert).mockReturnValue({
       values: vi.fn().mockReturnValue({
@@ -126,7 +122,7 @@ describe("POST /api/categories", () => {
       },
       orgId: "org-1",
       requestHeaders: new Headers(),
-    }); as never);
+    });
     const { db } = await import("@/db");
     vi.mocked(db.insert).mockReturnValue({
       values: vi.fn().mockReturnValue({
