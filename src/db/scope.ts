@@ -25,11 +25,17 @@ export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  *    is local to this transaction and cannot leak into the next request that
  *    borrows the connection. `auth.uid()` reads it, and the row-level
  *    security policies are written against it.
- * 2. The per-household advisory lock is taken, so two devices pushing at the
+ * 2. `app.current_household` is set the same way, and the policies honour it:
+ *    a user who belongs to two households can only reach the one this
+ *    transaction is scoped to. A transaction that sets no scope is narrowed
+ *    by nothing but the membership.
+ * 3. The per-household advisory lock is taken, so two devices pushing at the
  *    same time are serialised for that household (ADR-05). It is
- *    transaction-scoped, so it is released when the transaction ends.
- * 3. The caller's query runs on the transaction's client, so it sees the
- *    claims and the lock.
+ *    transaction-scoped, so it is released when the transaction ends. The id
+ *    goes through `uuid` first, because PostgreSQL accepts an id in several
+ *    spellings and two spellings of one household must not be two locks.
+ * 4. The caller's query runs on the transaction's client, so it sees the
+ *    claims, the scope and the lock.
  *
  * A helper that set the claim on the ambient connection and then opened a
  * separate transaction would not work, and the difference is invisible until
@@ -46,7 +52,10 @@ export async function withScope<T>(
       sql`select set_config('request.jwt.claims', ${claims}, true)`,
     );
     await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${scope.householdId}::text, 0))`,
+      sql`select set_config('app.current_household', ${scope.householdId}, true)`,
+    );
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${scope.householdId}::uuid::text, 0))`,
     );
     return fn(tx);
   });
