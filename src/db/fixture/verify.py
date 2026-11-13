@@ -18,7 +18,7 @@ The schema is created by schema.sql, which reproduces the specification's own
 another schema's objects. `--reset-schema` drops that schema and rebuilds
 it; the default path only creates what is missing.
 """
-import pathlib, subprocess, sys, os, json, tempfile
+import pathlib, subprocess, sys, os, json, tempfile, atexit
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent.parent
@@ -59,8 +59,40 @@ def q(sql):
     if r.returncode: raise RuntimeError(r.stderr.strip())
     return r.stdout.strip()
 
+def acquire_lock():
+    """Hold an advisory lock for as long as this run lasts.
+
+    Two concurrent runs against one database would delete each other's rows
+    between the scenarios, and the failures would say nothing about the
+    statements. The lock is taken with pg_try_advisory_lock, so the second run
+    refuses to start rather than waiting for the first one - a fixture run
+    that waits is a fixture run nobody is watching.
+
+    The lock is held by a session that stays open, and it is released when
+    this process ends.
+
+    The two statements are two `-c` options on purpose. In one `-c` they are
+    one implicit transaction, and psql prints the result of the first only
+    when the whole string is done - so the read below would wait an hour for
+    the sleep, and the run would never start.
+    """
+    holder = subprocess.Popen(
+        ["psql", DATABASE_URL, "-q", "-t", "-A",
+         "-c", "select pg_try_advisory_lock(874512302);",
+         "-c", "select pg_sleep(3600);"],
+        stdout=subprocess.PIPE, text=True)
+    taken = holder.stdout.readline().strip()
+    if taken != "t":
+        holder.kill()
+        print("Another fixture run holds the lock on this database.")
+        print("Wait for it to finish, or point DATABASE_URL at another database.")
+        sys.exit(1)
+    atexit.register(holder.kill)
+    return holder
+
 ITEM   = "11111111-1111-4111-8111-111111111111"
 ITEM2  = "99999999-1111-4111-8111-111111111111"
+CATEGORY = "cccccccc-1111-4111-8111-111111111111"
 STORE  = "aaaaaaaa-1111-4111-8111-111111111111"
 STORE2 = "aaaaaaaa-2222-4222-8222-222222222222"
 DEV_A  = "22222222-2222-4222-8222-222222222222"
@@ -70,11 +102,16 @@ HH     = "00000000-0000-4000-8000-000000000001"   # households.id
 ACTOR  = "00000000-0000-4000-8000-0000000000aa"   # auth.users.id
 
 def reset():
-    q("DELETE FROM sync_changes; DELETE FROM sync_operations; DELETE FROM entity_conflicts;")
-    q("DELETE FROM item_stores;")
-    q("DELETE FROM items;")
-    q("DELETE FROM categories;")
-    q("DELETE FROM stores;")
+    # The destructive statements name their schema. The search path is set for
+    # the extracted statements, which are the specification's own SQL; the
+    # statements that DELETE rows must not depend on it, because a search
+    # path that pointed somewhere else would empty the wrong table.
+    q("DELETE FROM fixture.sync_changes; DELETE FROM fixture.sync_operations;"
+      " DELETE FROM fixture.entity_conflicts;")
+    q("DELETE FROM fixture.item_stores;")
+    q("DELETE FROM fixture.items;")
+    q("DELETE FROM fixture.categories;")
+    q("DELETE FROM fixture.stores;")
     q("""INSERT INTO users (id, email, raw_user_meta_data)
            VALUES ('%s','t@example.com','{"name":"Tester"}'::jsonb)
            ON CONFLICT DO NOTHING;""" % ACTOR)
@@ -141,6 +178,22 @@ def run(overrides=None, stmt=ITEM_STMT, ledger=True):
             return rc2, err
     return r.returncode, out
 
+def conflicts_of(out):
+    """The conflicts the statement returned: the ones addressed to this device.
+
+    Section 10.8.1 promises the statement returns the conflicts addressed to
+    the device that made the request. The fixture has to assert them: a
+    statement that always returned an empty array would pass every other
+    check in this file.
+    """
+    parts = out.strip().split("\x1f")
+    if len(parts) < 4:
+        return None
+    try:
+        return json.loads(parts[3])
+    except ValueError:
+        return None
+
 def write_ledger(overrides=None, entity_id=None):
     ls = pathlib.Path(LEDGER_STMT).read_text(encoding="utf-8")
     lsubs = dict(SUBS); lsubs.update(overrides or {})
@@ -182,7 +235,10 @@ def load_schema():
         raise RuntimeError("schema.sql failed:\n" + (r.stdout + r.stderr).strip()
                            + "\n(if the fixture's DDL changed, re-run with --reset-schema)")
 
-print("SCHEMA - the specification's own DDL, in the fixture's own schema")
+print("LOCK - one fixture run at a time against one database")
+acquire_lock()
+
+print("\nSCHEMA - the specification's own DDL, in the fixture's own schema")
 load_schema()
 check("schema.sql applied", True)
 
@@ -192,13 +248,23 @@ for _name, (_same, _sql) in fixture_extract.check_against_references().items():
           "" if _same else "THE DOCUMENT HAS CHANGED SINCE IT WAS VERIFIED")
 
 def item_row():
+    # The tombstone and the archive are markers, not the timestamp: a
+    # timestamp starts with the year, and "del=20" in a row that reads
+    # "del=2026-11-13" reads like a version assertion.
     return q("""SELECT name||' / '||coalesce(quantity,'-')||' / v'||version||' / ck='||is_checked
-                 ||' / del='||coalesce(deleted_at::text,'-')||' / arch='||coalesce(archived_at::text,'-')
+                 ||' / del='||CASE WHEN deleted_at IS NULL THEN 'none' ELSE 'set' END
+                 ||' / arch='||CASE WHEN archived_at IS NULL THEN 'none' ELSE 'set' END
                  ||' / meta='||field_meta::text
                FROM items WHERE id='%s'""" % ITEM)
 
 def pairs():
-    return q("SELECT store_id||'/v'||version||'/l'||lamport||'/d'||device_id||'/del='||coalesce(deleted_at::text,'-') FROM item_stores WHERE item_id='%s' ORDER BY store_id" % ITEM)
+    return q("SELECT store_id||'/v'||version||'/l'||lamport||'/d'||device_id||'/del='||CASE WHEN deleted_at IS NULL THEN 'none' ELSE 'set' END FROM item_stores WHERE item_id='%s' ORDER BY store_id" % ITEM)
+
+def note_and_category():
+    # The note and the category are fields like any other, and the row
+    # summary does not carry them - so they are read on their own.
+    return q("""SELECT coalesce(note,'-')||' / cat='||coalesce(category_id::text,'-')
+                 FROM items WHERE id='%s'""" % ITEM)
 
 # ---------------------------------------------------------------- fields
 print("FIELD 1 - normal update")
@@ -250,7 +316,7 @@ rc,out = run({"$op_type":"'item.check'","$fields":"'{isChecked}'::text[]",
 check("statement executes", rc==0, out[:200])
 row = item_row()
 check("the item is STILL checked", "ck=true" in row, row)
-check("the archive was NOT reversed", "arch=-" not in row, row)
+check("the archive was NOT reversed", "arch=set" in row, row)
 check("the version did NOT advance", "/ v4 " in row, row)
 check("no change-log row", q("SELECT count(*) FROM sync_changes")=="0")
 check("the archiver is NOT told its archive was reversed",
@@ -324,7 +390,7 @@ rc,out = run({"$op_type":"'item.undelete'","$fields":"'{deletedAt}'::text[]",
               "$payload":ARCH_PAYLOAD,"$cas_version":"7","$op_base_version":"7","$op_lamport":"15"})
 check("statement executes", rc==0, out[:200])
 row = item_row()
-check("the tombstone STAYS", "del=-" not in row, row)
+check("the tombstone STAYS", "del=set" in row, row)
 c = q("SELECT field||'|'||resolution FROM entity_conflicts")
 check("a conflict row was written", c.startswith("deletedAt|"), c)
 check("the resolution is rejected", c.endswith("rejected"), c)
@@ -336,7 +402,7 @@ rc,out = run({"$op_type":"'item.undelete'","$fields":"'{deletedAt}'::text[]",
               "$op_id":"'44444444-4444-4444-8444-444444444444'"})
 check("statement executes", rc==0, out[:200])
 row = item_row()
-check("the tombstone cleared", "del=-" in row, row)
+check("the tombstone cleared", "del=none" in row, row)
 check("the version advanced to 8", "/ v8 " in row, row)
 
 print("\nFIELD 6 - the compare-and-swap is lost")
@@ -348,6 +414,53 @@ check("the row was NOT written", "Someone else" in row, row)
 check("no change-log row", q("SELECT count(*) FROM sync_changes")=="0")
 check("no idempotency row", q("SELECT count(*) FROM sync_operations")=="0")
 
+print("\nFIELD 7 - the note and the category are fields like any other")
+reset(); seed_item(version=1)
+q("""INSERT INTO categories (id, household_id, name) VALUES ('%s','%s','Produce')
+       ON CONFLICT DO NOTHING;""" % (CATEGORY, HH))
+rc,out = run({"$fields":"'{note,categoryId}'::text[]",
+              "$payload":"""'{"note":"Remember milk","categoryId":"%s"}'::jsonb""" % CATEGORY,
+              "$cas_version":"1","$op_base_version":"1"})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+nc = note_and_category()
+check("the note applied", "Remember milk" in nc, nc)
+check("the category applied", CATEGORY in nc, nc)
+check("the version advanced to 2", "/ v2 " in row, row)
+check("field_meta holds the note and the category",
+      '"note"' in row and '"categoryId"' in row, row)
+check("one change-log row", q("SELECT count(*) FROM sync_changes")=="1")
+
+print("\nFIELD 8 - the note LOST to a concurrent write is reported as a conflict")
+reset(); seed_item(version=2, note="'Their note'",
+                   field_meta='{"note":{"v":2,"lamport":20,"device":"%s"}}' % DEV_B)
+rc,out = run({"$fields":"'{note}'::text[]",
+              "$payload":"'{\"note\":\"My note\"}'::jsonb",
+              "$cas_version":"2","$op_base_version":"1"})
+check("statement executes", rc==0, out[:200])
+nc = note_and_category()
+check("the server's note was kept", "Their note" in nc, nc)
+c = q("SELECT field||'|'||local_value::text||'|'||server_value::text||'|'||resolution"
+      " FROM entity_conflicts")
+check("a conflict row was written", c.startswith("note|"), c)
+check("the resolution is lww", c.endswith("lww"), c)
+check("the conflict carries both values", '"My note"' in c and '"Their note"' in c, c)
+
+print("\nDELETE 1 - a delete tombstones the row")
+reset(); seed_item(version=1)
+rc,out = run({"$op_type":"'item.delete'","$fields":"'{deletedAt}'::text[]",
+              "$payload":"'{}'::jsonb"})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+check("the row is tombstoned", "del=set" in row, row)
+check("the name was NOT changed", "Old name" in row, row)
+check("the version advanced to 2", "/ v2 " in row, row)
+check("field_meta records the tombstone", '"deletedAt"' in row, row)
+check("one change-log row", q("SELECT count(*) FROM sync_changes")=="1")
+check("the change-log row carries the tombstone", q("SELECT deleted FROM sync_changes")=="t")
+check("the ledger row was written", q("SELECT count(*) FROM sync_operations")=="1")
+check("no conflict row - the delete won", q("SELECT count(*) FROM entity_conflicts")=="0")
+
 # ---------------------------------------------------------------- pairs
 print("\nPAIR 1 - an addition whose payload key is `storeId`")
 reset(); seed_item()
@@ -356,7 +469,7 @@ rc,out = run({"$op_type":"'item.storeTags'","$fields":"'{}'::text[]",
 check("statement executes", rc==0, out[:200])
 p = pairs()
 check("the pair row was written", STORE in p, p)
-check("it is live", "del=-" in p, p)
+check("it is live", "/del=none" in p, p)
 check("the item version advanced", "/ v2 " in item_row(), item_row())
 check("the change-log carries storeIds", STORE in q("SELECT payload::text FROM sync_changes"))
 
@@ -370,9 +483,11 @@ rc,out = run({"$op_type":"'item.storeTags'","$fields":"'{}'::text[]",
 check("statement executes", rc==0, out[:200])
 p = pairs()
 check("the pair was NOT deleted, it was tombstoned", STORE in p, p)
-check("the tombstone is set", "del=20" in p, p)
+check("the tombstone is set", "/del=set" in p, p)
 check("the pair version advanced to 4", "/v4/" in p, p)
 check("no conflict", q("SELECT count(*) FROM entity_conflicts")=="0")
+check("the statement returned no conflicts - the caller won",
+      conflicts_of(out)==[], str(conflicts_of(out))[:300])
 
 print("\nPAIR 3 - a CONCURRENT removal still wins (removal_wins)")
 reset(); seed_item()
@@ -383,7 +498,7 @@ rc,out = run({"$op_type":"'item.storeTags'","$fields":"'{}'::text[]",
               "$op_lamport":"15","$cas_version":"1"})
 check("statement executes", rc==0, out[:200])
 p = pairs()
-check("the pair was tombstoned", STORE in p and "del=20" in p, p)
+check("the pair was tombstoned", STORE in p and "/del=set" in p, p)
 check("the item version advanced", "/ v2 " in item_row(), item_row())
 check("no conflict - the removal won", q("SELECT count(*) FROM entity_conflicts")=="0")
 
@@ -396,7 +511,7 @@ rc,out = run({"$op_type":"'item.storeTags'","$fields":"'{}'::text[]",
               "$op_lamport":"25","$cas_version":"1"})
 check("statement executes", rc==0, out[:200])
 p = pairs()
-check("the pair STAYS tombstoned", "del=20" in p, p)
+check("the pair STAYS tombstoned", "/del=set" in p, p)
 check("the item version did NOT advance", "/ v1 " in item_row(), item_row())
 check("no change-log row", q("SELECT count(*) FROM sync_changes")=="0")
 check("the ledger row WAS written (the client is acknowledged)", q("SELECT count(*) FROM sync_operations")=="1")
@@ -406,6 +521,15 @@ check("the conflict names the pair", STORE in c, c)
 check("the resolution is removal_wins", "removal_wins" in c, c)
 check("the loser is the adding device", c.split("|")[3]==DEV_A, c)
 check("the winner is the removing device", c.split("|")[4]==DEV_B, c)
+conf = conflicts_of(out)
+check("the statement returned the conflict addressed to this device",
+      isinstance(conf, list) and len(conf)==1, str(conf)[:300])
+check("the returned conflict names the pair",
+      isinstance(conf, list) and conf and conf[0].get("storeId")==STORE, str(conf)[:300])
+check("the returned conflict names the resolution",
+      isinstance(conf, list) and conf and conf[0].get("resolution")=="removal_wins", str(conf)[:300])
+check("the returned conflict names the winner",
+      isinstance(conf, list) and conf and conf[0].get("winnerDeviceId")==DEV_B, str(conf)[:300])
 
 print("\nPAIR 5 - a SEQUENTIAL removal that loses on lamport keeps the tag")
 reset(); seed_item()
@@ -416,7 +540,7 @@ rc,out = run({"$op_type":"'item.storeTags'","$fields":"'{}'::text[]",
               "$op_lamport":"15","$cas_version":"1"})
 check("statement executes", rc==0, out[:200])
 p = pairs()
-check("the pair stays present", STORE in p and "del=-" in p, p)
+check("the pair stays present", STORE in p and "/del=none" in p, p)
 check("the stored ordering key was NOT overwritten", "/l20/" in p, p)
 check("the item version did NOT advance", "/ v1 " in item_row(), item_row())
 check("no change-log row", q("SELECT count(*) FROM sync_changes")=="0")
@@ -448,6 +572,10 @@ check("statement executes", rc2==0, out2[:200])
 p = pairs()
 check("both tags are present", STORE in p and STORE2 in p, p)
 check("no conflict", q("SELECT count(*) FROM entity_conflicts")=="0")
+snap = q("SELECT payload::text FROM sync_changes ORDER BY seq DESC LIMIT 1")
+check("the snapshot carries the tag this operation wrote", STORE2 in snap, snap[:300])
+check("the snapshot carries the item's OTHER tag - the pair this operation did not touch",
+      STORE in snap, snap[:300])
 
 print("\nPAIR 8 - removing a tag that is not there is a no-op")
 reset(); seed_item()
@@ -470,13 +598,32 @@ check("the snapshot carries the removed tag", STORE in snap, snap)
 check("the snapshot marks it absent", '"present": false' in snap, snap)
 check("the snapshot carries the removal's version", '"version": 4' in snap, snap)
 
+# And now the client sends that version back: the pair it has seen is the
+# tombstone, so its re-add is SEQUENTIAL - and a sequential write wins iff its
+# (lamport, deviceId) is higher (section 11). This is the branch that updates
+# the pair in place; without this step the statement would never run it.
+rc,out = run({"$op_type":"'item.storeTags'","$fields":"'{}'::text[]",
+              "$payload":"""'{"storeIds":[{"storeId":"%s","version":4,"present":true}]}'::jsonb""" % STORE,
+              "$op_lamport":"30","$cas_version":"2"})
+check("statement executes", rc==0, out[:200])
+p = pairs()
+check("the pair is LIVE again - the client re-added the tag it had seen",
+      "/del=none" in p, p)
+check("the pair version advanced to 5", "/v5/" in p, p)
+check("the pair carries the client's ordering key", "/l30/" in p, p)
+check("the pair is the client's", "/d"+DEV_A+"/" in p, p)
+check("no conflict - the client won sequentially",
+      q("SELECT count(*) FROM entity_conflicts")=="0")
+check("the statement returned no conflicts - the caller won",
+      conflicts_of(out)==[], str(conflicts_of(out))[:300])
+
 # ---------------------------------------------------------------- archive ordering
 print("\nARCHIVE 1 - the archive is skipped when the item is no longer checked")
 reset(); seed_item(version=6, is_checked="false")
 rc,out = run({"$op_type":"'item.archive'","$fields":"'{archivedAt}'::text[]",
               "$payload":ARCH_PAYLOAD,"$cas_version":"6","$op_base_version":"6"})
 check("statement executes", rc==0, out[:200])
-check("the item was NOT archived", "arch=-" in item_row(), item_row())
+check("the item was NOT archived", "arch=none" in item_row(), item_row())
 check("the version did NOT advance", "/ v6 " in item_row(), item_row())
 
 print("\nARCHIVE 2 - the archive applies to a checked item")
@@ -484,7 +631,7 @@ reset(); seed_item(version=6, is_checked="true")
 rc,out = run({"$op_type":"'item.archive'","$fields":"'{archivedAt}'::text[]",
               "$payload":ARCH_PAYLOAD,"$cas_version":"6","$op_base_version":"6"})
 check("statement executes", rc==0, out[:200])
-check("the item WAS archived", "arch=20" in item_row(), item_row())
+check("the item WAS archived", "arch=set" in item_row(), item_row())
 check("the version advanced to 7", "/ v7 " in item_row(), item_row())
 
 print("\nARCHIVE 3 - arrival order: the UNCHECK arrives first, the archive second")
@@ -499,7 +646,7 @@ rc,out = run({"$op_type":"'item.archive'","$fields":"'{archivedAt}'::text[]",
               "$payload":ARCH_PAYLOAD,"$cas_version":"7","$op_base_version":"6",
               "$op_lamport":"20","$op_id":"'44444444-4444-4444-8444-444444444444'"})
 check("the archive is skipped (the version moved on)", rc==0, out[:200])
-check("the item is NOT archived", "arch=-" in item_row(), item_row())
+check("the item is NOT archived", "arch=none" in item_row(), item_row())
 check("the item is NOT checked", "ck=false" in item_row(), item_row())
 
 print("\nARCHIVE 4 - arrival order: the ARCHIVE arrives first, the uncheck second")
@@ -508,13 +655,13 @@ reset(); seed_item(version=6, is_checked="true")
 rc,out = run({"$op_type":"'item.archive'","$fields":"'{archivedAt}'::text[]",
               "$payload":ARCH_PAYLOAD,"$cas_version":"6","$op_base_version":"6","$op_lamport":"20"})
 check("the archive applies", rc==0, out[:200])
-check("the item IS archived", "arch=20" in item_row(), item_row())
+check("the item IS archived", "arch=set" in item_row(), item_row())
 rc,out = run({"$op_type":"'item.check'","$fields":"'{isChecked}'::text[]",
               "$payload":"'{\"isChecked\":false}'::jsonb",
               "$device_id":"'%s'" % DEV_B,"$cas_version":"7","$op_base_version":"6",
               "$op_lamport":"15","$op_id":"'44444444-4444-4444-8444-444444444444'"})
 check("the uncheck applies", rc==0, out[:200])
-check("the archive was REVERSED - the item is not archived", "arch=-" in item_row(), item_row())
+check("the archive was REVERSED - the item is not archived", "arch=none" in item_row(), item_row())
 check("the item is NOT checked", "ck=false" in item_row(), item_row())
 c = q("SELECT field||'|'||resolution||'|'||device_id||'|'||winner_device_id FROM entity_conflicts")
 check("the archiver is told its archive was reversed", c.startswith("archivedAt|rejected|"), c)
@@ -539,11 +686,53 @@ def end_state(order):
              "$payload":"'{\"isChecked\":false}'::jsonb",
              "$device_id":"'%s'" % DEV_B,"$cas_version":"7","$op_base_version":"6",
              "$op_lamport":"15","$op_id":"'44444444-4444-4444-8444-444444444444'"})
-    r = q("SELECT is_checked||'|'||coalesce(archived_at::text,'-') FROM items WHERE id='%s'" % ITEM)
+    r = q("SELECT is_checked||'|'||CASE WHEN archived_at IS NULL THEN 'none' ELSE 'set' END FROM items WHERE id='%s'" % ITEM)
     return r
 a = end_state("uncheck-first"); b = end_state("archive-first")
 check("both orders leave the item unchecked and not archived", a == b, "uncheck-first=%s  archive-first=%s" % (a,b))
-check("the converged state is unchecked and not archived", a == "false|-", a)
+check("the converged state is unchecked and not archived", a == "false|none", a)
+
+print("\nUNARCHIVE 1 - an unarchive clears the archive")
+# The archive is what puts the item out of the active list; the unarchive
+# puts it back. The check state is untouched - the item was checked when it
+# was archived, and it still is.
+reset(); seed_item(version=6, is_checked="true", archived_at="now()",
+                   field_meta='{"archivedAt":{"v":6,"lamport":20,"device":"%s"}}' % DEV_A)
+rc,out = run({"$op_type":"'item.unarchive'","$fields":"'{archivedAt}'::text[]",
+              "$payload":"'{}'::jsonb","$cas_version":"6","$op_base_version":"6"})
+check("statement executes", rc==0, out[:200])
+row = item_row()
+check("the archive was cleared", "arch=none" in row, row)
+check("the item is STILL checked", "ck=true" in row, row)
+check("the version advanced to 7", "/ v7 " in row, row)
+check("one change-log row", q("SELECT count(*) FROM sync_changes")=="1")
+check("the ledger row was written", q("SELECT count(*) FROM sync_operations")=="1")
+
+print("\nBULKUNARCHIVE 1 - a bulk unarchive clears the archive on every candidate")
+reset()
+BULK3_IDS = ["eeeeeeee-0000-4000-8000-000000000001",
+             "eeeeeeee-0000-4000-8000-000000000002"]
+for iid in BULK3_IDS:
+    q("""INSERT INTO items (id, household_id, name, quantity, note, version, field_meta, is_checked, archived_at)
+           VALUES ('%s','%s','Item',NULL,NULL,3,'{}'::jsonb,true,now())""" % (iid, HH))
+BULK3_PAYLOAD = """'{"versions":{"eeeeeeee-0000-4000-8000-000000000001":3,"eeeeeeee-0000-4000-8000-000000000002":3}}'::jsonb"""
+for iid in BULK3_IDS:
+    rc,out = run({"$op_type":"'item.bulkUnarchive'","$fields":"'{archivedAt}'::text[]",
+                  "$payload":BULK3_PAYLOAD,"$cas_version":"3","$op_base_version":"3",
+                  "$entity_id":"'%s'" % iid, "$op_id":"'77777777-7777-4777-8777-777777777777'"},
+                 ledger=False)
+    check("the statement for %s executes" % iid[-1], rc==0, out[:200])
+rc,out = write_ledger({"$op_type":"'item.bulkUnarchive'","$fields":"'{archivedAt}'::text[]",
+                        "$payload":BULK3_PAYLOAD, "$op_id":"'77777777-7777-4777-8777-777777777777'"})
+check("the ledger insert does not raise", rc==0, out[:300])
+check("both items are NOT archived",
+      q("SELECT count(*) FROM items WHERE archived_at IS NULL")=="2",
+      q("SELECT count(*) FROM items WHERE archived_at IS NULL"))
+check("two change-log rows", q("SELECT count(*) FROM sync_changes")=="2",
+      q("SELECT count(*) FROM sync_changes"))
+check("ONE ledger row for the one operation",
+      q("SELECT count(*) FROM sync_operations")=="1",
+      q("SELECT count(*) FROM sync_operations"))
 
 # ---------------------------------------------------------------- ledger safety
 print("\nLEDGER 1 - a BULK operation: two items sharing one opId")
@@ -594,7 +783,7 @@ check("no change-log row", q("SELECT count(*) FROM sync_changes")=="0")
 rc,out = run({"$op_type":"'item.check'","$fields":"'{isChecked}'::text[]",
               "$payload":"'{\"isChecked\":false}'::jsonb","$cas_version":"4",
               "$op_base_version":"3","$op_lamport":"10"})
-check("the REPLAY does not raise", rc!=99, out[:300])
+check("the REPLAY does not raise", rc==0, out[:300])
 check("still one ledger row", q("SELECT count(*) FROM sync_operations")=="1",
       q("SELECT count(*) FROM sync_operations"))
 check("still no change-log row", q("SELECT count(*) FROM sync_changes")=="0")
@@ -606,7 +795,7 @@ reset(); seed_item(version=1)
 rc,out = run()
 check("the first attempt applies", rc==0, out[:200])
 rc,out = run()
-check("the REPLAY does not raise", rc!=99, out[:300])
+check("the REPLAY does not raise", rc==0, out[:300])
 check("still one ledger row", q("SELECT count(*) FROM sync_operations")=="1",
       q("SELECT count(*) FROM sync_operations"))
 check("still one change-log row", q("SELECT count(*) FROM sync_changes")=="1",
@@ -686,11 +875,11 @@ q("""INSERT INTO items (id, household_id, name, quantity, note, version, field_m
 rc,out = run({"$op_type":"'item.check'","$fields":"'{isChecked}'::text[]",
               "$payload":"'{\"isChecked\":false}'::jsonb","$cas_version":"5","$op_base_version":"5",
               "$entity_id":"'cccccccc-0000-4000-8000-000000000001'"})
-check("the statement does NOT raise", rc!=99, out[:300])
-row = q("""SELECT is_checked||'|'||coalesce(archived_at::text,'-') FROM items
+check("the statement does NOT raise", rc==0, out[:300])
+row = q("""SELECT is_checked||'|'||CASE WHEN archived_at IS NULL THEN 'none' ELSE 'set' END FROM items
              WHERE id='cccccccc-0000-4000-8000-000000000001'""")
 check("the item is unchecked", row.startswith("false"), row)
-check("the archive was cleared", row.endswith("|-"), row)
+check("the archive was cleared", row.endswith("|none"), row)
 check("NO conflict row - the archiver is unknown, so there is no loser to notify",
       q("SELECT count(*) FROM entity_conflicts")=="0", q("SELECT count(*) FROM entity_conflicts"))
 
@@ -764,7 +953,11 @@ other = subprocess.run(PG_OUT+["-c","SELECT hashtextextended('%s'::text, 0)" % "
                         capture_output=True, text=True).stdout.strip()
 check("a different household yields a different key", other != parts[0], "%s vs %s" % (other, parts[0]))
 check("the lock is transaction-scoped, so it is released on commit",
-      subprocess.run(PG_OUT+["-c","SELECT count(*) FROM pg_locks WHERE locktype='advisory'"],
+      # objsubid = 2 is a transaction-level advisory lock; objsubid = 1 is a
+      # session-level one, and the fixture's own run-lock is session-level -
+      # it is held for the whole run on purpose.
+      subprocess.run(PG_OUT+["-c","SELECT count(*) FROM pg_locks"
+                             " WHERE locktype='advisory' AND objsubid = 2"],
                      capture_output=True, text=True).stdout.strip() == "0")
 
 print("\nCREATE 1 - item.create writes the item AND its tags")

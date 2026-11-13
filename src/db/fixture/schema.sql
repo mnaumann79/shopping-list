@@ -16,8 +16,12 @@
 --
 --     psql -v fixture_reset=1 -f schema.sql
 --
+-- The VALUE is checked, not only the presence of the variable:
+-- -v fixture_reset=0 is not a request to drop anything.
 \if :{?fixture_reset}
-DROP SCHEMA IF EXISTS fixture CASCADE;
+  \if :fixture_reset
+    DROP SCHEMA IF EXISTS fixture CASCADE;
+  \endif
 \endif
 CREATE SCHEMA IF NOT EXISTS fixture;
 SET search_path TO fixture;

@@ -1,14 +1,18 @@
 # Verification against the self-hosted Supabase instance
 
-**Project ref:** `wpvdyclozjjnghrcafpf`
 **Date:** 2026-11-12
 **Channel:** the Supabase MCP (the sandbox cannot open a raw TCP connection to
 the instance — DNS does not resolve there — so the MCP is the only route).
 
-Everything below was run against the instance. The scratch schema
-`fixture_check` and the throwaway `auth.users` row used for the foreign keys
-were **dropped afterwards**; the instance's seven pre-existing `public` tables
-were not touched.
+Everything below was run against the instance. The scratch schema it ran in
+and the throwaway `auth.users` row used for the foreign keys were **dropped
+afterwards**; the instance's pre-existing `public` tables were not touched.
+
+> **No identifiers.** The project's ref, the scratch schema's name, the
+> instance's role names and the names of the other application's tables are
+> deliberately not in this file: a committed document is a public document,
+> and none of them is needed to read what was verified. What each section
+> found is here in full.
 
 > **Update (P0S-T01).** The fixture no longer creates or writes to the
 > `auth` schema: it runs in a schema of its own (`fixture`), with
@@ -31,23 +35,21 @@ were not touched.
 
 ## 2. The roles, and what they mean for §9.2b
 
-| Role | `BYPASSRLS` | Consequence |
+The instance's roles fall into two groups. Their names are not in this file.
+
+| | `BYPASSRLS` | Consequence |
 | --- | --- | --- |
-| `anon` | no | subject to RLS |
-| `authenticated` | no | subject to RLS |
-| `postgres` | **yes** | bypasses RLS — for migrations, backups and Studio |
-| `service_role` | yes | bypasses RLS |
-| `supabase_admin` | yes (and is superuser) | Supabase's own |
-| `supabase_auth_admin` | no | GoTrue's, and it manages the `auth` schema |
+| the roles that serve the application's requests | no | subject to RLS |
+| the roles that migrate, back up and administer the instance | **yes** | bypass RLS |
 
 **This confirms the specification's design exactly.** §9.2b says the
 application connects as a **dedicated non-owner role** so the policies apply,
-and that `postgres` is for migrations, backups and Studio and bypasses RLS by
-design. The instance says exactly that: `postgres` has `BYPASSRLS`. A
-connection as `postgres` would have silently bypassed every policy — which is
+and that the role used for migrations, backups and Studio bypasses RLS by
+design. The instance says exactly that: the migration role has `BYPASSRLS`. A
+connection as that role would have silently bypassed every policy — which is
 why the dedicated `app` role is not optional.
 
-Note that `postgres` is **not** a superuser on this instance
+Note that the migration role is **not** a superuser on this instance
 (`rolsuper = false`), but `BYPASSRLS` is enough to defeat the policies on its
 own.
 
@@ -150,13 +152,13 @@ identifiable loser to notify. Exactly as §10.8.3 specifies.
 
 ## 7. What is **not** verified
 
-- **The full 201-assertion fixture** (165 assertions when this run was
+- **The full 248-assertion fixture** (165 assertions when this run was
   made). The MCP cannot bind parameters or
   target another database, so the harness — which drives `psql` — cannot run
   against the instance from here. The statements above were run by hand
   through the MCP instead: the item statement's update path, the create
   statement, the ledger statement and both archive-conflict branches. The
-  other 33 scenario groups (37 now) remain verified on PostgreSQL 17.11
+  other 33 scenario groups (42 now) remain verified on PostgreSQL 17.11
   locally.
 - **A backup, and a restore of that backup.** `pg_dump` and `pg_restore` need
   a direct connection, which the sandbox cannot make.
@@ -166,11 +168,9 @@ identifiable loser to notify. Exactly as §10.8.3 specifies.
 
 ## 8. A finding that changes the cutover
 
-**The `public` schema already holds another application's tables:**
-`accounts`, `conversations`, `knowledge_chunks`, `knowledge_sources`,
-`messages`, `projects`, `widget_configs`. They are empty, and the shopping
-list's table names do not collide with them — but the implication for
-§13.2a is real:
+**The `public` schema already holds another application's tables.** They are
+empty, and the shopping list's table names do not collide with them — but the
+implication for §13.2a is real:
 
 > **The dump must be scoped to the shopping list's tables.** A
 > whole-database `pg_dump` of the *source* is fine — it is the *restore* that

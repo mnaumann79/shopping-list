@@ -27,6 +27,11 @@ DRIFT - the document's statements match the reference copies
 If that check fails, the document changed. Re-verify, then update the
 reference copies.
 
+**The drift check covers the three §10.8 statements and nothing else.**
+`schema.sql` is the §9 DDL: it is applied as it stands and not compared with
+the document, so a change to the DDL in the specification is not reported by
+the drift check — it shows up as a failing run instead.
+
 ## Running it
 
 ```bash
@@ -69,21 +74,23 @@ without the flag, no object is ever dropped.
 
 ## What it covers
 
-**37 scenarios in 9 groups, 201 assertions.**
+**42 scenarios in 11 groups, 248 assertions.**
 
 | Group | Scenarios | What it proves |
 | --- | --- | --- |
-| FIELD | 7 | per-field resolution; a lost CAS leaves the row untouched; a stale uncheck does not reverse an archive |
+| FIELD | 9 | per-field resolution; the note and the category are fields like any other; a lost CAS leaves the row untouched; a stale uncheck does not reverse an archive |
 | OVERRIDE | 2 | an override beats check-wins, and the device whose value it replaced is told |
 | PAIR | 9 | the per-tag rule of §11, in both directions; the snapshot carries a removed tag |
+| DELETE | 1 | a delete tombstones the row, and the tombstone reaches the change log |
 | ARCHIVE | 5 | archive-wins-with-reversal, and its order-independence |
+| UNARCHIVE | 2 | an unarchive clears the archive, and the bulk form clears every candidate |
 | LEDGER | 4 | the idempotency ledger and its four outcomes |
 | BULK | 4 | the bulk envelope, and the case with no identifiable loser |
 | ENTITY | 3 | the ledger's decided-gate is entity-type aware |
 | CREATE | 2 | the create statement, and its duplicate-id behaviour |
 | LOCK | 1 | the per-household advisory lock, on a `uuid` parameter |
 
-Plus the two checks above: the schema, and the drift check.
+Plus the fixture's own four checks: the schema, and the three drift checks.
 
 The full list, with what each one proves, is in `docs/project.md` §16.4.
 
