@@ -1,0 +1,20 @@
+-- The instance's legacy verification table carries a constraint the repository
+-- does not declare.
+--
+-- The `verification` table is one of Better Auth's leftovers, and it was
+-- created by the application's own schema before the migrations existed:
+-- `0000_init.sql` creates it with CREATE TABLE IF NOT EXISTS, so where the
+-- table is already there the statement is a no-op and the table keeps its own
+-- shape. On the instance that shape carries `updated_at` as NOT NULL, while
+-- the repository's schema and the migration both declare it nullable:
+--
+--   src/db/schema/auth.ts:  updatedAt: timestamp("updated_at").defaultNow(),
+--
+-- So the instance is the odd one out, and the repository's migrations are the
+-- source of truth for the schema. The statement drops the constraint there;
+-- on a database built from the migrations it changes nothing.
+--
+-- Nothing writes the table - the transitional sign-in reads the legacy `user`
+-- and `account` tables and no more - so this is not what kept anything in
+-- order; it is only what made the two schemas differ.
+ALTER TABLE verification ALTER COLUMN updated_at DROP NOT NULL;
