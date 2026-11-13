@@ -152,13 +152,13 @@ identifiable loser to notify. Exactly as §10.8.3 specifies.
 
 ## 7. What is **not** verified
 
-- **The full 248-assertion fixture** (165 assertions when this run was
+- **The full 271-assertion fixture** (165 assertions when this run was
   made). The MCP cannot bind parameters or
   target another database, so the harness — which drives `psql` — cannot run
   against the instance from here. The statements above were run by hand
   through the MCP instead: the item statement's update path, the create
   statement, the ledger statement and both archive-conflict branches. The
-  other 33 scenario groups (42 now) remain verified on PostgreSQL 17.11
+  other 33 scenario groups (45 now) remain verified on PostgreSQL 17.11
   locally.
 - **A backup, and a restore of that backup.** `pg_dump` and `pg_restore` need
   a direct connection, which the sandbox cannot make.
