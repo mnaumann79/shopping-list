@@ -1827,9 +1827,11 @@ request. `scripts/assert-connection-role.mjs` connects with the same
 `DATABASE_URL` the application uses and runs the assertions of
 `scripts/app-role.sql` against the role that connection authenticated as —
 the same assertions the CI makes about the role named `app`, with the subject
-as the only difference. A superuser, a role with `BYPASSRLS` and the owner of
-a table in `public` end the process, and the message names the role and says
-what it costs: the household isolation is not being enforced by the database.
+as the only difference. The findings that mean the policies are not enforced
+at all — a superuser, a role with `BYPASSRLS`, the owner of a table in
+`public` — end the process against a deployment, and the message names the
+role and says what it costs: the household isolation is not being enforced by
+the database.
 
 **It refuses against a deployment and reports against a local database.** The
 rule for "local" is the one the migration runner already uses — `localhost`,
