@@ -3532,6 +3532,28 @@ sync, when the client sets the cookie to the household it is showing.
 | Change a member's role | Owner |
 | Delete a user | Platform admin (`ADMIN_EMAIL`) |
 
+**Who may be removed.** The rows name roles, so "remove a member" means a
+row whose role is `member`. **An admin may remove a plain member; only the
+owner may remove an admin, and only the owner may remove the owner** — and
+there is exactly one owner per household, because an invitation grants
+`admin` or `member` and only the creator's bootstrap makes an owner. Two
+reasons, both about irreversibility:
+
+- **Removing an owner is irreversible.** Nothing can grant the owner role
+  again — the invitation grants `admin` or `member`, and only the creator's
+  bootstrap makes an owner — while removing an admin is not, because the
+  owner can invite them back as an admin.
+- **The row-level security delete policy is deliberately coarser.** Any
+  admin may delete any row of the household. RLS is the second layer, and
+  the fine rule — which rows an admin may remove — belongs in the
+  application layer, which is where every rule in this table is enforced.
+
+**Nobody may remove themselves**, for the same reason: the owner cannot be
+recreated, and the membership policy admits no self-delete either, so the
+guard and the database agree rather than one being an extra rule the other
+does not share. Leaving a household is not a capability the product has
+specified, so it is out of scope; if it is wanted, it is a product decision.
+
 **Every one of these is enforced in the server application layer, not in the UI.**
 The current gap (S-1, S-3) is closed. 📋 **SPEC**: a shared
 `requireHouseholdRole(householdId, userId, roles)` helper is used by every
