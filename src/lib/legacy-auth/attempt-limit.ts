@@ -35,8 +35,12 @@ const MAX_PER_EMAIL = 5;
  * How many counters are kept.
  *
  * A hard cap: a caller that keeps trying new addresses cannot make the
- * map grow, and the oldest window goes when the cap is reached. The maps
- * are separate, so evicting an address never frees a client's quota.
+ * map grow. A counter with failures is never evicted — evicting one would
+ * hand the address it belongs to a fresh quota, and a flood of other
+ * addresses is all it takes — so the map makes room with the counters
+ * that carry no quota, and a map that is still full refuses the new key.
+ * The maps are separate, so refusing an address never frees a client's
+ * quota.
  */
 const MAX_KEYS = 1000;
 
@@ -65,11 +69,19 @@ export function admit(client: string, email: string): boolean {
   // be able to make the map grow by trying new addresses.
   const clientCounter = counter(clients, client);
 
+  if (!clientCounter) {
+    return false;
+  }
+
   if (clientCounter.failures + clientCounter.inFlight >= MAX_PER_CLIENT) {
     return false;
   }
 
   const emailCounter = counter(emails, email);
+
+  if (!emailCounter) {
+    return false;
+  }
 
   if (emailCounter.failures + emailCounter.inFlight >= MAX_PER_EMAIL) {
     return false;
@@ -91,27 +103,56 @@ export function settle(client: string, email: string, succeeded: boolean): void 
   release(emails, email, succeeded, succeeded);
 }
 
-/** The counter for the key, or a fresh one when the window has passed. */
-function counter(counters: Map<string, Counter>, key: string): Counter {
+/**
+ * The counter for the key, or a fresh one when the window has passed.
+ *
+ * `undefined` when the map has no room left: the caller is refused rather
+ * than one of the counters being evicted to make room for it.
+ */
+function counter(counters: Map<string, Counter>, key: string): Counter | undefined {
   const existing = counters.get(key);
 
   if (existing && Date.now() - existing.startedAt <= WINDOW_MS) {
     return existing;
   }
 
-  // The map is a hard cap. The entries are inserted in the order their
-  // windows started, so the oldest is the first to go — and the expired
-  // ones are the oldest, so they are cleaned up on the way.
+  // The map is a hard cap, and it is made to keep every quota it holds.
+  // A counter with failures stays — evicting it would let a flood of
+  // other addresses reset the quota of the address being guessed — so
+  // the map gives up the room it can give up, and refuses the key when
+  // it cannot.
   if (counters.size >= MAX_KEYS) {
-    const oldest = counters.keys().next();
-    if (!oldest.done) {
-      counters.delete(oldest.value);
+    makeRoom(counters);
+
+    if (counters.size >= MAX_KEYS) {
+      return undefined;
     }
   }
 
   const fresh: Counter = { failures: 0, startedAt: Date.now(), inFlight: 0 };
   counters.set(key, fresh);
   return fresh;
+}
+
+/**
+ * Makes room in the map, without weakening a quota.
+ *
+ * Two kinds of counter go: the expired ones, which protect nobody, and the
+ * ones that carry no quota — no failures and nothing in flight say nothing
+ * about the attempts that were made. A counter with failures stays whatever
+ * the pressure, because the address it belongs to is owed its quota.
+ */
+function makeRoom(counters: Map<string, Counter>): void {
+  const now = Date.now();
+
+  for (const [key, existing] of counters) {
+    const expired = now - existing.startedAt > WINDOW_MS;
+    const carriesNoQuota = existing.failures === 0 && existing.inFlight === 0;
+
+    if (expired || carriesNoQuota) {
+      counters.delete(key);
+    }
+  }
 }
 
 /** Settles one counter: the reservation is released, and the failure counted. */
