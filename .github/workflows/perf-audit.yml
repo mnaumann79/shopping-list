@@ -37,10 +37,8 @@ jobs:
       # which is what this audit measured before the auth swap as well.
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
       NEXT_PUBLIC_APP_URL: http://localhost:3000
-      # The verify script never creates an invitation, so these are never
-      # read — but the invitation mailer is configured at startup and
-      # tolerates placeholder values just fine.
-      RESEND_API_KEY: ci-dummy-not-used
+      # The verify script never creates an invitation. There is no Resend key:
+      # with no key the invitation mail is skipped, and nothing is sent.
       RESEND_FROM_EMAIL: noreply@example.com
       NODE_ENV: production
       BASE_URL: http://localhost:3000
