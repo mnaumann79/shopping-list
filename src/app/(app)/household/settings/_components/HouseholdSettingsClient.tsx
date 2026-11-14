@@ -136,7 +136,7 @@ export default function HouseholdSettingsClient({
     if (!inviteEmail.trim() || !activeHouseholdId) return;
     setInviting(true);
     try {
-      const res = await fetch("/api/households/invite", {
+      const res = await fetch("/api/households/invitations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: inviteEmail.trim() }),
