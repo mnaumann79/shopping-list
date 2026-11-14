@@ -1,7 +1,8 @@
-import { combineChunks, createServerClient, stringFromBase64URL } from "@supabase/ssr";
+import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { AUTH_COOKIE_NAME, getSupabaseConfig } from "./config";
 import { readHouseholdId } from "./household-cookie";
+import { readCookieSession } from "./session-cookie";
 
 /**
  * What the application knows about the caller, once it has been verified.
@@ -77,9 +78,6 @@ export async function createSupabaseServerClient() {
   });
 }
 
-/** The prefix `@supabase/ssr` writes before a base64url-encoded cookie value. */
-const BASE64_PREFIX = "base64-";
-
 /**
  * The access token in the session cookie, without refreshing anything.
  *
@@ -92,24 +90,19 @@ const BASE64_PREFIX = "base64-";
  *
  * So the token is read straight out of the cookie and handed to `getClaims`,
  * which verifies it. `getClaims` with an explicit token never refreshes.
+ *
+ * The cookie is read with the same helper the edge guard reads it with, so
+ * the two guards cannot come to different conclusions about what the cookie
+ * holds.
  */
 async function readAccessToken(): Promise<string | null> {
   const cookieStore = await cookies();
 
-  const encoded = await combineChunks(
-    AUTH_COOKIE_NAME,
+  const session = await readCookieSession(
     (name) => cookieStore.get(name)?.value ?? null,
   );
-  if (!encoded || !encoded.startsWith(BASE64_PREFIX)) return null;
 
-  try {
-    const session = JSON.parse(stringFromBase64URL(encoded.slice(BASE64_PREFIX.length)));
-    return typeof session?.access_token === "string" ? session.access_token : null;
-  } catch {
-    // A cookie that cannot be decoded is not a session. The library treats
-    // the same thing as absent.
-    return null;
-  }
+  return session?.accessToken ?? null;
 }
 
 /**

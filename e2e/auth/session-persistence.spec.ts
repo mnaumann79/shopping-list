@@ -36,19 +36,17 @@ test.describe("Session persistence", () => {
 test.describe("Session persistence of an unauthenticated visitor", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  // The app sends a signed-out visitor to /sign-in, but it does not put the
-  // page they asked for in `returnTo` - the redirect carries no query string.
-  // The sign-in page does honour a `returnTo` when one is present in the URL
-  // (see the login spec), but nothing in the app ever creates one. The gap is
-  // recorded in the pull request; this spec asserts today's behaviour.
+  // The guard sends a signed-out visitor to /sign-in, and it carries the page
+  // they asked for: the sign-in page honours a `returnTo` when one is present
+  // in the URL (see the login spec), and now something creates one.
   test("unauthenticated user visiting /dashboard is redirected to /sign-in", async ({ page }) => {
     await page.goto("/dashboard");
 
     // The pathname is /sign-in whether or not the redirect carries a query
     // string.
     await expect(page).toHaveURL((url) => url.pathname === "/sign-in");
-    // Today's behaviour: no returnTo, so the visitor loses the page they
-    // asked for.
-    expect(new URL(page.url()).searchParams.get("returnTo")).toBeNull();
+    // The guard carries the page the visitor asked for, so they come back to
+    // it after signing in.
+    expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/dashboard");
   });
 });

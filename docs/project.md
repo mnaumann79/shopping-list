@@ -3587,62 +3587,137 @@ member of the household the cookie names, the request is rejected (§12.5).
 caller may.** This is the same rule §12.1 applies to the cached client
 session, one level up.
 
-### 12.1b The optimistic guard runs, and it carries a returnTo
+### 12.1b The guard decides from the session, and it carries the destination
 
-- **The repository's root `middleware.ts` runs.** Next.js builds it: the
-  build's edge-chunk source map names the source
-  `turbopack:///[project]/middleware.ts`, and `.next/server/middleware-manifest.json`
-  registers it with the root file's matcher,
-  `/((?!api|_next/static|_next/image|favicon.ico).*)`. The resolver accepts
-  the file in the project root as well as in `src/`
-  (`next/dist/build/utils.js`: `isMiddlewareFile()` and
-  `getPossibleMiddlewareFilenames()`).
-- **Why the belief existed, so it does not come back.**
-  `next/dist/build/index.js` computes
-  `rootDir = path.join(pagesDir || appDir, '..')`, which with the app under
-  `src/` is `<root>/src`; the scan of *that* directory never sees the root
-  file. That is a true statement about that scan and a false conclusion about
-  the file — the root folder is scanned by a second path. The specification
-  asserted the conclusion without the measurement, and the assertion was
-  repeated until it looked like a fact.
-- **What the running guard does.** It reads the session cookie's *presence*.
-  An unauthenticated visitor to a protected prefix (`/dashboard`,
-  `/household`, `/settings`) is redirected to `/sign-in` **with** a `returnTo`
-  parameter naming the path they asked for. Measured against the build of
-  P0S-T21's branch (pull request #48), which is the change the merged result
-  carries: `/dashboard` without a session answers **307 →
-  `/sign-in?returnTo=%2Fdashboard`**.
-- **The guard has one branch.** It used to have a second one — a visitor with
-  a cookie on an auth route (`/sign-in`, `/sign-up`) was redirected to
-  `/dashboard` — and it does not have it any more: that branch is what caught
-  a visitor whose access token had lapsed in a redirect loop, and P0S-T21
-  (pull request #48) removed it. Measured against the same build: `/sign-up`
-  with a session cookie answers **200**, not a redirect — the evidence for
-  the branch's removal.
-- **It is an optimistic guard, and it is not the authorization layer.** The
-  file's own security note is right: the cookie's presence is not a session,
-  and the session must also be validated server-side. SEC-01 stands: every
-  API route verifies the session server-side, and the app layout's
-  server-side check (`src/app/(app)/layout.tsx`) validates it for the pages
-  under it.
-- **Both guards run, and they do not behave alike.** The middleware carries
-  the `returnTo`; the layout's `redirect("/sign-in")` does not, so a visitor
-  the layout sends to the sign-in page does not come back to the page they
-  asked for.
-- **The redirect loop a lapsed access token caused is gone.** The guard used
-  to bounce `/sign-in` → `/dashboard` on the cookie's presence while the
-  layout's server-side check bounced `/dashboard` → `/sign-in`, so a visitor
-  whose access token had lapsed was caught between the two. The loop was
-  pre-existing — the guard read the cookie's presence the same way before the
-  auth swap — and it ended when the guard stopped redirecting on the cookie's
-  presence: the sign-in page and the sign-up page own that check now, and they
-  ask the browser for the session, so a lapsed token can be renewed instead
-  of sending the visitor round in circles.
-- **What happens to the file is a cutover decision.** Whether the guard moves
-  to `src/middleware.ts`, is replaced, or is deleted is decided with the
-  cutover (§13.2; D-11, backlog item B1-T01). Until it is decided the file
-  stays where it is, and it keeps running: it reads like the authorization
-  layer, and it is not one.
+**The file runs.** Next.js builds the repository's root `middleware.ts`: the
+build's edge-chunk source map names the source
+`turbopack:///[project]/middleware.ts`, and `.next/server/middleware-manifest.json`
+registers it with the root file's matcher,
+`/((?!api|_next/static|_next/image|favicon.ico).*)`. The resolver accepts
+the file in the project root as well as in `src/`
+(`next/dist/build/utils.js`: `isMiddlewareFile()` and
+`getPossibleMiddlewareFilenames()`), and the build of this branch says so
+again — `ƒ Proxy (Middleware)`.
+
+**Why the belief existed, so it does not come back.**
+`next/dist/build/index.js` computes
+`rootDir = path.join(pagesDir || appDir, '..')`, which with the app under
+`src/` is `<root>/src`; the scan of *that* directory never sees the root
+file. That is a true statement about that scan and a false conclusion about
+the file — the root folder is scanned by a second path. The specification
+asserted the conclusion without the measurement, and the assertion was
+repeated until it looked like a fact.
+
+**What the guard is now.** It reads the session cookie, and it decides from
+the **session**, not from the cookie's presence:
+
+- **signed in** — the access token verified: the auth server signed it and it
+  has not expired. The request goes through.
+- **maybe signed in** — the token did not verify, but the cookie still holds a
+  refresh token, so the browser may be able to renew the session on its own;
+  or the verification could not be carried out at all. The request goes
+  through, and the application's own check decides.
+- **not signed in** — there is no session, and no way to make one. The visitor
+  is sent to the sign-in page **with the page they asked for**.
+
+**The four cases, measured against the build of this branch** — the requests
+carry the cookie, the answers are the application's:
+
+| The cookie holds | The answer | The session cookie |
+| --- | --- | --- |
+| nothing | **307 → `/sign-in?returnTo=%2Fdashboard`** | — |
+| a token the auth server signed | the request goes through | kept |
+| a lapsed access token, a refresh token behind it | the request goes through, and the layout's own check answers **307 → `/sign-in?returnTo=%2Fdashboard`** | kept |
+| a lapsed access token, no refresh token behind it | **307 → `/sign-in?returnTo=%2Fdashboard`** | **cleared** |
+| a tampered token | **307 → `/sign-in?returnTo=%2Fdashboard`** | **cleared** |
+
+The third row is the one the redirect loop turned on. The guard does **not**
+refuse a visitor whose access token has merely lapsed, because the browser
+still holds the refresh token and can renew the session — the page's own
+`getSession()` does exactly that. The guard refuses only what it can show the
+visitor cannot use, and it clears the cookie when it refuses, because the
+browser does not know that the session is dead and would send the visitor
+round in circles.
+
+**The idle-session recovery still works.** Measured in a browser against the
+same build, with a cookie whose access token had lapsed and whose refresh
+token was good:
+
+```
+/sign-in?returnTo=%2Fdashboard   the layout's own check sent the visitor there
+/sign-in?returnTo=%2Fdashboard   the browser renewed the session
+/dashboard                       the guard accepted the renewed session
+/onboarding                      the layout: a signed-in visitor with no household
+```
+
+The visitor is not asked to sign in again, and the loop does not return.
+
+**Every protected route carries the destination**, and the pages a visitor may
+reach without a session are not redirected:
+
+| The path | The answer |
+| --- | --- |
+| `/dashboard` | 307 → `/sign-in?returnTo=%2Fdashboard` |
+| `/history` | 307 → `/sign-in?returnTo=%2Fhistory` |
+| `/household` | 307 → `/sign-in?returnTo=%2Fhousehold` |
+| `/household/settings` | 307 → `/sign-in?returnTo=%2Fhousehold%2Fsettings` |
+| `/onboarding` | 307 → `/sign-in?returnTo=%2Fonboarding` |
+| `/sign-in`, `/sign-up`, `/join` | **200** — no redirect |
+
+**The auth-route redirect is gone.** A visitor with a session on `/sign-in`
+gets the sign-in page, not a redirect: measured, **200**. That branch is what
+caught a visitor whose access token had lapsed in a circle between this guard
+and the layout's.
+
+**The two guards agree.** Both verify the same access token with the same
+call (`getClaims`), and neither refreshes it — the layout cannot write a
+refreshed token back to the cookie from a Server Component (§12.1a). Measured:
+the session the auth server signed was accepted by the guard *and* by the
+layout — the request went through to `/dashboard`, and the layout sent it on
+to `/onboarding`, because that caller had no household.
+
+**How the session is verified in the edge runtime, and what it costs.** The
+guard verifies with a plain `@supabase/supabase-js` client, not the server's:
+the server's client reads the request's cookies through `next/headers`, which
+the edge runtime does not have. The guard reads the cookie itself, with the
+same helper the server uses, so the two read the same session. The
+verification is `auth.getClaims(accessToken)`:
+
+- **A lapsed token is never verified.** The library refuses an expired token
+  before it looks at the signature, so the guard reads the expiry out of the
+  token itself and does not ask about a token it already knows has lapsed.
+- **An asymmetric key is verified locally.** With an ES256 or RS256 token that
+  names a `kid`, the library fetches the project's signing key once and
+  verifies the signature with WebCrypto — in the edge runtime, with no
+  Node-only API. Measured against the development instance, which signs with
+  ES256: after a fresh start the auth server saw **two** calls for the first
+  request (both `GET /.well-known/jwks.json` — one from the guard's client,
+  one from the server's) and **none** for the requests after it.
+- **A symmetric key costs a call per request.** A project that signs with
+  HS256 has no key to fetch, and the library falls back to `getUser()` — one
+  call to the auth server for every request the guard sees.
+- **A question the guard cannot answer is not a refusal.** If the auth server
+  cannot be reached, the request goes through and the application's own check
+  decides.
+
+**It is not the authorization layer.** SEC-01 stands: every API route verifies
+the session server-side, and the app layout's check validates it for the
+pages under it. The guard is an early redirect, and it decides nothing that
+the server does not decide again.
+
+**The protected set comes from one place** —
+`src/lib/supabase/protected-routes.ts`. The test beside it walks
+`src/app/(app)` and asserts that the list still covers every page the
+application's own layout guards, so the two cannot drift apart.
+
+**The destination has one rule** — `src/lib/return-to.ts`. A destination is a
+page of this application when it starts with a single slash and is not the
+sign-in or the sign-up page; `//host` is another site. The rule is in one
+place because the guard builds the destination and the sign-in page follows
+it — and a visitor can type one in.
+
+**What the file is, is decided in D-11** (`docs/plan.md`): it is replaced by
+this guard — not moved to `src/`, not deleted.
 
 ### 12.2 Offline session expiry (scenario 13)
 
@@ -4176,8 +4251,8 @@ exists for exactly one request, over TLS, and is never logged.
 
 **The route does not redirect.** It answers, and the client decides where to
 go next — so it neither depends on nor assumes the middleware's `returnTo`
-behaviour (§12.1b), which the middleware carries and the layout's
-server-side check does not.
+behaviour (§12.1b), which the middleware and the layout's
+server-side check both carry.
 
 **The condition on the GoTrue account is what keeps the two sides apart.** The
 cutover provisions a GoTrue user for every legacy user, with a random
@@ -4222,7 +4297,7 @@ not a permanent second authentication system.
 
 | ID | Requirement |
 | --- | --- |
-| SEC-01 | Every API route MUST verify the session server-side. The middleware is an optimistic redirect only and MUST NOT be treated as an authorization layer — it reads the session cookie's *presence*, and the repository's root `middleware.ts` **does** run (§12.1b). The session is validated server-side by the app layout's check and by every API route. |
+| SEC-01 | Every API route MUST verify the session server-side. The middleware is an optimistic redirect only and MUST NOT be treated as an authorization layer — it decides from the session rather than from the cookie's presence, and the repository's root `middleware.ts` **does** run (§12.1b). The session is validated server-side by the app layout's check and by every API route. |
 | SEC-02 | Every household-scoped query MUST be scoped by `household_id`, enforced by a shared scope helper that is the only sanctioned access path to household-scoped tables. Row-level security is a **second** layer on top of it, not a replacement (ADR-12, §9.2b). |
 | SEC-03 | Only owners/admins may invite, mint join links, or remove members — enforced server-side, with **403** responses (not 500). |
 | SEC-04 | No endpoint may return data without a session check. `GET /api/invitation-email` must require a session or be removed. |
