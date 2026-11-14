@@ -243,13 +243,19 @@ Each of these cost an hour:
       `cutover_rehearsal_` (it creates one), and it refuses a target
       without an `auth` schema, because a plain PostgreSQL would take the
       data and silently lose the identities.
-      **It also writes to the target, and that write stays.** The GoTrue
-      accounts the rehearsal needs are inserted into the target's
-      `auth.users` — an account that already exists is reused, so a
-      rehearsal may be run more than once — and those rows are not in the
-      scratch database, so dropping the scratch does not remove them. The
-      target is therefore the **development instance**, and the rehearsal
-      is not something to point at production.
+      **It writes only inside its scratch database, and it drops that
+      database when the run completes.** The identities the mapping needs
+      are issued by the rehearsal and put in the scratch database's
+      `auth.users`, where GoTrue manages nothing; the instance's own
+      `auth.users` is GoTrue's, and the rehearsal does not write to it. The
+      tables the instance holds are left exactly as they were. The run
+      against the development instance is recorded in
+      [`docs/cutover-rehearsal.md`](./docs/cutover-rehearsal.md).
+      **A run that fails leaves its scratch database behind**, with
+      whatever it had restored: the rollback is the last step, and a
+      failure skips it. The script prints the database's name; drop it by
+      hand with the forced drop the rollback itself uses:
+      `psql "$INSTANCE_URL" -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS "cutover_rehearsal_…" WITH (FORCE)'`.
 - [ ] **The rehearsal passes.** It compares the row counts of six tables —
       `items`, `categories`, `stores`, `household_join_links`, `item_stores`
       and the legacy `user` — checks that no identity is orphaned, and fails
