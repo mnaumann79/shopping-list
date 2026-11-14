@@ -43,11 +43,11 @@ and the rest of this section is what was learned the hard way.
   pnpm 10 and later can fail `--frozen-lockfile` against it. The CI
   workflow pins both.
 - **A build in a tree whose `node_modules` is a symlink fails as if the
-  build were broken.** Turbopack rejects a symlink pointing out of the
-  filesystem root — "Symlink [project]/node_modules is invalid, it points
-  out of the filesystem root" — so a job that ever sees a tree like that
-  fails on the build rather than on the code. Install the dependencies in
-  the tree the build runs in.
+  build were broken.** Turbopack rejects a `node_modules` symlink whose
+  target is outside the project root — "Symlink [project]/node_modules is
+  invalid, it points out of the filesystem root" — so a job that ever sees a
+  tree like that fails on the build rather than on the code. Install the
+  dependencies in the tree the build runs in.
 - **The install must not run with `NODE_ENV=production`.** pnpm skips the
   devDependencies, and `pnpm build` then fails with "Cannot find module
   'typescript'". CI overrides `NODE_ENV` for the install only, and the
@@ -140,9 +140,10 @@ The application cannot set it for itself.
 
 **Read "self-signed certificate in certificate chain" as "the path is
 wrong", not as "the certificate is absent"** — the two are the same
-message. The deployment refuses to start, and the reason is the last line in
-the log: the check at the door ends the process when it cannot reach the
-database, and says what it could not reach and why. A deployment that will
+message. The deployment refuses to start, and the reason is in the log: the
+line that says "Refusing to serve" names what could not be reached and
+why — read that line, not the advice under it, which names the certificate
+whether or not the certificate is what went wrong. A deployment that will
 not start is a deployment that cannot serve anybody, which is the better
 shape for this to fail in.
 
