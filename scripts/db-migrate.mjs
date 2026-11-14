@@ -1,6 +1,13 @@
 /**
- * db:migrate - applies the migrations in db/migrations/ to the database
- * in DATABASE_URL.
+ * db:migrate - applies the migrations in db/migrations/ to the database in
+ * OWNER_DATABASE_URL, or in DATABASE_URL when that one is not set.
+ *
+ * The migrations need the owner's rights: they create roles, alter tables
+ * and grant privileges, and the application's own role may do none of that.
+ * OWNER_DATABASE_URL is the name the integration suite's environment
+ * already carries for the owner's connection - which is what lets
+ * `pnpm test:integration` bring the database up to date before the suite
+ * runs, with the suite's own connections unchanged.
  *
  * The migration folder is the source of truth for the schema; db/init.sql is
  * the flat snapshot of the same schema and is never read here. The folder is
@@ -44,11 +51,12 @@ const ledgerTable = 'applied';
 // lock, so it survives the COMMIT at the end of every migration.
 const lockKey = 874512301;
 
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = process.env.OWNER_DATABASE_URL || process.env.DATABASE_URL;
 if (!databaseUrl) {
   console.error(
-    'DATABASE_URL is not set. Point it at the database to migrate, e.g.\n' +
-      '  DATABASE_URL=postgresql://postgres:postgres@localhost:5432/shopping_list node scripts/db-migrate.mjs',
+    'Neither OWNER_DATABASE_URL nor DATABASE_URL is set. Point one of them at the\n' +
+      'database to migrate, e.g.\n' +
+      '  OWNER_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/shopping_list pnpm db:migrate',
   );
   process.exit(1);
 }
@@ -128,7 +136,10 @@ if (!isDevelopmentHost(host) && !optedIn()) {
   process.exit(1);
 }
 
-console.log(`Migrating ${host}${database ? `/${database}` : ''}`);
+console.log(
+  `Migrating ${host}${database ? `/${database}` : ''} ` +
+    `(from ${process.env.OWNER_DATABASE_URL ? 'OWNER_DATABASE_URL' : 'DATABASE_URL'})`,
+);
 
 try {
   await client.connect();
@@ -149,6 +160,23 @@ try {
 
   if (files.length === 0) {
     console.log('No migrations found.');
+  }
+
+  // A database that has never had a migration applied is behind the
+  // repository's, and the ledger says which: the files that are not in it.
+  //
+  // The runner has always spoken when a file *changed* after it was applied.
+  // It said nothing when a migration had never been applied, and a stack
+  // that was seven migrations behind was discovered by four tests failing
+  // with messages that name the isolation rather than the schema. So the
+  // missing files are named, before they are applied.
+  const missing = files.filter((file) => !applied.has(file));
+  if (missing.length > 0) {
+    console.log(
+      `\nThe database is missing ${missing.length} migration${missing.length === 1 ? '' : 's'}:\n` +
+        missing.map((file) => `  ${file}`).join('\n') +
+        '\nApplying them now.',
+    );
   }
 
   for (const file of files) {
