@@ -2,7 +2,7 @@ import { test as setup, type Page } from "@playwright/test";
 import fs from "fs";
 import path from "path";
 import { config as loadEnv } from "dotenv";
-import { recordAddress } from "./support/helpers";
+import { fillField, recordAddress } from "./support/helpers";
 
 // The config loads .env.test too; loading it here keeps this file
 // self-contained, and dotenv never overrides a variable that is already set.
@@ -46,9 +46,9 @@ setup("create authenticated user with household", async ({ page }) => {
 
 async function authenticate(page: Page, email: string, password: string) {
   await page.goto("/sign-up");
-  await page.getByLabel("Name").fill("Test User");
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await fillField(page, "Name", "Test User");
+  await fillField(page, "Email", email);
+  await fillField(page, "Password", password);
 
   if (!(await submitForm(page, "Sign up", SIGN_UP_ENDPOINT))) {
     throw new Error(`The sign-up form sent no request: ${(await formError(page)) ?? "no error shown"}`);
@@ -62,8 +62,8 @@ async function authenticate(page: Page, email: string, password: string) {
 
 async function signIn(page: Page, email: string, password: string, signUpError: string | null) {
   await page.goto("/sign-in");
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(password);
+  await fillField(page, "Email", email);
+  await fillField(page, "Password", password);
 
   const sent = await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
   if (sent && (await outcome(page)) === "in") return;
@@ -84,7 +84,7 @@ async function signIn(page: Page, email: string, password: string, signUpError: 
  */
 async function createHousehold(page: Page, householdName: string) {
   await page.goto("/onboarding");
-  await page.getByLabel("Household name").fill(householdName);
+  await fillField(page, "Household name", householdName);
   await page.getByRole("button", { name: "Create household" }).click();
   await page.waitForURL(/\/dashboard$/, { timeout: 30_000 });
 }

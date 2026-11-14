@@ -1,5 +1,5 @@
 import { test } from "@playwright/test";
-import { expect, PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
+import { expect, fillField, PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
 import { registerUser, SESSION_COOKIE, SIGN_IN_ENDPOINT } from "./helpers";
 
 // AUTH-02: User can log in with email and password
@@ -14,8 +14,8 @@ test.describe("Login", () => {
     await registerUser(browser, { email, householdName: `Login Household ${email}` });
 
     await page.goto("/sign-in");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(PASSWORD);
+    await fillField(page, "Email", email);
+    await fillField(page, "Password", PASSWORD);
 
     await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
@@ -29,8 +29,8 @@ test.describe("Login", () => {
     await registerUser(browser, { email, householdName: `Login Household ${email}` });
 
     await page.goto("/sign-in");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill("TheWrongPassword1!");
+    await fillField(page, "Email", email);
+    await fillField(page, "Password", "TheWrongPassword1!");
 
     await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
@@ -43,8 +43,8 @@ test.describe("Login", () => {
     const email = uniqueEmail("ghost");
 
     await page.goto("/sign-in");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(PASSWORD);
+    await fillField(page, "Email", email);
+    await fillField(page, "Password", PASSWORD);
 
     await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
@@ -57,8 +57,8 @@ test.describe("Login", () => {
     await registerUser(browser, { email, householdName: `Login Household ${email}` });
 
     await page.goto("/sign-in");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(PASSWORD);
+    await fillField(page, "Email", email);
+    await fillField(page, "Password", PASSWORD);
 
     await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
@@ -85,8 +85,8 @@ test.describe("Login", () => {
     // The guard carries the page the visitor asked for.
     expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/history");
 
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(PASSWORD);
+    await fillField(page, "Email", email);
+    await fillField(page, "Password", PASSWORD);
 
     await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 

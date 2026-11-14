@@ -1,5 +1,5 @@
 import { test } from "@playwright/test";
-import { expect, PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
+import { expect, fillField, PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
 import { registerUser, SESSION_COOKIE, SIGN_UP_ENDPOINT, trackRequests } from "./helpers";
 
 // AUTH-01: User can sign up with email and password
@@ -15,9 +15,9 @@ test.describe("Sign up", () => {
     const email = uniqueEmail("signup");
 
     await page.goto("/sign-up");
-    await page.getByLabel("Name").fill("Test User");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(PASSWORD);
+    await fillField(page, "Name", "Test User");
+    await fillField(page, "Email", email);
+    await fillField(page, "Password", PASSWORD);
 
     await submitForm(page, "Sign up", SIGN_UP_ENDPOINT);
 
@@ -38,9 +38,9 @@ test.describe("Sign up", () => {
     const signups = trackRequests(page, SIGN_UP_ENDPOINT);
 
     await page.goto("/sign-up");
-    await page.getByLabel("Name").fill("Test User");
+    await fillField(page, "Name", "Test User");
     // The email field is left empty on purpose.
-    await page.getByLabel("Password").fill(PASSWORD);
+    await fillField(page, "Password", PASSWORD);
 
     await page.getByRole("button", { name: "Sign up" }).click();
 
@@ -54,9 +54,9 @@ test.describe("Sign up", () => {
     const signups = trackRequests(page, SIGN_UP_ENDPOINT);
 
     await page.goto("/sign-up");
-    await page.getByLabel("Name").fill("Test User");
-    await page.getByLabel("Email").fill("not-an-email");
-    await page.getByLabel("Password").fill(PASSWORD);
+    await fillField(page, "Name", "Test User");
+    await fillField(page, "Email", "not-an-email");
+    await fillField(page, "Password", PASSWORD);
 
     await page.getByRole("button", { name: "Sign up" }).click();
 
@@ -69,9 +69,9 @@ test.describe("Sign up", () => {
     const signups = trackRequests(page, SIGN_UP_ENDPOINT);
 
     await page.goto("/sign-up");
-    await page.getByLabel("Name").fill("Test User");
-    await page.getByLabel("Email").fill(uniqueEmail("signup"));
-    await page.getByLabel("Password").fill("short");
+    await fillField(page, "Name", "Test User");
+    await fillField(page, "Email", uniqueEmail("signup"));
+    await fillField(page, "Password", "short");
 
     await page.getByRole("button", { name: "Sign up" }).click();
 
@@ -85,9 +85,9 @@ test.describe("Sign up", () => {
     await registerUser(browser, { email });
 
     await page.goto("/sign-up");
-    await page.getByLabel("Name").fill("Test User");
-    await page.getByLabel("Email").fill(email);
-    await page.getByLabel("Password").fill(PASSWORD);
+    await fillField(page, "Name", "Test User");
+    await fillField(page, "Email", email);
+    await fillField(page, "Password", PASSWORD);
 
     await submitForm(page, "Sign up", SIGN_UP_ENDPOINT);
 

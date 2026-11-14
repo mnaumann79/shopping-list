@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { getAcceptInvitePath } from "@/lib/app-routes";
 import {
+  fillField,
   closePool,
   inviteFromSettings,
   INVITE_TIMEOUT,
@@ -113,9 +114,9 @@ test.describe("Email invite flow", () => {
       await fresh.goto(getAcceptInvitePath(invitation.id, email));
       await fresh.waitForURL(/\/sign-up/, { timeout: 60_000 });
 
-      await fresh.getByLabel("Name", { exact: true }).fill("Invitee");
+      await fillField(fresh, "Name", "Invitee");
       await expect(fresh.getByLabel("Email", { exact: true })).toHaveValue(email);
-      await fresh.getByLabel("Password", { exact: true }).fill(PASSWORD);
+      await fillField(fresh, "Password", PASSWORD);
       await submitForm(fresh, "Sign up", "/auth/v1/signup");
 
       // The invitation id survives the round trip through sign-up, so the

@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  fillField,
   listHouseholds,
   newUserContext,
   signUp,
@@ -48,7 +49,7 @@ test.describe("Household onboarding", () => {
       await signUp(page, { name: "Creator", email: uniqueEmail("creator") }, /\/onboarding/);
 
       const householdName = `Onboarding Household ${Date.now()}`;
-      await page.getByLabel("Household name").fill(householdName);
+      await fillField(page, "Household name", householdName);
       await submitForm(page, "Create household", "/api/households");
 
       await expect(page).toHaveURL(/\/dashboard/);
@@ -65,7 +66,7 @@ test.describe("Household onboarding", () => {
       await signUp(page, { name: "Switcher", email: uniqueEmail("switcher") }, /\/onboarding/);
 
       const householdName = `Switcher Household ${Date.now()}`;
-      await page.getByLabel("Household name").fill(householdName);
+      await fillField(page, "Household name", householdName);
       await submitForm(page, "Create household", "/api/households");
       await expect(page).toHaveURL(/\/dashboard/);
 
