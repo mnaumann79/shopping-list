@@ -140,12 +140,12 @@ The application cannot set it for itself.
 
 **Read "self-signed certificate in certificate chain" as "the path is
 wrong", not as "the certificate is absent"** — the two are the same
-message. The deployment refuses to start, and the reason is in the last
-thing it printed: the line that says "Refusing to serve" names what could
-not be reached and why — read that line, not the advice under it, which
-names the certificate whether or not the certificate is what went wrong. A
-deployment that will not start is a deployment that cannot serve anybody,
-which is the better shape for this to fail in.
+message. The deployment refuses to start, and the reason is in the log: the
+line that says "Refusing to serve" names what could not be reached and
+why — read that line, not the advice under it, which names the certificate
+whether or not the certificate is what went wrong. A deployment that will
+not start is a deployment that cannot serve anybody, which is the better
+shape for this to fail in.
 
 The alternative is an image that installs the certificate into the system's
 trust store. With `NODE_OPTIONS=--use-openssl-ca` (Node 22 and later) Node
