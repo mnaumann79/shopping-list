@@ -39,8 +39,7 @@ jobs:
       DATABASE_URL: postgresql://app:app@127.0.0.1:54322/postgres
       DB_DRIVER: node-postgres
       NEXT_PUBLIC_APP_URL: http://localhost:3000
-      # Placeholders: nothing is ever sent.
-      RESEND_API_KEY: ci-dummy-not-used
+      # No Resend key: the invitation mail is skipped, and nothing is sent.
       RESEND_FROM_EMAIL: noreply@example.com
 
     steps:

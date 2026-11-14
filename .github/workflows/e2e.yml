@@ -154,7 +154,9 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ steps.stack.outputs.anon }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ steps.stack.outputs.service }}
           NEXT_PUBLIC_APP_URL: http://localhost:3000
-          RESEND_API_KEY: ci-dummy-not-used
+          # No Resend key: the invitation mail is skipped and the invitation
+          # row is written. A placeholder key would make the mail fail, the
+          # route throw, and the invitation never be written.
           RESEND_FROM_EMAIL: noreply@example.com
           PLAYWRIGHT_BASE_URL: http://localhost:3000
         run: pnpm test:e2e
