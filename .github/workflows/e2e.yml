@@ -146,6 +146,17 @@ jobs:
       # The Supabase values come from the stack above. The transitional route
       # the specs sign in through needs the service-role key, because it
       # provisions and re-keys GoTrue accounts.
+      #
+      # The suite has to finish inside the job's budget, and a suite that
+      # does not finish is a finding of its own: the specs that ran may all
+      # have passed, and the ones that did not run are the point.
+      #
+      # **The budget is the `timeout` command and not the step's own.** A
+      # step that runs out of time *fails*, and the job carries on to the
+      # report and to the issue below. The job's own timeout cancels the
+      # job instead, and a cancelled job runs no further step: the issue
+      # step was skipped exactly that way when the job was killed by its
+      # 45-minute timeout, and the journey-failure issue was never opened.
       - name: Run the browser suite
         id: suite
         env:
@@ -157,7 +168,33 @@ jobs:
           RESEND_API_KEY: ci-dummy-not-used
           RESEND_FROM_EMAIL: noreply@example.com
           PLAYWRIGHT_BASE_URL: http://localhost:3000
-        run: pnpm test:e2e
+          # The suite's budget. The job has 45 minutes; the stack and the
+          # browsers take two of them, and the report and the issue want
+          # the rest.
+          SUITE_TIMEOUT: 35m
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=60s "$SUITE_TIMEOUT" pnpm test:e2e
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          echo "::notice::the browser suite exited with $code"
+          exit $code
+
+      # The distinction the issue has to make: a suite that failed and a
+      # suite that did not finish are two different findings, and the second
+      # one is invisible in the specs' own output — the specs that ran
+      # passed. This step fails when the suite did not finish, and the
+      # trusted reporter reads its conclusion.
+      - name: Say whether the suite finished
+        id: finished
+        if: ${{ always() }}
+        env:
+          SUITE_EXIT_CODE: ${{ steps.suite.outputs.exit_code }}
+        run: |
+          if [ "$SUITE_EXIT_CODE" = "124" ] || [ "$SUITE_EXIT_CODE" = "137" ]; then
+            echo "::error::The browser suite did not finish: it was stopped before the last test ran."
+            exit 1
+          fi
 
       - name: Upload the Playwright report
         if: always()
@@ -178,8 +215,12 @@ jobs:
       # The step is allowed to fail there — the failure that matters is the
       # suite's — and the trusted reporter in
       # .github/workflows/e2e-report.yml opens the issue in that case.
+      #
+      # **A suite that did not finish is a failure too**, and the issue says
+      # which of the two it was: the specs that ran may all have passed, and
+      # the ones that did not run are the finding.
       - name: Open or update the journey-failure issue
-        if: ${{ always() && steps.suite.conclusion == 'failure' }}
+        if: ${{ always() && (steps.suite.conclusion == 'failure' || steps.suite.conclusion == 'cancelled' || steps.finished.outcome == 'failure') }}
         continue-on-error: true
         uses: actions/github-script@v7
         with:
@@ -188,6 +229,18 @@ jobs:
             const label = 'e2e-failure';
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+
+            // The suite that did not finish is a different finding from the
+            // suite that failed, and the issue has to say which one it is.
+            const didNotFinish =
+              '${{ steps.finished.outcome }}' === 'failure' ||
+              '${{ steps.suite.conclusion }}' === 'cancelled';
+            const headline = didNotFinish
+              ? 'The browser suite did not finish: it was stopped before the last test ran.'
+              : 'The browser suite failed.';
+            const title = didNotFinish
+              ? 'The browser suite did not finish in CI'
+              : 'The browser suite failed in CI';
 
             try {
               await github.rest.issues.getLabel({ owner, repo, name: label });
@@ -211,7 +264,7 @@ jobs:
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             const body = [
               marker,
-              'The browser suite failed. Latest run: ' + runUrl,
+              headline + ' Latest run: ' + runUrl,
               '',
               'Download the `playwright-report` artifact from the run for the traces and the screenshots.',
               '',
@@ -232,7 +285,7 @@ jobs:
               const { data: created } = await github.rest.issues.create({
                 owner,
                 repo,
-                title: 'The browser suite failed in CI',
+                title,
                 body,
                 labels: [label],
               });
