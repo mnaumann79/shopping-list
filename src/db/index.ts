@@ -23,11 +23,18 @@ import * as schema from "./schema";
 // enough that a request fails while the caller is still waiting. The idle
 // timeout is the other half: a connection the pooler has dropped does not
 // sit in the pool for ever, waiting to be handed to the next request.
+//
+// The query timeout is the third: the connection timeout covers only the
+// *wait* for a connection, so a database that accepts the connection and
+// then stops answering would leave the query itself waiting for ever. A
+// query that overruns is cancelled on the server and the connection is
+// dropped, so the request answers instead of hanging.
 function buildDb() {
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL!,
     max: 10,
     connectionTimeoutMillis: 10_000,
+    query_timeout: 10_000,
     idleTimeoutMillis: 30_000,
   });
 

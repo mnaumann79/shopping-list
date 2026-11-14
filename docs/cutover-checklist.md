@@ -105,29 +105,35 @@ connection string that connects is the one with no mode.
 The application opens up to ten connections at once — `max: 10` in
 `src/db/index.ts` — and the pooler is Supavisor's, whose pool for the
 tenant is set in the dashboard (Project Settings -> Database -> Pooler).
-**The two have to be in the same order of magnitude**: the application
-cannot hold more connections open than the pooler's pool can serve, and the
-pooler does not wait for room for the ones it has no room for.
+**Size both pools for the configured mode and the total demand**: in session
+mode, which the deployment's `DATABASE_URL` uses, the pooler queues a client
+that finds no free backend connection for up to a minute, so a pool smaller
+than the application's `max` makes the excess clients wait in that queue; in
+transaction mode, the pooler adds backend connections only when it needs
+them, so the application's ten can share fewer.
 
-**The symptom when they are not is a TLS handshake failure**, and it says
-nothing about the cause: *"There was an error establishing an SSL
-connection"* from the application's own pool, a burst of them, and then the
-pool stops working altogether — the instance holds no session from the
-application while the application is still running, and the requests that
-read the database time out instead of answering. It reads like the
-certificate's mistake, because the message is the same one the certificate
-produces. Check the pooler's pool size against the application's `max`
-before the window, not during it.
+**The symptom that was observed when the two did not match is a TLS
+handshake failure**, and it says nothing about the cause: *"There was an
+error establishing an SSL connection"* from the application's own pool, a
+burst of them, and then the pool stops working altogether — the instance
+holds no session from the application while the application is still
+running, and the requests that read the database time out instead of
+answering. It reads like the certificate's mistake, because the message is
+the same one the certificate produces. The pools' sizes are the first thing
+to check, before the window and not during it — though the mechanism inside
+the pooler is not established: the instance was holding a backlog of stale
+sessions at the time, and it reaped them during the run.
 
 **The application does not wait for the database for ever.** The pool has a
-connection timeout and an idle timeout, so a request that cannot reach the
-database answers with an error in seconds instead of hanging, and a
-connection the pooler has dropped is closed by the application instead of
-being handed to the next request. Measured against a database that accepts
-the connection and then says nothing: the request had not answered after
-sixty seconds before the timeouts, and answers with a 500 in twelve. A
-request that hangs during the window is therefore a defect in the
-application, not the pooler's patience.
+connection timeout, a query timeout and an idle timeout, so a request that
+cannot reach the database answers with an error in seconds instead of
+hanging, a query that overruns is cancelled on the server, and a connection
+the pooler has dropped is closed by the application instead of being handed
+to the next request. Measured against a database that accepts the connection
+and then says nothing: the request had not answered after sixty seconds
+before the timeouts, and answers with a 500 in twelve. A request that hangs
+during the window is therefore a defect in the application, not the pooler's
+patience.
 
 ### The check at the door
 
