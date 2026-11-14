@@ -52,7 +52,7 @@ export default defineConfig({
   // share it. The transitional sign-in counts a client's failures, and the
   // budget is ten failures in fifteen minutes; the suite makes two failed
   // sign-ins a project, so a project fits under it.
-  workers: 4,
+  workers: 1,
   // The specs wait for a dev server that renders a page on the server, and
   // the workers share the CPU with it. Playwright's default is thirty
   // seconds for a test and five for an expectation, and both are too tight
