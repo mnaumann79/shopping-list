@@ -67,8 +67,12 @@ function JoinPageContent() {
         await setActiveHousehold(data.householdId);
         setStatus("success");
         setTimeout(() => {
+          // The refresh that used to be here cancelled the push. The join
+          // page is often reached by a client-side navigation — the sign-up
+          // page sends the new account to the join link — and in that case
+          // the refresh won the race: the join had succeeded, "Joined!" was
+          // on the screen, and the page never reached the dashboard.
           router.push("/dashboard");
-          router.refresh();
         }, 1500);
       } catch {
         setStatus("error");

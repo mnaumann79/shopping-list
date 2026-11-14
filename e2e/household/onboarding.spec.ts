@@ -49,7 +49,7 @@ test.describe("Household onboarding", () => {
 
       const householdName = `Onboarding Household ${Date.now()}`;
       await page.getByLabel("Household name").fill(householdName);
-      await submitForm(page, "Create household", "/api/auth/organization/create");
+      await submitForm(page, "Create household", "/api/households");
 
       await expect(page).toHaveURL(/\/dashboard/);
       const households = await listHouseholds(page);
@@ -66,7 +66,7 @@ test.describe("Household onboarding", () => {
 
       const householdName = `Switcher Household ${Date.now()}`;
       await page.getByLabel("Household name").fill(householdName);
-      await submitForm(page, "Create household", "/api/auth/organization/create");
+      await submitForm(page, "Create household", "/api/households");
       await expect(page).toHaveURL(/\/dashboard/);
 
       await expect(page.getByRole("banner")).toContainText(householdName);

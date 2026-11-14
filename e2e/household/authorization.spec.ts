@@ -9,6 +9,12 @@ import { newUserContext, signUp, uniqueEmail } from "./helpers";
 // the membership row is written by app_accept_household_invitation. They
 // need the auth swap's uuid ids, so they are green when P0S-T06 has landed.
 
+// Each of these specs signs up two users, creates a household, sends an
+// invitation and has it accepted. The default half a minute is not enough
+// for that on a loaded runner, and the other household specs give
+// themselves two minutes.
+test.setTimeout(120_000);
+
 /** A signed-up user, with a context of their own. */
 async function newUser(browser: import("@playwright/test").Browser, prefix: string) {
   const { context, page } = await newUserContext(browser);
@@ -16,7 +22,6 @@ async function newUser(browser: import("@playwright/test").Browser, prefix: stri
   await signUp(page, { name: prefix, email }, /\/onboarding/);
   return { context, page, email };
 }
-
 /** The household, the invitation and the plain member who accepted it. */
 async function householdWithAPlainMember(browser: import("@playwright/test").Browser) {
   const owner = await newUser(browser, "owner");
@@ -26,6 +31,14 @@ async function householdWithAPlainMember(browser: import("@playwright/test").Bro
   });
   expect(created.status()).toBe(201);
   const { householdId } = (await created.json()) as { householdId: string };
+
+  // The household has to be the session's active one: an invitation and a
+  // join link are both about the active household, and the server refuses
+  // the call when there is none.
+  const activated = await owner.page.request.post("/api/auth/household", {
+    data: { householdId },
+  });
+  expect(activated.status()).toBe(200);
 
   const member = await newUser(browser, "member");
 

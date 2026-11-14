@@ -429,9 +429,11 @@ Three jobs run on every pull request:
 | `supabase local stack, migrations, fixture, RLS` | The row-level security policies hold against a real GoTrue | No |
 | `playwright, reporting only` | The journey: sign-up, sign-in, the household, the shopping trip, in three browsers and a phone profile | No |
 
-**The browser suite's job takes about five minutes** — a minute and three
-quarters for the browsers, under a minute for the local stack, and the suite
-itself. It runs against the local stack, not against a deployment.
+**The browser suite's job's runtime is not established.** The figure this
+used to quote — about five minutes — came from a run that failed early, and
+the runs that were allowed to finish have never been measured: every merge
+to main cancelled the run in flight, so the job never finished at all. It
+runs against the local stack in CI, not against a deployment.
 
 **A red browser suite is a finding, not a blocker.** It does not gate a
 merge, and it opens an issue so that a person notices. That job exists
@@ -440,8 +442,12 @@ defect in the journey: thirteen individually-green pull requests once landed
 while the application could not create a household at all.
 
 **What no check does: run the journey against the deployed environment.**
-The browser suite runs against the local stack in CI, and nothing runs it
-against the deployment. The smoke test above is therefore the only thing
-that exercises the deployed journey — which is why it is not a step that can
-be shortened, and why the browser suite's job is worth having even while it
-is red.
+The browser suite runs against the local stack in CI, and the run against the
+**development instance** — the instance the deployment points at, with the
+instance's own GoTrue and the instance's own database — is recorded in
+`docs/e2e-against-the-instance.md`. **That run is pending**: it waits for the
+app role's `DATABASE_URL`, and the record says so until it has happened.
+What no check does is run the journey against the *deployed* environment:
+the smoke test above is therefore still the only thing that exercises the
+deployed journey — which is why it is not a step that can be shortened, and
+why the browser suite's job is worth having even while it is red.
