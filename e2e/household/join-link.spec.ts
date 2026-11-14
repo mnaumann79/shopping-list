@@ -136,12 +136,11 @@ test.describe("Shareable join link flow", () => {
     expect(emails).toContain(second);
   });
 
-  // The application cannot tell an expired link from an unknown one yet. The
-  // join page has a branch for it — "Link expired", on a 410 — and the server
-  // never answers 410: `joinHousehold` throws a 404 for both. Telling them
-  // apart needs the join-link function to say which of the two it was, which
-  // is a migration, so the spec waits for that.
-  test.fixme("expired join link shows error page", async ({ page }) => {
+  // The join page has a branch for it — "Link expired", on a 410 — and the
+  // route answers 410 for a link that has lapsed: the link's own row says
+  // when it expired, and a row that is not there at all is a link that was
+  // never there.
+  test("expired join link shows error page", async ({ page }) => {
     const scope = await scopeFor(page);
     const token = `expired${Date.now()}${Math.random().toString(36).slice(2, 10)}`;
 
