@@ -237,7 +237,7 @@ export async function inviteFromSettings(
   await page.goto("/household/settings");
   await waitForSettingsReady(page);
   await page.getByPlaceholder("name@example.com").fill(email);
-  await submitForm(page, "Send invite", "/api/households/invite");
+  await submitForm(page, "Send invite", "/api/households/invitations");
 
   // The invitation is written before the mail is sent, so the database does
   // not wait for Resend.

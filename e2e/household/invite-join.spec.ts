@@ -1,9 +1,9 @@
 import { expect, test } from "@playwright/test";
+import { getAcceptInvitePath } from "@/lib/app-routes";
 import {
   closePool,
   inviteFromSettings,
   INVITE_TIMEOUT,
-  listHouseholds,
   listMembers,
   newUserContext,
   PASSWORD,
@@ -29,7 +29,7 @@ test.describe("Email invite flow", () => {
     await waitForSettingsReady(page);
     await expect(page.getByRole("button", { name: "Send invite" })).toBeVisible();
     await page.getByPlaceholder("name@example.com").fill(email);
-    await submitForm(page, "Send invite", "/api/households/invite");
+    await submitForm(page, "Send invite", "/api/households/invitations");
 
     // The app answers only after the invitation mail has been sent, so the
     // toast waits for the mail call rather than for the click.
@@ -76,7 +76,7 @@ test.describe("Email invite flow", () => {
     }
   });
 
-  test("new user visiting /accept-invite?invitationId= is redirected to sign-up", async ({
+  test("new user visiting the invitation link is redirected to sign-up", async ({
     page,
     browser,
   }) => {
@@ -85,7 +85,11 @@ test.describe("Email invite flow", () => {
 
     const { context, page: fresh } = await newUserContext(browser);
     try {
-      await fresh.goto(`/accept-invite?invitationId=${invitation.id}`);
+      // The link the invitation mail carries. The address is in the link, and
+      // it has to be: the invitation row is not readable by somebody who has
+      // not accepted it yet, so the link is what tells the visitor which
+      // address the invitation went to.
+      await fresh.goto(getAcceptInvitePath(invitation.id, email));
 
       await fresh.waitForURL(/\/sign-up/, { timeout: 60_000 });
       expect(new URL(fresh.url()).searchParams.get("invitationId")).toBe(invitation.id);
@@ -106,13 +110,13 @@ test.describe("Email invite flow", () => {
 
     const { context, page: fresh } = await newUserContext(browser);
     try {
-      await fresh.goto(`/accept-invite?invitationId=${invitation.id}`);
+      await fresh.goto(getAcceptInvitePath(invitation.id, email));
       await fresh.waitForURL(/\/sign-up/, { timeout: 60_000 });
 
       await fresh.getByLabel("Name", { exact: true }).fill("Invitee");
       await expect(fresh.getByLabel("Email", { exact: true })).toHaveValue(email);
       await fresh.getByLabel("Password", { exact: true }).fill(PASSWORD);
-      await submitForm(fresh, "Sign up", "/api/auth/sign-up/email");
+      await submitForm(fresh, "Sign up", "/auth/v1/signup");
 
       // The invitation id survives the round trip through sign-up, so the
       // new account lands in the household instead of the onboarding page.

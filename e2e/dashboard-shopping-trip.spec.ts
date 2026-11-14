@@ -71,7 +71,7 @@ async function createTripFixture(page: Page, uniqueSuffix: string): Promise<Trip
   await page.goto("/dashboard");
   await expect(page).toHaveURL(/\/dashboard$/);
 
-  await postJson(page, "/api/auth/organization/create", {
+  await postJson(page, "/api/households", {
     name: householdName,
     slug: slugify(householdName),
   });
