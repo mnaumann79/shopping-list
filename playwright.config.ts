@@ -40,7 +40,19 @@ export default defineConfig({
         ["html", { open: "never" }],
       ]
     : "html",
-  workers: 1,
+  // The suite has to finish inside the CI job's budget.
+  //
+  // One worker does not fit: a browser project takes about eleven minutes
+  // with one worker, there are four of them, and the job has forty-three
+  // minutes for the suite. The workers are what make it fit, and they are
+  // safe because the specs are independent — every one of them creates its
+  // own users and its own household, and the stack is shared.
+  //
+  // The address of the client is still one per project, and the workers
+  // share it. The transitional sign-in counts a client's failures, and the
+  // budget is ten failures in fifteen minutes; the suite makes two failed
+  // sign-ins a project, so a project fits under it.
+  workers: 4,
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000",
     trace: "on-first-retry",
