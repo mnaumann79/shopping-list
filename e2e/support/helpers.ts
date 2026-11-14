@@ -49,8 +49,8 @@ export function recordAddress(email: string): void {
  * mounts, and the controlled input takes the value back from the server's
  * markup. The sign-up form then says "Name is required" and the sign-up
  * never goes out — and WebKit hydrates fast enough that the specs' first
- * fill landed inside that window every time, which is what 44 of the 169
- * specs were failing on.
+ * fill landed inside that window every time: 40 of the 48 failures in the
+ * four-worker run were this, in WebKit and on the phone profile.
  *
  * React marks the elements it has taken over, so the wait is for that mark.
  * The pages without a form of their own — the household settings page —
