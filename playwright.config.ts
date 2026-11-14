@@ -53,6 +53,16 @@ export default defineConfig({
   // budget is ten failures in fifteen minutes; the suite makes two failed
   // sign-ins a project, so a project fits under it.
   workers: 4,
+  // The specs wait for a dev server that renders a page on the server, and
+  // the workers share the CPU with it. Playwright's default is thirty
+  // seconds for a test and five for an expectation, and both are too tight
+  // for a loaded runner: the auth specs failed at the thirty seconds, and
+  // an expectation about a page that is rendering waited five.
+  //
+  // Two minutes for a test and fifteen for an expectation are the budgets
+  // the household specs had already set for themselves.
+  timeout: 120_000,
+  expect: { timeout: 15_000 },
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000",
     trace: "on-first-retry",
