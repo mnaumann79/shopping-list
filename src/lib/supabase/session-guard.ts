@@ -1,4 +1,5 @@
 import { stringFromBase64URL } from "@supabase/ssr";
+import { safeDestination } from "@/lib/return-to";
 import type { CookieSession } from "./session-cookie";
 
 /**
@@ -102,20 +103,4 @@ export function signInPath(returnTo?: string | null): string {
   return destination
     ? `/sign-in?returnTo=${encodeURIComponent(destination)}`
     : "/sign-in";
-}
-
-/**
- * The destination, when it is a page of this application.
- *
- * A path that starts with a single slash is on this site; "//host" is not,
- * and a destination that points at the sign-in page would send the caller
- * round in circles.
- */
-function safeDestination(returnTo?: string | null): string | null {
-  if (!returnTo?.startsWith("/") || returnTo.startsWith("//")) return null;
-  if (returnTo.startsWith("/sign-in") || returnTo.startsWith("/sign-up")) {
-    return null;
-  }
-
-  return returnTo;
 }

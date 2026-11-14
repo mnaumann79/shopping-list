@@ -7,6 +7,7 @@ import { z } from "zod";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { getSession, signInWithPassword } from "@/lib/auth-client";
+import { safeDestination } from "@/lib/return-to";
 import {
   Card,
   CardContent,
@@ -82,7 +83,10 @@ async function signIn(
 function SignInPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const returnTo = searchParams.get("returnTo");
+  // The guard puts the page the visitor asked for in the link, and the page
+  // follows it. A visitor can also type one in, so it goes through the same
+  // rule: only a page of this application is somewhere to go back to.
+  const returnTo = safeDestination(searchParams.get("returnTo"));
   const form = useForm<SignInValues>({
     resolver: zodResolver(signInSchema),
     defaultValues: { email: "", password: "" },
