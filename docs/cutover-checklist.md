@@ -442,11 +442,12 @@ defect in the journey: thirteen individually-green pull requests once landed
 while the application could not create a household at all.
 
 **What no check does: run the journey against the deployed environment.**
-The browser suite runs against the local stack in CI, and it now also runs
-against the **development instance** — the instance the deployment points at
-— so the journey is exercised against the instance's own GoTrue and the
-instance's own database (`docs/e2e-against-the-instance.md` is the record of
-that run). What no check does is run it against the *deployed* environment:
+The browser suite runs against the local stack in CI, and the run against the
+**development instance** — the instance the deployment points at, with the
+instance's own GoTrue and the instance's own database — is recorded in
+`docs/e2e-against-the-instance.md`. **That run is pending**: it waits for the
+app role's `DATABASE_URL`, and the record says so until it has happened.
+What no check does is run the journey against the *deployed* environment:
 the smoke test above is therefore still the only thing that exercises the
 deployed journey — which is why it is not a step that can be shortened, and
 why the browser suite's job is worth having even while it is red.
