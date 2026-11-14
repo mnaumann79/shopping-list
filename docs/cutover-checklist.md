@@ -348,8 +348,19 @@ Each of these cost an hour:
 
 ### The application
 
+- [ ] **The application role's password is set afresh**, through the flow
+      that re-syncs the pooler — the same flow the bootstrap path names,
+      because a change to the role's password alone does not re-sync it.
+      The instance's `app` role already has a password — the one the
+      rehearsal used, and the one this project's `DATABASE_URL` and the
+      deployment's environment file carry. The pooler accepts it as `app`
+      today, so the deployment would inherit it as it stands: **the
+      rehearsal's password is not carried across.** The new one goes into
+      the deployment's environment and nowhere else — not into the ledger,
+      not into this document.
 - [ ] **`DATABASE_URL` is changed** in the deployment environment to the
-      instance's connection — as the **application role**, not as the owner.
+      instance's connection — as the **application role**, not as the owner,
+      and with the **new** password.
 - [ ] **The Supabase URL and the two keys are changed** to the instance's.
 - [ ] **The application is deployed.**
 
