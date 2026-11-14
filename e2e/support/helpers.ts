@@ -42,6 +42,34 @@ export function recordAddress(email: string): void {
   fs.appendFileSync(CREATED_ADDRESSES, `${email}\n`);
 }
 
+/**
+ * Fills a field, once the page has taken the form over.
+ *
+ * A field that is filled before React hydrates loses its value: the page
+ * mounts, and the controlled input takes the value back from the server's
+ * markup. The sign-up form then says "Name is required" and the sign-up
+ * never goes out — and WebKit hydrates fast enough that the specs' first
+ * fill landed inside that window every time: 40 of the 48 failures in the
+ * four-worker run were this, in WebKit and on the phone profile.
+ *
+ * React marks the elements it has taken over, so the wait is for that mark.
+ * The pages without a form of their own — the household settings page —
+ * wait for a member row instead, which the application renders on the
+ * client.
+ */
+export async function fillField(page: Page, label: string, value: string): Promise<void> {
+  await page.waitForFunction(
+    () => {
+      const form = document.querySelector("form");
+      return Boolean(form && Object.keys(form).some((key) => key.startsWith("__reactProps$")));
+    },
+    undefined,
+    { timeout: 30_000 },
+  );
+
+  await page.getByLabel(label, { exact: true }).fill(value);
+}
+
 // The origin the app runs on. Better Auth refuses API calls that carry a
 // session cookie without an Origin header, and the request fixture always
 // carries one.

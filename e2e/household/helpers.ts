@@ -3,12 +3,12 @@ import { config as loadEnv } from "dotenv";
 import path from "path";
 import { Pool } from "pg";
 import { SESSION_COOKIE, SIGN_UP_ENDPOINT } from "../auth/helpers";
-import { PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
+import { fillField, PASSWORD, submitForm, uniqueEmail } from "../support/helpers";
 
-// PASSWORD, uniqueEmail and submitForm are shared with the auth specs, so
-// they live in e2e/support/helpers.ts. They are re-exported here so the
-// household specs keep a single import path.
-export { PASSWORD, submitForm, uniqueEmail };
+// fillField, PASSWORD, uniqueEmail and submitForm are shared with the auth
+// specs, so they live in e2e/support/helpers.ts. They are re-exported here
+// so the household specs keep a single import path.
+export { fillField, PASSWORD, submitForm, uniqueEmail };
 
 // The Playwright config loads .env.test too; loading it here keeps this
 // module self-contained, and dotenv never overrides a variable that is
@@ -103,9 +103,9 @@ export async function signUp(
   landsOn: RegExp,
 ): Promise<void> {
   await page.goto("/sign-up");
-  await page.getByLabel("Name", { exact: true }).fill(user.name);
-  await page.getByLabel("Email", { exact: true }).fill(user.email);
-  await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
+  await fillField(page, "Name", user.name);
+  await fillField(page, "Email", user.email);
+  await fillField(page, "Password", PASSWORD);
   await submitForm(page, "Sign up", SIGN_UP_ENDPOINT);
   await page.waitForURL(landsOn, { timeout: 60_000 });
 }

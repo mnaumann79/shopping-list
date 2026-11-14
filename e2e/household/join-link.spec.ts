@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
+  fillField,
   closePool,
   generateJoinLink,
   joinPath,
@@ -87,9 +88,9 @@ test.describe("Shareable join link flow", () => {
       await fresh.goto(joinPath(link));
       await fresh.waitForURL(/\/sign-up\?joinToken=/, { timeout: 60_000 });
 
-      await fresh.getByLabel("Name", { exact: true }).fill("Joiner");
-      await fresh.getByLabel("Email", { exact: true }).fill(email);
-      await fresh.getByLabel("Password", { exact: true }).fill(PASSWORD);
+      await fillField(fresh, "Name", "Joiner");
+      await fillField(fresh, "Email", email);
+      await fillField(fresh, "Password", PASSWORD);
       await submitForm(fresh, "Sign up", "/auth/v1/signup");
 
       // The sign-up page sends the new user back to the join link, which

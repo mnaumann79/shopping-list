@@ -1,5 +1,5 @@
 import { expect, type Browser, type Page } from "@playwright/test";
-import { appOrigin, PASSWORD, submitForm } from "../support/helpers";
+import { appOrigin, fillField, PASSWORD, submitForm } from "../support/helpers";
 
 /**
  * Helpers for the AUTH-01…04 specs.
@@ -110,9 +110,9 @@ export async function registerUser(
 /** Signs a user up through the form and waits for the page the app sends them to. */
 export async function signUp(page: Page, email: string): Promise<void> {
   await page.goto("/sign-up");
-  await page.getByLabel("Name").fill("Test User");
-  await page.getByLabel("Email").fill(email);
-  await page.getByLabel("Password").fill(PASSWORD);
+  await fillField(page, "Name", "Test User");
+  await fillField(page, "Email", email);
+  await fillField(page, "Password", PASSWORD);
 
   await submitForm(page, "Sign up", SIGN_UP_ENDPOINT);
 
