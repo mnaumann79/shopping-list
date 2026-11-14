@@ -67,12 +67,10 @@ test.describe("Login", () => {
     expect(cookies.some((cookie) => cookie.name === SESSION_COOKIE)).toBe(true);
   });
 
-  // The app sends a signed-out visitor to /sign-in, but it does not put the
-  // page they asked for in `returnTo` - the redirect carries no query string.
-  // The sign-in page does honour a `returnTo` when one is present in the URL
-  // (see the next spec), but nothing in the app ever creates one. The gap is
-  // recorded in the pull request; this spec asserts today's behaviour.
-  test("signed-out visitor is sent to /sign-in and logs in to the default page", async ({
+  // The guard sends a signed-out visitor to /sign-in, and it carries the page
+  // they asked for: the sign-in page honours a `returnTo` when one is present
+  // in the URL, and the visitor comes back to the page they wanted.
+  test("signed-out visitor is sent to /sign-in and logs in to the page they asked for", async ({
     page,
     browser,
   }) => {
@@ -84,26 +82,18 @@ test.describe("Login", () => {
     // The pathname is /sign-in whether or not the redirect carries a query
     // string.
     await expect(page).toHaveURL((url) => url.pathname === "/sign-in");
-    // Today's behaviour: no returnTo, so the visitor loses the page they
-    // wanted.
-    expect(new URL(page.url()).searchParams.get("returnTo")).toBeNull();
+    // The guard carries the page the visitor asked for.
+    expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/history");
 
     await page.getByLabel("Email").fill(email);
     await page.getByLabel("Password").fill(PASSWORD);
 
     await submitForm(page, "Sign in", SIGN_IN_ENDPOINT);
 
-    // Without a returnTo there is nothing to restore, so the sign-in page
-    // sends the user to its default page. A user whose session has no active
-    // household is sent on to /onboarding instead - either way they end up
-    // on a signed-in page, which is what this spec asserts.
-    await expect(page).toHaveURL(
-      (url) => url.pathname === "/dashboard" || url.pathname === "/onboarding",
-    );
-    // The page the user lands on is a real signed-in page, not an error one.
-    await expect(
-      page.getByLabel("Item name").or(page.getByText("Create your household")),
-    ).toBeVisible();
+    // The visitor comes back to the page they asked for.
+    await expect(page).toHaveURL((url) => url.pathname === "/history");
+    // The page they came back to is a real signed-in page, not an error one.
+    await expect(page.getByRole("heading", { name: "Item history" })).toBeVisible();
     const cookies = await page.context().cookies();
     expect(cookies.some((cookie) => cookie.name === SESSION_COOKIE)).toBe(true);
   });
