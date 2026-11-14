@@ -56,9 +56,13 @@ opens the admin console.
 
 ## What the first execution found
 
-The suite had never executed a spec: the last run before this one failed in
-the setup, and Playwright reported that 168 of the 169 tests did not run. So
-the first execution of the household specs against the local stack is the
+The suite had never had a green spec. The last run before this one failed in
+the setup, and Playwright reported that 168 of the 169 tests did not run; and
+the run on `main` that was allowed to finish (P0S-T45's measurement) reached
+17 of the 169 tests before the job's timeout stopped it — and every one of
+those 17 was a spec naming a route the application does not serve.
+
+So the first execution of the household specs against the local stack is the
 first look at the specs' assumptions, and it found six things.
 
 **The specs named routes the application does not serve.** The household specs
