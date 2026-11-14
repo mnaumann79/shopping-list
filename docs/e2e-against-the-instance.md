@@ -48,6 +48,13 @@ Three details in that table are the ones that cost time:
   value is "no mail" to the application, and the invitation row is written
   before the mail is sent.
 
+**The certificate path is verified from a development machine.** With
+`NODE_EXTRA_CA_CERTS` pointing at `deploy/prod-ca-2021.crt` and
+`?sslmode=verify-full`, the pooler completes the handshake and answers
+*password authentication failed* — which is the answer a wrong password
+gets, and not the certificate refusal an untrusted chain gets. The tenant
+name in the URL is right too: the pooler knows `app.eaawnwfrkvjbdigyasbk`.
+
 **The run must not use the owner's credential.** `pnpm start` and `pnpm dev`
 both run the check at the door ([P0S-T37](project.md#92b-row-level-security-the-second-layer-now-real)),
 which refuses a privileged role against a host that is not local. The `app`
