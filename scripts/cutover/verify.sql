@@ -55,4 +55,10 @@ UNION ALL SELECT 'household_join_links.count', count(*) FROM household_join_link
 UNION ALL SELECT 'item_stores.count', count(*) FROM item_stores
 UNION ALL SELECT 'households.count', count(*) FROM households
 UNION ALL SELECT 'household_members.count', count(*) FROM household_members
-UNION ALL SELECT 'user.count', count(*) FROM "user";
+UNION ALL SELECT 'user.count', count(*) FROM "user"
+-- The invitations, on both sides. The legacy table holds Better Auth's
+-- invitations; the new one holds the application's. They are printed and
+-- not compared: the mapping does not carry the legacy rows over, and the
+-- two counts are how that shows.
+UNION ALL SELECT 'invitation.count', count(*) FROM invitation
+UNION ALL SELECT 'household_invitations.count', count(*) FROM household_invitations;

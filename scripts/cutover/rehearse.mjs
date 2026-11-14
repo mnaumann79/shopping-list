@@ -24,13 +24,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pg from "pg";
 import {
+  applyMigration,
   assertHostIsNotProduction,
   assertLooksLikeSupabase,
   assertScratchDatabase,
   databaseOf,
   dump,
+  driverUrl,
   execute,
-  executeFile,
   hostOf,
   query,
   restoreScoped,
@@ -61,12 +62,29 @@ function step(message) {
 }
 
 function withClient(url, fn) {
-  const client = new pg.Client({ connectionString: url });
+  const client = new pg.Client({ connectionString: driverUrl(url) });
   return client
     .connect()
     .then(() => fn(client))
     .finally(() => client.end());
 }
+
+/**
+ * The migrations, in the order the cutover applies them: the schema up to but
+ * not including the rename, then the rename and the rest. The rename has to
+ * come after the mapping — it has to find the mapping's work already done —
+ * and the migrations that follow it are written for the renamed schema.
+ */
+const migrationFiles = execFileSync("ls", [migrationDir], { encoding: "utf8" })
+  .split("\n")
+  .filter((name) => name.endsWith(".sql"))
+  .sort();
+const renameIndex = migrationFiles.findIndex((name) => name.startsWith(renameMigration));
+if (renameIndex === -1) {
+  throw new Error(`The migrations folder has no ${renameMigration} migration.`);
+}
+const beforeRename = migrationFiles.slice(0, renameIndex);
+const fromRename = migrationFiles.slice(renameIndex);
 
 // 1. The guard. Everything below writes to the target's scratch database.
 step("Checking the target");
@@ -76,15 +94,9 @@ console.log(`target: ${hostOf(targetUrl)}/${databaseOf(targetUrl)}`);
 
 // 2. The source's shape, read before anything is written.
 step("Reading the source");
-const legacyOrganizations = query(
-  sourceUrl,
-  "SELECT id, name FROM organization ORDER BY created_at",
-);
-const legacyUsers = query(sourceUrl, "SELECT id, name, email FROM \"user\" ORDER BY created_at");
-const legacyMembers = query(
-  sourceUrl,
-  "SELECT organization_id, user_id, role FROM member",
-);
+const legacyOrganizations = query(sourceUrl, "SELECT id FROM organization ORDER BY created_at");
+const legacyUsers = query(sourceUrl, 'SELECT id FROM "user" ORDER BY created_at');
+const legacyMembers = query(sourceUrl, "SELECT id FROM member");
 console.log(
   `source: ${legacyOrganizations.length} organizations, ${legacyUsers.length} users, ${legacyMembers.length} memberships`,
 );
@@ -100,20 +112,18 @@ const scratchUrl = new URL(targetUrl);
 scratchUrl.pathname = `/${scratchName}`;
 const scratch = scratchUrl.toString();
 assertScratchDatabase(scratch);
+console.log(`scratch: ${scratchName}`);
 
 await withClient(targetUrl, async (client) => {
-  await client.query(`DROP DATABASE IF EXISTS "${scratchName}"`);
+  await client.query(`DROP DATABASE IF EXISTS "${scratchName}" WITH (FORCE)`);
   await client.query(`CREATE DATABASE "${scratchName}"`);
 });
 
 step("Applying the schema, up to but not including the rename");
-for (const file of execFileSync("ls", [migrationDir], { encoding: "utf8" })
-  .split("\n")
-  .filter((name) => name.endsWith(".sql"))
-  .sort()) {
-  if (file.startsWith(renameMigration)) continue;
-  executeFile(scratch, join(migrationDir, file));
+for (const file of beforeRename) {
+  const refused = applyMigration(scratch, join(migrationDir, file));
   console.log(`applied ${file}`);
+  for (const line of refused) console.log(`  refused: ${line.trim()}`);
 }
 
 // 5. The restore — scoped to the shopping list's tables.
@@ -121,69 +131,39 @@ step("Restoring the shopping list's tables");
 const restored = restoreScoped(scratch, dumpFile);
 console.log(`restored ${restored} tables`);
 
-// 6. The mappings. The households get fresh uuids; the users' uuids are the
-//    ones GoTrue issued.
+// 6. The identities. The households get fresh uuids; the users get uuids of
+//    their own, issued here.
 //
-//    The users are provisioned in the instance's **main** database, where
-//    GoTrue owns `auth.users`. The scratch database gets their ids and
-//    nothing else: the mapping's foreign keys point at `auth.users`, and the
-//    verification joins against it, so the ids have to be there — but GoTrue
-//    does not manage the scratch database, and copying the schema over would
-//    be the thing §13.2a says never to do.
-step("Provisioning the users and building the mappings");
+//    The users' uuids are GoTrue's at the cutover: §13.2a step 2 provisions
+//    the accounts and records the ids in `user_map`. GoTrue owns
+//    `auth.users` in the instance's main database, and a rehearsal may not
+//    write there — the table is behind the admin API, and the instance has
+//    to be as it was when the run is over. So the rehearsal issues the ids
+//    itself and puts them in the scratch database, where GoTrue does not
+//    manage anything and the mapping's foreign keys point.
+//
+//    The household names are not printed. The rehearsal's output is attached
+//    to a pull request, and this repository is public: a count says what the
+//    rehearsal did without naming a household. The ids are in the mapping
+//    table, which is what the cutover needs.
+step("Issuing the identities");
 const userMap = [];
 const organizationMap = [];
 
-await withClient(targetUrl, async (client) => {
-  for (const [oldId, name, email] of legacyUsers) {
-    // An account that already exists is reused, not duplicated: the runbook
-    // provisions the users, and a rehearsal may be run more than once.
-    const existing = await client.query(
-      "SELECT id FROM auth.users WHERE email = $1 AND deleted_at IS NULL",
-      [email],
-    );
-    let newId = existing.rows[0]?.id;
-    if (!newId) {
-      newId = randomUUID();
-      await client.query(
-        `INSERT INTO auth.users (id, aud, role, email, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
-         VALUES ($1, 'authenticated', 'authenticated', $2, now(), '{}', $3, now(), now())`,
-        [newId, email, JSON.stringify({ name })],
-      );
-    }
-    userMap.push([oldId, newId]);
-  }
-});
-
 await withClient(scratch, async (client) => {
-  for (const [oldId, newId] of userMap) {
+  for (const [oldId] of legacyUsers) {
+    const newId = randomUUID();
+    userMap.push([oldId, newId]);
     await client.query("INSERT INTO auth.users (id) VALUES ($1) ON CONFLICT DO NOTHING", [
       newId,
     ]);
   }
 
-  // The household names are not printed. The rehearsal's output is attached
-  // to a pull request, and this repository is public: a count says what the
-  // rehearsal did without naming a household. The ids are in the mapping
-  // table, which is what the cutover needs.
   for (const [oldId] of legacyOrganizations) {
-    const newId = randomUUID();
-    organizationMap.push([oldId, newId]);
+    organizationMap.push([oldId, randomUUID()]);
   }
-  console.log(`mapped ${organizationMap.length} households`);
 });
-
-// The provisioned ids have to be real GoTrue users, not ids that merely look
-// right: the mapping writes them into the identity columns, and the
-// application will sign them in.
-const provisioned = query(
-  targetUrl,
-  `SELECT count(*) FROM auth.users WHERE id IN (${userMap.map(([, id]) => `'${id}'`).join(", ")})`,
-);
-if (Number(provisioned[0][0]) !== userMap.length) {
-  throw new Error("The provisioned users are not all in auth.users.");
-}
-console.log(`provisioned ${userMap.length} users`);
+console.log(`mapped ${organizationMap.length} households and ${userMap.length} users`);
 
 // 7. The mapping itself.
 step("Running the identity mapping");
@@ -192,14 +172,13 @@ const mappingSql = readFileSync(new URL("./mapping.sql", import.meta.url), "utf8
   .replace("__ORGANIZATION_MAP_VALUES__", organizationMap.map(([o, n]) => `('${o}', '${n}')`).join(",\n  ") || "('none', '00000000-0000-0000-0000-000000000000')");
 execute(scratch, mappingSql);
 
-// 8. The rename migration, which must find the work already done.
-step("Applying the rename migration");
-for (const file of execFileSync("ls", [migrationDir], { encoding: "utf8" })
-  .split("\n")
-  .filter((name) => name.endsWith(".sql") && name.startsWith(renameMigration))
-  .sort()) {
-  executeFile(scratch, join(migrationDir, file));
+// 8. The rename migration, which must find the work already done, and the
+//    migrations that follow it.
+step("Applying the rename migration and the rest");
+for (const file of fromRename) {
+  const refused = applyMigration(scratch, join(migrationDir, file));
   console.log(`applied ${file}`);
+  for (const line of refused) console.log(`  refused: ${line.trim()}`);
 }
 
 // 9. The verification.
@@ -232,13 +211,17 @@ for (const [label, table] of Object.entries(counts)) {
 }
 
 // 11. The rollback.
+//
+//     The pooler keeps a connection to every database it has served, and it
+//     hands the connection back when the client is gone — so the scratch
+//     database still has a session attached to it, and a plain drop is
+//     refused with "database is being accessed by other users". `WITH
+//     (FORCE)` terminates the sessions and drops the database in one
+//     statement, and there is no window between the two for the pooler to
+//     open another connection in.
 step("Rolling back");
 await withClient(targetUrl, async (client) => {
-  await client.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1`,
-    [scratchName],
-  );
-  await client.query(`DROP DATABASE IF EXISTS "${scratchName}"`);
+  await client.query(`DROP DATABASE IF EXISTS "${scratchName}" WITH (FORCE)`);
 });
 console.log(`dropped ${scratchName}`);
 rmSync(work, { recursive: true, force: true });
