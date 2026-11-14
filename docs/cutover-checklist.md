@@ -201,10 +201,10 @@ Each of these cost an hour:
       `0006` creates them: `app_user_display`,
       `app_accept_household_invitation` and `app_join_household_by_link`,
       and the application calls all three.
-- [ ] **`db/init.sql` carries those three functions.** It does **not** today
-      — the file's header promises the snapshot and the migrations agree,
-      and they do not (P0S-T28). **Until that merges, do not bootstrap an
-      instance from `db/init.sql`**: it is a snapshot of an older schema.
+- [ ] **`db/init.sql` carries those three functions.** It does — the file
+      carries what migration `0006` creates, and the two `auth.users`
+      columns it needs (P0S-T28), so the snapshot and the migrations
+      agree and an instance may be bootstrapped from `db/init.sql`.
 - [ ] **The application role's password is not in the ledger.** It is read
       from the environment, not written down (P0S-T26).
 - [ ] **The pooler's credential matches the instance's.** The pooler
@@ -275,16 +275,15 @@ Each of these cost an hour:
 
 ### T−1 day — the guard that ships
 
-- [ ] **The guard that ships replaces the root middleware, and preserves the
-      destination.** The decision is made: the root `middleware.ts` — the
-      optimistic check on the cookie's *presence* — is replaced by a real
-      guard that validates the session and keeps the destination for every
-      protected route (P0S-T32). Confirm the deployment carries the
-      replacement, that the replacement still carries the destination back
-      after a sign-in, and that the optimistic cookie check is gone.
-
-      If this has not landed when the window is scheduled, it is an **open
-      item** below, with a name against it — not an assumption.
+- [ ] **The deployment carries the guard, the guard keeps the destination,
+      and the optimistic cookie check is gone.** The guard is
+      `src/middleware.ts`: the file the development server runs *and* the
+      built application runs, which is why the browser suite exercises the
+      guard the deployment ships — a guard only the built application ran
+      was a guard the suite never exercised. Check that the deployment
+      carries it, that a sign-in still lands on the destination it was
+      going to, and that the optimistic check on the cookie's *presence* is
+      gone.
 
 ---
 
@@ -319,14 +318,13 @@ Each of these cost an hour:
 
 - [ ] **The two ledgers are not the same, and neither replaces the other.**
       The instance's schema was applied through the Supabase MCP's migration
-      tool, whose ledger is `supabase_migrations.schema_migrations` — eleven
-      rows, nine of them the repository's migrations and two the repository
-      does not have yet (`0005a_allow_migration_role_to_assume_app` and
-      `0007_no_self_delete`, being committed as P0S-T19 and P0S-T34), so the
-      instance is *ahead* of the repository. The application's runner keeps a
-      second ledger of its own, `db_migrate.applied` — a schema-and-checksum
-      table it creates itself — and that schema does not exist on the
-      instance, because the runner has never run there.
+      tool, whose ledger is `supabase_migrations.schema_migrations` — one
+      row for each of the repository's migrations, so the instance is at the
+      repository's schema and not ahead of it (P0S-T19, P0S-T34, P0S-T40).
+      The application's runner keeps a second ledger of its own,
+      `db_migrate.applied` — a schema-and-checksum table it creates itself —
+      and that schema does not exist on the instance, because the runner
+      has never run there.
       **The repository's migrations are the source of truth for the schema.**
       The MCP's ledger is the record of how one particular instance was
       built; the runner's ledger is the record of what the repository's
@@ -476,10 +474,8 @@ name against it. None of them is assumed away.
 
 | Item | What has to be settled | Whose it is |
 | --- | --- | --- |
-| **D-11 — the guard that ships** | The root `middleware.ts` is being replaced by a real guard (P0S-T32, in flight). The deployment has to carry the replacement, and the guard that ships has to preserve the destination. | Sara.F, with the product owner |
+| **D-11 — the guard that ships** | The guard has landed: P0S-T32 put a real guard in place of the root middleware's optimistic check on the cookie's *presence*, and P0S-T57 moved it to `src/middleware.ts` — the file the development server and the built application both run, so the browser suite exercises the guard the deployment ships. What is left is the product owner's decision: this is the guard that ships, and it preserves the destination for every protected route. | Sara.F, with the product owner |
 | **The accounts that have never signed in** | Every provisioned account holds an unusable password until the transitional route verifies the old one. Before the route goes, those accounts need a password reset or a recovery path. | The lead, with the product owner |
-| **`db/init.sql` is missing three functions** | The file's header promises the snapshot and the migrations agree, and they do not: `app_user_display`, `app_accept_household_invitation` and `app_join_household_by_link` are in migration `0006` and not in the file. Until it is fixed, do not bootstrap an instance from `db/init.sql`. | Danny.DB (P0S-T28) |
-| **The database does not refuse the self-delete yet** | §9.2b and §12.5 describe `household_members_no_self_delete` as the database's second layer, but no migration creates it: the policy exists only on the instance. Until it is in the repository's migrations, do not claim the database refuses the self-delete. | Danny.DB (P0S-T19) |
 | **The writes made after the cutover** | A rollback to Neon drops every write made on Supabase after the cutover. Either those writes are reconciled into Neon before a rollback, or the loss is accepted, with the name of the person who accepted it. | The lead |
 
 ---
