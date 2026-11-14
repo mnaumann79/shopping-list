@@ -110,7 +110,10 @@ dashboard. Fixed here.
 **An expired join link could not be told from an unknown one.** The join page
 has a branch for it — "Link expired", on a 410 — and the server answered 404
 for both. [P0S-T52](project.md) made the answer 410: the link's own row is
-still there, and it is gone, which is what 410 says. The spec runs.
+still there, and it is gone, which is what 410 says. The spec runs — as a
+member of the household: the row is readable by the household's members and
+by nobody else, so a caller who is not one gets the 404, because the
+application cannot say that a link it cannot see has expired.
 
 **`.env.test` carried `RESEND_API_KEY=ci-dummy-not-used`.** The invitation
 endpoint sends the mail before it answers, so the dummy key turned every

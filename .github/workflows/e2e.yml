@@ -221,8 +221,11 @@ jobs:
       # **A suite that did not finish is a failure too**, and the issue says
       # which of the two it was: the specs that ran may all have passed, and
       # the ones that did not run are the finding.
+      #
+      # A cancelled run is not reported at all: a cancelled run is a run that
+      # a newer run replaced, and a replaced run is not a finding.
       - name: Open or update the journey-failure issue
-        if: ${{ always() && (steps.suite.conclusion == 'failure' || steps.suite.conclusion == 'cancelled' || steps.finished.outcome == 'failure') }}
+        if: ${{ always() && !cancelled() && (steps.suite.conclusion == 'failure' || steps.finished.outcome == 'failure') }}
         continue-on-error: true
         uses: actions/github-script@v7
         with:

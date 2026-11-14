@@ -52,13 +52,6 @@ jobs:
             // budget was stopped by the timeout and the suite did not
             // finish; a job cancelled at any other time was replaced by a
             // newer run (the concurrency rule), and that is not a finding.
-            const JOB_BUDGET_MINUTES = 45;
-
-            const minutes = (job) =>
-              job.started_at && job.completed_at
-                ? (new Date(job.completed_at) - new Date(job.started_at)) / 60000
-                : 0;
-
             // The e2e workflow's own conclusion is "success" even when its
             // job failed, because the job carries continue-on-error: it must
             // not gate a merge. The job's conclusion is the one that says
@@ -69,28 +62,28 @@ jobs:
               run_id: run.id,
             });
             const failed = jobs.jobs.find((job) => job.conclusion === 'failure');
-            const unfinished = jobs.jobs.find(
-              (job) =>
-                job.conclusion === 'cancelled' &&
-                minutes(job) >= JOB_BUDGET_MINUTES - 1,
-            );
-            const job = failed ?? unfinished;
-            if (!job) {
+            if (!failed) {
               core.info('no job failed; nothing to report');
               return;
             }
+            const job = failed;
 
             // A suite that did not finish is a different finding from a
             // suite that failed: the specs that ran may all have passed,
             // and the ones that did not run are the finding. The e2e
             // workflow says which it was in a step of its own, and that
             // step's conclusion is what says it here.
+            //
+            // A job that was *cancelled* is not reported: a cancelled job is
+            // a run that a newer run replaced, and a replaced run is not a
+            // finding. The suite that does not finish is a *failed* job — the
+            // suite's budget is the `timeout` command and not the job's own,
+            // so the step fails and the job carries on.
             const suiteStep = job.steps?.find((step) => step.name === SUITE_STEP);
             const finishedStep = job.steps?.find((step) => step.name === FINISHED_STEP);
             const didNotFinish =
               finishedStep?.conclusion === 'failure' ||
-              suiteStep?.conclusion === 'cancelled' ||
-              job.conclusion === 'cancelled';
+              suiteStep?.conclusion === 'cancelled';
             const headline = didNotFinish
               ? 'The browser suite did not finish: it was stopped before the last test ran.'
               : 'The browser suite failed.';
