@@ -171,7 +171,7 @@ jobs:
           # The suite's budget. The job has 45 minutes; the stack and the
           # browsers take two of them, and the report and the issue want
           # the rest.
-          SUITE_TIMEOUT: 35m
+          SUITE_TIMEOUT: 2m
         run: |
           set +e
           timeout --signal=TERM --kill-after=60s "$SUITE_TIMEOUT" pnpm test:e2e
