@@ -2,6 +2,7 @@ import { test as setup, type Page } from "@playwright/test";
 import fs from "fs";
 import path from "path";
 import { config as loadEnv } from "dotenv";
+import { recordAddress } from "./support/helpers";
 
 // The config loads .env.test too; loading it here keeps this file
 // self-contained, and dotenv never overrides a variable that is already set.
@@ -32,6 +33,9 @@ setup("create authenticated user with household", async ({ page }) => {
   const email = (process.env.TEST_EMAIL ?? "test@example.com").replace("@", `+${suffix}@`);
   const password = process.env.TEST_PASSWORD ?? "TestPassword123!";
   const householdName = `Test Household ${suffix}`;
+
+  // The setup registers a user too, and the run's record has to hold it.
+  recordAddress(email);
 
   await authenticate(page, email, password);
   await createHousehold(page, householdName);
