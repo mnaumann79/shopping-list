@@ -52,3 +52,6 @@ next-env.d.ts
 # Python bytecode from the §10.8 fixture
 __pycache__/
 *.pyc
+
+# the deployment environment (holds a database password) - never committed
+/coolify.env
