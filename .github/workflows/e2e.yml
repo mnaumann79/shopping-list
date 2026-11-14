@@ -23,7 +23,10 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write # needed to open / comment on the journey-failure issue
+  # The measurement: the job cannot open the issue, so the trusted reporter
+  # has to be the one that does. That is the path a pull request from a fork
+  # takes.
+  issues: read
 
 jobs:
   playwright:
