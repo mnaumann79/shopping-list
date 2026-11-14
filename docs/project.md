@@ -3911,7 +3911,10 @@ verified against the target instance:
 
 So the restore is a set of `pg_restore --table=…` calls for the shopping
 list's tables, into `public`, and nothing else. The dry run (step 3) does the
-same into a scratch database, which is why it catches a missing table.
+same into a scratch database, which is why it catches a missing table. The
+**order** of those calls is the foreign keys' order: the restore is one call
+per table, so a table restored before the one it points at fails its foreign
+key as soon as it holds a row.
 
 #### The transitional route's client key
 
@@ -4011,7 +4014,11 @@ failure is the one that cannot be repeated at will against one address.
 The runbook was rehearsed end to end against a Supabase instance — the dump,
 the scoped restore, the identity mapping, the verification queries, the row
 counts compared table by table, and the rollback. The scripts are in
-`scripts/cutover/`, and they found two things this section did not say.
+`scripts/cutover/`. The first rehearsal, run locally, found two things this
+section did not say. The rehearsal against the **development instance** — the
+dry run, with the scratch database on the instance and the restore and the
+mapping done there — found five more, and its output is in
+[`docs/cutover-rehearsal.md`](./cutover-rehearsal.md).
 
 **1. The legacy foreign keys have to go before the ids are replaced.** The
 household columns still carry foreign keys into Better Auth's `organization`
@@ -4023,13 +4030,65 @@ that says nothing about the mapping. So the mapping drops the six legacy
 constraints first, and the rename migration adds the new ones: to
 `households(id)` and to `auth.users(id)`.
 
-**2. The users are provisioned in the instance's main database, and the
-scratch database gets their ids and nothing else.** GoTrue owns `auth.users`
-in the instance's main database, and it does not manage a scratch database at
+**2. The cutover's users are provisioned in the instance's main database; the
+rehearsal's are issued in the scratch database.** GoTrue owns `auth.users` in
+the instance's main database, and it does not manage a scratch database at
 all. The verification queries join against `auth.users`, so the ids have to
 be there — but copying the schema over would be exactly what the first rule
-above forbids. The scratch database therefore gets the provisioned ids, and
-the mapping's foreign keys point at those.
+above forbids.
+
+At the **cutover** the ids are GoTrue's: step 2 provisions the accounts and
+records them in `user_map`, and the mapping runs in the instance's main
+database, where GoTrue's users are.
+
+In the **rehearsal** the mapping runs in a scratch database on the instance,
+and the rehearsal may not write to GoTrue's table: it belongs to
+`supabase_auth_admin`, it has row-level security on with no policies, and the
+instance has to be as it was when the run is over. So the rehearsal issues
+the ids itself and puts them in the scratch database, which is where the
+mapping's foreign keys point. The scratch database is dropped at the end, so
+nothing is left behind.
+
+**3. The migrations that follow the rename cannot be applied before it.** The
+scripts used to apply every migration except the rename before the mapping.
+The migrations that follow it are written for the renamed schema — the
+policies in `0005` name `household_id`, which does not exist until the
+mapping or the rename has made it — so they fail. The order is the
+checklist's: the schema up to but not including the rename, the mapping,
+then the rename and the rest.
+
+**4. Two statements in the migrations administer the instance's roles, and a
+rehearsal's role may not.** The app role inherits `authenticated`, and the
+migration role may assume the app role. Both are properties of the *instance*
+rather than of a database, the instance already has both, and a role that
+may create a scratch database may not administer them: PostgreSQL refuses
+those two statements with "permission denied to grant role". The rehearsal
+applies the migrations with the errors allowed to be, reads them back, and
+requires every one of them to be a refusal of that kind — and it prints the
+ones it could not run.
+
+**5. The restore's order is the foreign keys' order.** The restore is one
+`pg_restore --table=…` call per table, so the tables come back in the order
+of the list, and a table restored before the one it points at fails its
+foreign key as soon as it holds a row. `RESTORED_TABLES` is in dependency
+order now.
+
+**6. The pooler keeps a connection to the scratch database, so the drop has
+to be forced.** The pooler hands its connection back when the client is gone
+and keeps it in its pool, so the scratch database still has a session
+attached to it, and the plain `DROP DATABASE` is refused with "database is
+being accessed by other users". Terminating the session does not help — the
+pooler opens another one. `DROP DATABASE … WITH (FORCE)` terminates the
+sessions and drops the database in one statement, with no window between the
+two for the pooler to open another connection in.
+
+**7. The mapping has to carry the legacy invitations over.** §13.2b says the
+legacy `invitation` rows become `household_invitations` rows, and the mapping
+did not map them: the rehearsal's own counts showed a pending legacy
+invitation next to no carried row. Only the pending ones are carried — an
+accepted invitation is already a membership, and a rejected or cancelled one
+is a refusal — and the token is minted fresh, so the old email's link does
+not work. §13.2b has the rules.
 
 The order is therefore: the **mapping** does the data (the ids, the rows,
 the casts, and the drop of the legacy constraints), and the **rename
@@ -4051,7 +4110,8 @@ CREATE TEMP TABLE organization_map (old_id text PRIMARY KEY, new_id uuid NOT NUL
 The legacy `organization` rows become `households` rows with **fresh** `uuid`
 primary keys; the legacy `member` rows become `household_members` rows with
 `user_id` taken from `user_map`; the legacy `invitation` rows become
-`household_invitations` rows. Then, on each household-scoped table:
+`household_invitations` rows — the pending ones, and only those (below).
+Then, on each household-scoped table:
 
 ```sql
 UPDATE items SET household_id = m.new_id
@@ -4064,6 +4124,34 @@ ALTER TABLE items ALTER COLUMN household_id TYPE uuid USING household_id::uuid;
 The cast succeeds **only after** the mapping, because the legacy ids are
 Better Auth's generated strings rather than UUIDs (§9.1a). The same procedure
 applies to `created_by_id`, `updated_by_id` and `actor_id`, using `user_map`.
+
+#### The invitations
+
+**Only a pending invitation is carried over.** An accepted invitation is
+already a membership — the legacy `member` row — and a rejected or cancelled
+one is a refusal that needs nothing carried.
+
+**The role carries over unchanged**: `coalesce(role, 'member')`, because the
+legacy column is nullable and the two vocabularies are the same three
+(`owner`, `admin`, `member` — §12.5's and the CHECK constraint's).
+
+**The token is minted fresh.** The legacy `invitation` table has no token
+column, so there is nothing to carry, and the new one is not null and
+unique: the same shape the application issues, 32 random bytes hex-encoded.
+`expires_at` carries over, `accepted_at` and `revoked_at` are null, the
+household is the mapped household, and `invited_by` is the mapped inviter.
+
+**An invitation whose inviter is not in the mapping is skipped, and
+counted.** It has no `invited_by` to point at. The mapping counts the
+pending ones, the carried ones and the skipped ones, and the rehearsal
+compares them.
+
+**The consequence, which the operator has to know: a carried invitation
+keeps the person pending in the household's list of invitations** — the row
+is there, with the household, the role and the expiry it had — **but the
+link in the old email does not work.** The carried row is a new invitation
+with a new token and a new id, not the one the old email pointed at. The
+invitation can be sent again, and the person accepts it with the new link.
 
 #### 13.2c Passwords: the one thing that cannot be mapped
 

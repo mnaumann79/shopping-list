@@ -8,9 +8,10 @@
 -- ids through the mappings, and cast last.
 --
 -- The mappings are supplied, not derived here: the households get fresh
--- uuids, and the users' uuids are the ones GoTrue issued when the accounts
--- were provisioned (cutover step 2). `scripts/cutover/rehearse.mjs` fills
--- the two placeholders.
+-- uuids, and at the cutover the users' uuids are the ones GoTrue issued when
+-- the accounts were provisioned (cutover step 2). The rehearsal issues its
+-- own, because it may not write to GoTrue's table. Either way,
+-- `scripts/cutover/rehearse.mjs` fills the two placeholders.
 
 BEGIN;
 
@@ -87,4 +88,54 @@ ALTER TABLE household_join_links ALTER COLUMN household_id TYPE uuid USING house
 ALTER TABLE items ALTER COLUMN created_by_id TYPE uuid USING created_by_id::uuid;
 ALTER TABLE household_join_links ALTER COLUMN created_by_id TYPE uuid USING created_by_id::uuid;
 
+-- 8. The invitations. A pending invitation is a person waiting to join, and
+--    the household's list of invitations is where that person is. An accepted
+--    invitation is already a membership — the `member` row of step 2 — and a
+--    rejected or cancelled one is a refusal that needs nothing carried.
+--
+--    The role carries over unchanged: the legacy column is nullable, so it is
+--    `coalesce`d to 'member', and the two vocabularies are the same three
+--    ('owner', 'admin', 'member' — §12.5's and the CHECK constraint's).
+--
+--    The token is minted fresh. The legacy table has no token column, so
+--    there is nothing to carry, and the new one is not null and unique: the
+--    same shape the application issues, 32 random bytes hex-encoded — two
+--    version 4 uuids, which is what the core has to offer. The consequence
+--    is written down in §13.2b: a carried invitation keeps the person
+--    pending in the household's list, but the link in the old email does
+--    not work — the token is the new one, and the invitation can be sent
+--    again.
+--
+--    An invitation whose inviter is not in the mapping has no `invited_by` to
+--    point at, so it is skipped. It is counted, not carried.
+INSERT INTO household_invitations (household_id, email, role, token, invited_by, expires_at, accepted_at, revoked_at, created_at)
+SELECT om.new_id,
+       i.email,
+       coalesce(i.role, 'member'),
+       replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''),
+       um.new_id,
+       i.expires_at,
+       NULL,
+       NULL,
+       i.created_at
+  FROM invitation i
+  JOIN organization_map om ON om.old_id = i.organization_id
+  JOIN user_map um ON um.old_id = i.inviter_id
+ WHERE i.status = 'pending';
+
 COMMIT;
+
+-- The invitations, counted: how many were pending in the legacy table, how
+-- many were carried over, and how many were skipped. The three numbers are
+-- what the rehearsal's check compares, and what the person performing the
+-- cutover reads — a skipped invitation is a person who is not waiting in the
+-- household any more.
+DO $$
+DECLARE
+  pending bigint;
+  carried bigint;
+BEGIN
+  SELECT count(*) INTO pending FROM invitation WHERE status = 'pending';
+  SELECT count(*) INTO carried FROM household_invitations;
+  RAISE NOTICE 'invitations: % pending, % carried, % skipped', pending, carried, pending - carried;
+END $$;

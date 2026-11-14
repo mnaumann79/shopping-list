@@ -7,26 +7,35 @@
 // does not look like a Supabase instance, refuses a target in the Neon
 // production host family outright, and refuses to write to any database whose
 // name is not a rehearsal scratch database.
+//
+// Two kinds of client read the connection string, and they have to agree on
+// what it means: the libpq programs (psql, pg_dump, pg_restore) and the
+// driver (node-postgres). The URL helpers below are what make them agree.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 /**
  * Better Auth's tables, present for the rollback window, and the
  * application's own tables. These are the tables the restore is scoped to.
+ *
+ * The order is the order the foreign keys allow: every table is restored
+ * after the ones it points at. The restore is one `pg_restore` per table, so
+ * the order is the order of this list — and a table restored before the one
+ * it points at fails its foreign key as soon as it holds a row.
  */
 export const RESTORED_TABLES = [
   // Better Auth's, present until the rollback window closes
   "user",
+  "organization",
+  "member",
   "session",
   "account",
   "verification",
-  "organization",
-  "member",
   "invitation",
   // the application's own
-  "items",
   "categories",
   "stores",
+  "items",
   "household_join_links",
   "item_stores",
 ];
@@ -115,11 +124,36 @@ export function assertLooksLikeSupabase(targetUrl) {
   }
 }
 
+/**
+ * The URL as libpq understands it.
+ *
+ * psql, pg_dump and pg_restore are libpq programs, and libpq refuses a URI
+ * that carries a parameter it does not know: "invalid URI query parameter".
+ * `uselibpqcompat` is the driver's own switch — it tells node-postgres to
+ * read `sslmode` the way libpq does — and psql knows nothing about it. So
+ * the parameter comes off for the libpq programs and stays in the URL the
+ * driver is given.
+ *
+ * The URL itself is the operator's decision, and the scripts do not weaken
+ * it. `sslmode` means what it says to the client that reads it: libpq's
+ * `require` encrypts the connection and does not verify the certificate,
+ * and node-postgres' `require` verifies it — which the pooler's own
+ * certificate does not pass, because it is signed by Supabase's CA rather
+ * than by one in the public trust store. A URL that verifies the pooler
+ * names the CA: `sslmode=verify-full&sslrootcert=/path/to/supabase-ca.pem`,
+ * and both the driver and the libpq programs read it.
+ */
+export function libpqUrl(url) {
+  const parsed = new URL(url);
+  parsed.searchParams.delete("uselibpqcompat");
+  return parsed.toString();
+}
+
 /** Runs a statement and returns its rows. */
 export function query(url, sql) {
   const output = execFileSync(
     "psql",
-    [url, "-v", "ON_ERROR_STOP=1", "-tAc", sql],
+    [libpqUrl(url), "-v", "ON_ERROR_STOP=1", "-tAc", sql],
     { encoding: "utf8" },
   );
   return output
@@ -130,24 +164,58 @@ export function query(url, sql) {
 
 /** Runs a statement for its effect. */
 export function execute(url, sql, extraArgs = []) {
-  execFileSync("psql", [url, "-v", "ON_ERROR_STOP=1", ...extraArgs], {
+  execFileSync("psql", [libpqUrl(url), "-v", "ON_ERROR_STOP=1", ...extraArgs], {
     encoding: "utf8",
     input: sql,
   });
 }
 
-/** Runs a SQL file for its effect. */
-export function executeFile(url, file, extraArgs = []) {
-  execFileSync("psql", [url, "-v", "ON_ERROR_STOP=1", ...extraArgs, "-f", file], {
-    encoding: "utf8",
-  });
+/**
+ * Applies a migration file, and returns the statements it could not run.
+ *
+ * Two of the migrations grant a role to another role: the app role inherits
+ * `authenticated`, and the migration role may assume the app role. Both are
+ * properties of the *instance* rather than of a database, the instance
+ * already has both, and a role that may create a scratch database may not
+ * administer the instance's roles — PostgreSQL refuses those two statements
+ * with "permission denied to grant role".
+ *
+ * So the file is applied with the errors allowed to be, the errors are read
+ * back, and every one of them has to be a refusal of that kind. Anything
+ * else fails the run.
+ */
+export function applyMigration(url, file) {
+  const result = spawnSync(
+    "psql",
+    [libpqUrl(url), "-v", "ON_ERROR_STOP=0", "-f", file],
+    { encoding: "utf8" },
+  );
+  const errors = (result.stderr || "")
+    .split("\n")
+    .filter((line) => line.includes("ERROR:"));
+  const refused = errors.filter((line) => line.includes("permission denied to grant role"));
+  if (errors.length !== refused.length) {
+    throw new Error(`${file} failed:\n${result.stderr || result.stdout}`);
+  }
+  // psql exits 1 when a statement failed and 2 when the connection to the
+  // server went away (psql(1)). The refusal above is a statement that
+  // failed, so it comes with status 1; every other status is the process
+  // failing rather than a statement, and the migration is not applied.
+  if (result.status !== 0 && !(result.status === 1 && refused.length > 0)) {
+    throw new Error(`${file} could not be applied: ${result.stderr || result.stdout}`);
+  }
+  // psql names the file it read, and the path is the one of the machine that
+  // ran it. The name and the line are what the reader needs.
+  return refused.map((line) =>
+    line.replace(/^psql:.*[\\/]([^\\/]+):(\d+): ERROR:\s*/, "$1:$2: ").trim(),
+  );
 }
 
 /** Runs pg_dump and returns the dump file's path. */
 export function dump(sourceUrl, file) {
   execFileSync(
     "pg_dump",
-    ["--dbname", sourceUrl, "--format=custom", "--file", file],
+    ["--dbname", libpqUrl(sourceUrl), "--format=custom", "--file", file],
     { encoding: "utf8" },
   );
   return file;
@@ -163,7 +231,7 @@ export function restoreScoped(targetUrl, file) {
   for (const table of RESTORED_TABLES) {
     execFileSync(
       "pg_restore",
-      ["--dbname", targetUrl, "--data-only", "--table", table, file],
+      ["--dbname", libpqUrl(targetUrl), "--data-only", "--table", table, file],
       { encoding: "utf8" },
     );
   }
