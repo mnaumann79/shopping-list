@@ -490,11 +490,12 @@ Three jobs run on every pull request:
 | `supabase local stack, migrations, fixture, RLS` | The row-level security policies hold against a real GoTrue | No |
 | `playwright, reporting only` | The journey: sign-up, sign-in, the household, the shopping trip, in three browsers and a phone profile | No |
 
-**The browser suite's job's runtime is not established.** The figure this
-used to quote — about five minutes — came from a run that failed early, and
-the runs that were allowed to finish have never been measured: every merge
-to main cancelled the run in flight, so the job never finished at all. It
-runs against the local stack in CI, not against a deployment.
+**The browser suite's job's runtime is established.** The four-worker run
+finished in **23.4 minutes** — the 169 specs in 10 files, on the CI runner
+against the local stack — inside the job's 45-minute budget and the
+suite's own 35-minute budget. A loaded runner is slower: that is the
+runner's figure, not a promise. It runs against the local stack in CI, not
+against a deployment.
 
 **A red browser suite is a finding, not a blocker.** It does not gate a
 merge, and it opens an issue so that a person notices. That job exists
