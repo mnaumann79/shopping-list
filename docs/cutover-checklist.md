@@ -172,11 +172,15 @@ Each of these cost an hour:
    runner is a development-side tool, it refuses a host it cannot prove is
    local (`DB_MIGRATE_ALLOW_ANY_HOST=1` is its opt-in), and the cutover
    does not run it against the target in any case.
-2. **Then set the role's password**, through the flow that re-syncs the
-   pooler. The pooler authenticates the application role by fetching the
-   role's credential, and it does not always see the instance's copy: the
+2. **Then set the role's password**, and make the pooler take it. The
+   pooler authenticates the application role by fetching the role's
+   credential, and it does not always see the instance's copy: the
    credential on the instance and the pooler's copy of it can come apart,
    and a change to the role's password alone does not re-sync it.
+   **What that means in practice** — the procedure and the check are in
+   [the password procedure](#the-application-roles-password), and the check
+   is what says the password is ready: the pooler accepting the new
+   password, and refusing a wrong one.
 3. **Then put the connection string in `DATABASE_URL`** — the
    application's role, not the owner's.
 
@@ -348,10 +352,65 @@ Each of these cost an hour:
 
 ### The application
 
+- [ ] **The application role's password is set afresh**, through the
+      [procedure below](#the-application-roles-password) — a change to the
+      role's password alone does not re-sync the pooler. The instance's
+      `app` role already has a password — the one the rehearsal used, and
+      the one this project's `DATABASE_URL` and the deployment's
+      environment file carry. The pooler accepts it as `app` today, so the
+      deployment would inherit it as it stands: **the rehearsal's password
+      is not carried across.** The new one goes into the deployment's
+      environment and nowhere else — not into the ledger, not into this
+      document.
+- [ ] **The pooler accepts the new password**, checked before the
+      connection string changes — [the check is here](#the-application-roles-password).
 - [ ] **`DATABASE_URL` is changed** in the deployment environment to the
-      instance's connection — as the **application role**, not as the owner.
+      instance's connection — as the **application role**, not as the owner,
+      and with the **new** password.
 - [ ] **The Supabase URL and the two keys are changed** to the instance's.
 - [ ] **The application is deployed.**
+
+#### The application role's password
+
+The pooler authenticates the application role by fetching the role's
+credential from the instance, and it caches what it fetches. A change to the
+role's password on the instance does not necessarily reach that cache, so
+the pooler can keep accepting the old password and refusing the new one.
+The application connects through the pooler, so the pooler is what decides
+whether the application can sign in at all.
+
+**Set the password on the instance**, with the owner's connection. The
+password is read from the environment, not written into the command, so it
+does not end up in the shell's history or in the process list:
+
+```bash
+psql "$OWNER_DATABASE_URL" -v ON_ERROR_STOP=1 <<SQL
+ALTER ROLE app WITH PASSWORD '$APP_ROLE_PASSWORD'
+SQL
+```
+
+**Then let the pooler take it.** The pooler re-reads the role's credential
+when its tenant configuration is refreshed, so re-saving the pooling
+settings — Project Settings → Database → Connection Pooling → Save — is
+what makes it look again. If the pooler still refuses the new password,
+pause the project and resume it, and wait for it to come back before
+trying again.
+
+**Then check that the pooler accepts it**, before anything points at the
+new password:
+
+```bash
+psql "postgresql://app.<project-ref>:${APP_ROLE_PASSWORD}@aws-0-us-east-2.pooler.supabase.com:5432/postgres?sslmode=require" \
+  -tAc "SELECT current_user"
+```
+
+It answers `app`. The check is two-sided, and the second half is what makes
+the first half mean something: the same command with a wrong password is
+refused. If the new password is refused, the pooler has not taken it yet —
+wait, re-save the pooling settings, and do not go on to `DATABASE_URL`.
+
+The password is not recorded anywhere: not in the ledger, not in this
+document, not in a message.
 
 ### The smoke test
 
