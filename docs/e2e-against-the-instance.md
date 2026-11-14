@@ -41,13 +41,19 @@ Three details in that table are the ones that cost time:
   before the application starts. `require` is not the answer: `pg` treats it
   as verify-full. `no-verify` encrypts the traffic without authenticating
   the pooler, and the deployment does not use it.
-- **`RESEND_API_KEY` is empty, not absent.** `.env.test` sets
-  `RESEND_API_KEY=ci-dummy-not-used`, and `dotenv` does not override a
-  variable that is already set — so leaving the variable out of the command
-  lets the file's dummy key through, and the invitation endpoint sends the
-  mail before it answers, which turns every invitation into a 500. An empty
+- **`RESEND_API_KEY` is empty, not absent.** A key that is not a key turns
+  every invitation into a 500 — the invitation endpoint sends the mail
+  before it answers — and `dotenv` does not override a variable that is
+  already set, so a key in the environment beats a key in a file. An empty
   value is "no mail" to the application, and the invitation row is written
   before the mail is sent.
+
+**The certificate path is verified from a development machine.** With
+`NODE_EXTRA_CA_CERTS` pointing at `deploy/prod-ca-2021.crt` and
+`?sslmode=verify-full`, the pooler completes the handshake and answers
+*password authentication failed* — which is the answer a wrong password
+gets, and not the certificate refusal an untrusted chain gets. The tenant
+name in the URL is right too: the pooler knows `app.eaawnwfrkvjbdigyasbk`.
 
 **The run must not use the owner's credential.** `pnpm start` and `pnpm dev`
 both run the check at the door ([P0S-T37](project.md#92b-row-level-security-the-second-layer-now-real)),
@@ -108,16 +114,19 @@ a client-side navigation — which is how the sign-up page reaches it. The join
 had succeeded ("Joined!" was on the screen) and the page never reached the
 dashboard. Fixed here.
 
-**An expired join link cannot be told from an unknown one.** The join page
-has a branch for it — "Link expired", on a 410 — and the server answers 404
-for both. Telling them apart is a migration, so the spec waits for it
-(`test.fixme`).
+**An expired join link could not be told from an unknown one.** The join page
+has a branch for it — "Link expired", on a 410 — and the server answered 404
+for both. [P0S-T52](project.md) made the answer 410: the link's own row is
+still there, and it is gone, which is what 410 says. The spec runs — as a
+member of the household: the row is readable by the household's members and
+by nobody else, so a caller who is not one gets the 404, because the
+application cannot say that a link it cannot see has expired.
 
 **`.env.test` carried `RESEND_API_KEY=ci-dummy-not-used`.** The invitation
 endpoint sends the mail before it answers, so the dummy key turned every
-invitation into a 500. The variable is P0S-T52's; the run sets it to empty,
-which means "no mail" to the application — and the invitation row is written
-before the mail is sent.
+invitation into a 500. P0S-T52 took the key out of the test environment and
+out of the workflows; the run sets it to empty, which means "no mail" to the
+application — and the invitation row is written before the mail is sent.
 
 ## What the run found
 

@@ -40,7 +40,29 @@ export default defineConfig({
         ["html", { open: "never" }],
       ]
     : "html",
-  workers: 1,
+  // The suite has to finish inside the CI job's budget.
+  //
+  // One worker does not fit: a browser project takes about eleven minutes
+  // with one worker, there are four of them, and the job has forty-three
+  // minutes for the suite. The workers are what make it fit, and they are
+  // safe because the specs are independent — every one of them creates its
+  // own users and its own household, and the stack is shared.
+  //
+  // The address of the client is still one per project, and the workers
+  // share it. The transitional sign-in counts a client's failures, and the
+  // budget is ten failures in fifteen minutes; the suite makes two failed
+  // sign-ins a project, so a project fits under it.
+  workers: 4,
+  // The specs wait for a dev server that renders a page on the server, and
+  // the workers share the CPU with it. Playwright's default is thirty
+  // seconds for a test and five for an expectation, and both are too tight
+  // for a loaded runner: the auth specs failed at the thirty seconds, and
+  // an expectation about a page that is rendering waited five.
+  //
+  // Two minutes for a test and fifteen for an expectation are the budgets
+  // the household specs had already set for themselves.
+  timeout: 120_000,
+  expect: { timeout: 15_000 },
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000",
     trace: "on-first-retry",
