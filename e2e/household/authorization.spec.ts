@@ -27,6 +27,14 @@ async function householdWithAPlainMember(browser: import("@playwright/test").Bro
   expect(created.status()).toBe(201);
   const { householdId } = (await created.json()) as { householdId: string };
 
+  // The household has to be the session's active one: an invitation and a
+  // join link are both about the active household, and the server refuses
+  // the call when there is none.
+  const activated = await owner.page.request.post("/api/auth/household", {
+    data: { householdId },
+  });
+  expect(activated.status()).toBe(200);
+
   const member = await newUser(browser, "member");
 
   const invited = await owner.page.request.post("/api/households/invitations", {
