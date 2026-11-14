@@ -15,6 +15,11 @@ test.describe("Logout", () => {
   // persistence specs. Each logout spec gets a session of its own.
   test.use({ storageState: { cookies: [], origins: [] } });
 
+  // The sign-in page is asserted by its path, not by its whole URL: the edge
+  // guard carries the page the visitor asked for in a query string, and a
+  // spec that forbade the query string would be pinning the guard's absence.
+  // The pattern is the path, with or without the destination.
+
   test.beforeEach(async ({ page }) => {
     const email = uniqueEmail("logout");
     await startOwnSession(page, { email, householdName: `Logout Household ${email}` });
@@ -29,7 +34,7 @@ test.describe("Logout", () => {
 
     await page.getByRole("menuitem", { name: /log out/i }).click();
 
-    await expect(page).toHaveURL(/\/sign-in$/);
+    await expect(page).toHaveURL(/\/sign-in(\?|$)/);
   });
 
   test("logout from another page redirects to /sign-in", async ({ page }) => {
@@ -41,17 +46,17 @@ test.describe("Logout", () => {
     await openAccountMenu(page);
     await page.getByRole("menuitem", { name: /log out/i }).click();
 
-    await expect(page).toHaveURL(/\/sign-in$/);
+    await expect(page).toHaveURL(/\/sign-in(\?|$)/);
   });
 
   test("after logout, navigating to /dashboard redirects to /sign-in", async ({ page }) => {
     await openAccountMenu(page);
     await page.getByRole("menuitem", { name: /log out/i }).click();
-    await expect(page).toHaveURL(/\/sign-in$/);
+    await expect(page).toHaveURL(/\/sign-in(\?|$)/);
 
     // Attempt to access the protected dashboard — should bounce back
     await page.goto("/dashboard");
-    await expect(page).toHaveURL(/\/sign-in$/);
+    await expect(page).toHaveURL(/\/sign-in(\?|$)/);
   });
 
   test("logout clears session cookies", async ({ page, context }) => {
@@ -62,7 +67,7 @@ test.describe("Logout", () => {
 
     await openAccountMenu(page);
     await page.getByRole("menuitem", { name: /log out/i }).click();
-    await expect(page).toHaveURL(/\/sign-in$/);
+    await expect(page).toHaveURL(/\/sign-in(\?|$)/);
 
     // After logout the session cookies should be cleared (or invalidated)
     const cookiesAfter = await context.cookies();
