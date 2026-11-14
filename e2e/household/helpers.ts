@@ -158,13 +158,36 @@ export async function scopeFor(page: Page): Promise<Scope> {
 }
 
 /**
+ * The session cookie's value.
+ *
+ * `@supabase/ssr` splits a session that is longer than 3180 encoded
+ * characters across `SESSION_COOKIE.0`, `SESSION_COOKIE.1` and so on, so a
+ * session that is read from one cookie name alone can be half a session.
+ * The library's own rule: the unsuffixed cookie when it is there, and the
+ * numbered chunks in order when it is not.
+ */
+function sessionCookieValue(cookies: Cookie[]): string | null {
+  const whole = cookies.find((cookie) => cookie.name === SESSION_COOKIE)?.value;
+  if (whole) return whole;
+
+  const chunks: string[] = [];
+  for (let index = 0; ; index += 1) {
+    const chunk = cookies.find((cookie) => cookie.name === `${SESSION_COOKIE}.${index}`)?.value;
+    if (!chunk) break;
+    chunks.push(chunk);
+  }
+
+  return chunks.length > 0 ? chunks.join("") : null;
+}
+
+/**
  * The user id the browser's session cookie carries.
  *
  * `@supabase/ssr` writes the session as base64url behind a `base64-` prefix,
  * and the session's access token is a JWT whose `sub` is the id GoTrue issued.
  */
 function userIdFromSession(cookies: Cookie[]): string | null {
-  const value = cookies.find((cookie) => cookie.name === SESSION_COOKIE)?.value;
+  const value = sessionCookieValue(cookies);
   if (!value) return null;
 
   const session = JSON.parse(
