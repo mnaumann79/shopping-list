@@ -100,6 +100,35 @@ Against a local database there is no mode at all: the local PostgreSQL
 offers no TLS, so both `verify-full` and `require` are refused, and the
 connection string that connects is the one with no mode.
 
+### The pool's size and the pooler's pool
+
+The application opens up to ten connections at once — `max: 10` in
+`src/db/index.ts` — and the pooler is Supavisor's, whose pool for the
+tenant is set in the dashboard (Project Settings -> Database -> Pooler).
+**The two have to be in the same order of magnitude**: the application
+cannot hold more connections open than the pooler's pool can serve, and the
+pooler does not wait for room for the ones it has no room for.
+
+**The symptom when they are not is a TLS handshake failure**, and it says
+nothing about the cause: *"There was an error establishing an SSL
+connection"* from the application's own pool, a burst of them, and then the
+pool stops working altogether — the instance holds no session from the
+application while the application is still running, and the requests that
+read the database time out instead of answering. It reads like the
+certificate's mistake, because the message is the same one the certificate
+produces. Check the pooler's pool size against the application's `max`
+before the window, not during it.
+
+**The application does not wait for the database for ever.** The pool has a
+connection timeout and an idle timeout, so a request that cannot reach the
+database answers with an error in seconds instead of hanging, and a
+connection the pooler has dropped is closed by the application instead of
+being handed to the next request. Measured against a database that accepts
+the connection and then says nothing: the request had not answered after
+sixty seconds before the timeouts, and answers with a 500 in twelve. A
+request that hangs during the window is therefore a defect in the
+application, not the pooler's patience.
+
 ### The check at the door
 
 The application refuses to serve when the role `DATABASE_URL` names is
