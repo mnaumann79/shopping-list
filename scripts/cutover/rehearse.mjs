@@ -16,6 +16,17 @@
 //
 // The target's credentials are in the URL; nothing is read from the
 // environment, and nothing is written to the repository.
+//
+// The URL is read as it is written, and the two kinds of client in these
+// scripts read it differently: psql, pg_dump and pg_restore are libpq
+// programs, and node-postgres is the driver. Against the pooler — whose
+// certificate is signed by Supabase's own CA, not by one in the public
+// trust store — `sslmode=require` means "encrypt and do not verify" to
+// libpq and "verify, and fail" to the driver. The URL that reaches both
+// therefore carries the driver's own switch:
+// `?sslmode=require&uselibpqcompat=true`. A URL that verifies the pooler
+// names the CA instead: `?sslmode=verify-full&sslrootcert=/path/to/ca.pem`,
+// and both the driver and the libpq programs read it.
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -30,7 +41,6 @@ import {
   assertScratchDatabase,
   databaseOf,
   dump,
-  driverUrl,
   execute,
   hostOf,
   query,
@@ -62,7 +72,7 @@ function step(message) {
 }
 
 function withClient(url, fn) {
-  const client = new pg.Client({ connectionString: driverUrl(url) });
+  const client = new pg.Client({ connectionString: url });
   return client
     .connect()
     .then(() => fn(client))
@@ -209,6 +219,29 @@ for (const [label, table] of Object.entries(counts)) {
   if (bad) failed = true;
   console.log(`${bad ? "FAIL" : "ok  "}  ${label}: source ${source}, target ${target}`);
 }
+
+// The invitations. The pending ones become `household_invitations` rows,
+// and an invitation whose inviter or whose household is not in the mapping
+// is skipped — the mapping counts those. So the carried rows are the
+// pending ones minus the skipped ones, and the three numbers are printed.
+const pending = Number(
+  query(sourceUrl, "SELECT count(*) FROM invitation WHERE status = 'pending'")[0][0],
+);
+const skipped = Number(
+  query(
+    sourceUrl,
+    `SELECT count(*) FROM invitation i
+      WHERE i.status = 'pending'
+        AND (NOT EXISTS (SELECT 1 FROM "user" u WHERE u.id = i.inviter_id)
+             OR NOT EXISTS (SELECT 1 FROM organization o WHERE o.id = i.organization_id))`,
+  )[0][0],
+);
+const carried = Number(query(scratch, "SELECT count(*) FROM household_invitations")[0][0]);
+const invitationsBad = pending !== carried + skipped;
+if (invitationsBad) failed = true;
+console.log(
+  `${invitationsBad ? "FAIL" : "ok  "}  invitations: source ${pending} pending, target ${carried} carried, ${skipped} skipped`,
+);
 
 // 11. The rollback.
 //

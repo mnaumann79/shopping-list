@@ -133,29 +133,19 @@ export function assertLooksLikeSupabase(targetUrl) {
  * read `sslmode` the way libpq does — and psql knows nothing about it. So
  * the parameter comes off for the libpq programs and stays in the URL the
  * driver is given.
+ *
+ * The URL itself is the operator's decision, and the scripts do not weaken
+ * it. `sslmode` means what it says to the client that reads it: libpq's
+ * `require` encrypts the connection and does not verify the certificate,
+ * and node-postgres' `require` verifies it — which the pooler's own
+ * certificate does not pass, because it is signed by Supabase's CA rather
+ * than by one in the public trust store. A URL that verifies the pooler
+ * names the CA: `sslmode=verify-full&sslrootcert=/path/to/supabase-ca.pem`,
+ * and both the driver and the libpq programs read it.
  */
 export function libpqUrl(url) {
   const parsed = new URL(url);
   parsed.searchParams.delete("uselibpqcompat");
-  return parsed.toString();
-}
-
-/**
- * The URL as the driver reads it.
- *
- * node-postgres reads `sslmode=require` as `verify-full` and refuses the
- * pooler's certificate, where libpq's `require` encrypts the connection and
- * does not verify the certificate — which is what psql, pg_dump and
- * pg_restore do with the very same URL. One URL has to mean one thing to
- * every client in these scripts, so the driver is told to read it the way
- * libpq does. The repository's own runner documents the same switch
- * (`scripts/db-migrate.mjs`).
- */
-export function driverUrl(url) {
-  const parsed = new URL(url);
-  if (!parsed.searchParams.has("uselibpqcompat")) {
-    parsed.searchParams.set("uselibpqcompat", "true");
-  }
   return parsed.toString();
 }
 
@@ -207,7 +197,11 @@ export function applyMigration(url, file) {
   if (errors.length !== refused.length) {
     throw new Error(`${file} failed:\n${result.stderr || result.stdout}`);
   }
-  if (result.status !== 0 && errors.length === 0) {
+  // psql exits 1 when a statement failed and 2 when the connection to the
+  // server went away (psql(1)). The refusal above is a statement that
+  // failed, so it comes with status 1; every other status is the process
+  // failing rather than a statement, and the migration is not applied.
+  if (result.status !== 0 && !(result.status === 1 && refused.length > 0)) {
     throw new Error(`${file} could not be applied: ${result.stderr || result.stdout}`);
   }
   // psql names the file it read, and the path is the one of the machine that

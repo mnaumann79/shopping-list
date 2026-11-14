@@ -4082,6 +4082,14 @@ pooler opens another one. `DROP DATABASE … WITH (FORCE)` terminates the
 sessions and drops the database in one statement, with no window between the
 two for the pooler to open another connection in.
 
+**7. The mapping has to carry the legacy invitations over.** §13.2b says the
+legacy `invitation` rows become `household_invitations` rows, and the mapping
+did not map them: the rehearsal's own counts showed a pending legacy
+invitation next to no carried row. Only the pending ones are carried — an
+accepted invitation is already a membership, and a rejected or cancelled one
+is a refusal — and the token is minted fresh, so the old email's link does
+not work. §13.2b has the rules.
+
 The order is therefore: the **mapping** does the data (the ids, the rows,
 the casts, and the drop of the legacy constraints), and the **rename
 migration** does the schema (the new constraints, and the rename and the cast
@@ -4102,7 +4110,8 @@ CREATE TEMP TABLE organization_map (old_id text PRIMARY KEY, new_id uuid NOT NUL
 The legacy `organization` rows become `households` rows with **fresh** `uuid`
 primary keys; the legacy `member` rows become `household_members` rows with
 `user_id` taken from `user_map`; the legacy `invitation` rows become
-`household_invitations` rows. Then, on each household-scoped table:
+`household_invitations` rows — the pending ones, and only those (below).
+Then, on each household-scoped table:
 
 ```sql
 UPDATE items SET household_id = m.new_id
@@ -4115,6 +4124,34 @@ ALTER TABLE items ALTER COLUMN household_id TYPE uuid USING household_id::uuid;
 The cast succeeds **only after** the mapping, because the legacy ids are
 Better Auth's generated strings rather than UUIDs (§9.1a). The same procedure
 applies to `created_by_id`, `updated_by_id` and `actor_id`, using `user_map`.
+
+#### The invitations
+
+**Only a pending invitation is carried over.** An accepted invitation is
+already a membership — the legacy `member` row — and a rejected or cancelled
+one is a refusal that needs nothing carried.
+
+**The role carries over unchanged**: `coalesce(role, 'member')`, because the
+legacy column is nullable and the two vocabularies are the same three
+(`owner`, `admin`, `member` — §12.5's and the CHECK constraint's).
+
+**The token is minted fresh.** The legacy `invitation` table has no token
+column, so there is nothing to carry, and the new one is not null and
+unique: the same shape the application issues, 32 random bytes hex-encoded.
+`expires_at` carries over, `accepted_at` and `revoked_at` are null, the
+household is the mapped household, and `invited_by` is the mapped inviter.
+
+**An invitation whose inviter is not in the mapping is skipped, and
+counted.** It has no `invited_by` to point at. The mapping counts the
+pending ones, the carried ones and the skipped ones, and the rehearsal
+compares them.
+
+**The consequence, which the operator has to know: a carried invitation
+keeps the person pending in the household's list of invitations** — the row
+is there, with the household, the role and the expiry it had — **but the
+link in the old email does not work.** The carried row is a new invitation
+with a new token and a new id, not the one the old email pointed at. The
+invitation can be sent again, and the person accepts it with the new link.
 
 #### 13.2c Passwords: the one thing that cannot be mapped
 

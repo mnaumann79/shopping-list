@@ -14,12 +14,12 @@ The scripts are in `scripts/cutover/`, and the procedure behind them is
 
 | | |
 | --- | --- |
-| **Date** | 2026-11-13, 23:57 UTC |
+| **Date** | 2026-11-14, 00:57 UTC |
 | **Instance** | the development instance, `eaawnwfrkvjbdigyasbk` — PostgreSQL 17.11, reached through the pooler at `aws-0-us-east-2.pooler.supabase.com:5432` |
-| **Source URL** | `postgresql://<role>:<password>@aws-0-us-east-2.pooler.supabase.com:5432/cutover_rehearsal_source_1794614237?sslmode=require` |
-| **Target URL** | `postgresql://<role>:<password>@aws-0-us-east-2.pooler.supabase.com:5432/postgres?sslmode=require` |
+| **Source URL** | `postgresql://<role>:<password>@aws-0-us-east-2.pooler.supabase.com:5432/cutover_rehearsal_source_1794617785?sslmode=require&uselibpqcompat=true` |
+| **Target URL** | `postgresql://<role>:<password>@aws-0-us-east-2.pooler.supabase.com:5432/postgres?sslmode=require&uselibpqcompat=true` |
 | **Role** | `rehearsal_cutover` — `LOGIN CREATEDB`, created for this run through the Supabase MCP and dropped when the run was over. Its password lived in the sandbox and nowhere else: not in this repository, not in a message, not in a ledger row. |
-| **Scratch database** | `cutover_rehearsal_1794614273930` — created on the instance by the run, dropped by the run's rollback |
+| **Scratch database** | `cutover_rehearsal_1794617846264` — created on the instance by the run, dropped by the run's rollback |
 | **Command** | `node scripts/cutover/rehearse.mjs --source "$SOURCE_URL" --target "$TARGET_URL"` |
 
 The two URLs differ in the database and in nothing else. The pooler needs
@@ -85,10 +85,10 @@ target: aws-0-us-east-2.pooler.supabase.com/postgres
 source: 1 organizations, 1 users, 1 memberships
 
 == Dumping the source
-dump: /tmp/cutover-sy2jsA/source.dump
+dump: /tmp/cutover-40Vz06/source.dump
 
 == Creating the scratch database
-scratch: cutover_rehearsal_1794614273930
+scratch: cutover_rehearsal_1794617846264
 
 == Applying the schema, up to but not including the rename
 applied 0000_init.sql
@@ -103,6 +103,7 @@ restored 12 tables
 mapped 1 households and 1 users
 
 == Running the identity mapping
+NOTICE:  invitations: 1 pending, 1 carried, 0 skipped
 
 == Applying the rename migration and the rest
 applied 0004_rename_household_id.sql
@@ -139,7 +140,8 @@ ok    households.count: 1
 ok    household_members.count: 1
 ok    user.count: 1
 ok    invitation.count: 1
-ok    household_invitations.count: 0
+ok    invitation.pending_count: 1
+ok    household_invitations.count: 1
 
 == Comparing the row counts
 ok    items: source 1, target 1
@@ -148,9 +150,10 @@ ok    stores: source 1, target 1
 ok    household_join_links: source 1, target 1
 ok    item_stores: source 1, target 1
 ok    user: source 1, target 1
+ok    invitations: source 1 pending, target 1 carried, 0 skipped
 
 == Rolling back
-dropped cutover_rehearsal_1794614273930
+dropped cutover_rehearsal_1794617846264
 
 The rehearsal passed.
 ```
@@ -164,7 +167,7 @@ the run prints them instead of hiding them.
 
 ## What the run found
 
-Six things. Every one of them is fixed in `scripts/cutover/`, and §13.2a of
+Seven things. Every one of them is fixed in `scripts/cutover/`, and §13.2a of
 `docs/project.md` is corrected where the run showed it wrong.
 
 ### 1. The driver and libpq read the same URL differently
@@ -178,15 +181,23 @@ Error: self-signed certificate in certificate chain
 node-postgres reads `sslmode=require` as `verify-full` and refuses the
 pooler's certificate, where libpq's `require` encrypts the connection and
 does not verify the certificate — which is what psql, pg_dump and pg_restore
-do with the very same URL. One URL has to mean one thing to every client in
-these scripts.
+do with the very same URL. The pooler's certificate is signed by Supabase's
+own CA (`Supabase Intermediate 2021 CA`), not by one in the public trust
+store, so no `sslmode` the driver reads verifies it on its own.
 
-**Fixed** in `scripts/cutover/lib.mjs`: `driverUrl()` hands the driver the
-URL with `uselibpqcompat=true`, which is the switch that tells it to read
-`sslmode` the way libpq does (the repository's own runner documents the
-same switch in `scripts/db-migrate.mjs`), and `libpqUrl()` takes the
-parameter back off for the libpq programs, which refuse a URI that carries
-one (`invalid URI query parameter: "uselibpqcompat"`).
+**Fixed** in `scripts/cutover/lib.mjs`: the URL is read as it is written,
+and `libpqUrl()` takes the driver's own switch (`uselibpqcompat`) back off
+for the libpq programs, which refuse a URI that carries one (`invalid URI
+query parameter: "uselibpqcompat"`). The switch is the operator's to write
+— `?sslmode=require&uselibpqcompat=true` is libpq's `require` for both
+clients, and it is what this run used — and the scripts do not weaken a URL
+they are given.
+
+**A URL that verifies the pooler names the CA**:
+`?sslmode=verify-full&sslrootcert=/path/to/supabase-ca.pem`, which the
+driver and the libpq programs both read. That is the URL to use when the
+connection carries a credential and the server's identity has to be
+established.
 
 ### 2. The migrations that follow the rename cannot be applied before it
 
@@ -252,7 +263,7 @@ finding is corrected to tell the two apart.
 ### 6. The pooler keeps a connection to the scratch database
 
 ```
-error: database "cutover_rehearsal_1794614273930" is being accessed by other users
+error: database "cutover_rehearsal_1794617846264" is being accessed by other users
 ```
 
 The rollback terminated the sessions and dropped the database, and the drop
@@ -265,20 +276,46 @@ one.
 the database in one statement, with no window between the two for the pooler
 to open another connection in.
 
-## What the run did not cover
+### 7. The mapping did not carry the legacy invitations over
 
-**The legacy invitations.** §13.2b says the legacy `invitation` rows become
-`household_invitations` rows, and the mapping does not map them: the run
-shows `invitation.count: 1` next to `household_invitations.count: 0`. The
-source has one pending invitation, so the restore of that table is
-exercised, and the mapping leaves it behind. The legacy table is dropped at
-the decommission (T+14 days), so the pending invitations of the migrated
-households are lost unless the mapping carries them over. That is a gap in
-the identity mapping, and it needs a decision the rehearsal cannot make:
-which of Better Auth's invitation statuses are worth carrying, what the
-role becomes (the new table's check allows `owner`, `admin` and `member`,
-and an invitation is never an owner), and what token the carried invitation
-gets (the application issues 32 random bytes, hex-encoded).
+The first run of the rehearsal showed the gap in its own output:
+
+```
+ok    invitation.count: 1
+ok    household_invitations.count: 0
+```
+
+§13.2b says the legacy `invitation` rows become `household_invitations` rows,
+and the mapping did not map them. The source has one pending invitation, so
+the restore of that table is exercised, and the mapping left it behind. The
+legacy table is dropped at the decommission (T+14 days), so the pending
+invitations of the migrated households were lost.
+
+**Fixed**: the mapping carries the pending invitations over — only the
+pending ones, because an accepted invitation is already a membership and a
+rejected or cancelled one is a refusal that needs nothing carried. The role
+carries over unchanged (`coalesce(role, 'member')`, and the two vocabularies
+are the same three), the token is minted fresh (the legacy table has no
+token column; the new one is not null and unique), `expires_at` carries
+over, `accepted_at` and `revoked_at` are null, and the household and the
+inviter are the mapped ones. An invitation whose inviter is not in the
+mapping is skipped, and counted.
+
+The counts, before and after — the check that found the gap is the check
+that closes it:
+
+```
+NOTICE:  invitations: 1 pending, 1 carried, 0 skipped
+ok    invitations: source 1 pending, target 1 carried, 0 skipped
+```
+
+**The consequence**, which the person performing the cutover has to know:
+a carried invitation keeps the person pending in the household's list of
+invitations, but **the link in the old email does not work** — the carried
+row is a new invitation with a new token and a new id. The invitation can
+be sent again, and the person accepts it with the new link. §13.2b says so.
+
+## What the run did not cover
 
 **The provisioning of the GoTrue users.** That is §13.2a step 2, and it
 happens through the admin API before the rehearsal runs. The rehearsal
