@@ -48,10 +48,6 @@ jobs:
             const SUITE_STEP = 'Run the browser suite';
             const FINISHED_STEP = 'Say whether the suite finished';
 
-            // The e2e job's own budget, in minutes. A job cancelled at its
-            // budget was stopped by the timeout and the suite did not
-            // finish; a job cancelled at any other time was replaced by a
-            // newer run (the concurrency rule), and that is not a finding.
             // The e2e workflow's own conclusion is "success" even when its
             // job failed, because the job carries continue-on-error: it must
             // not gate a merge. The job's conclusion is the one that says
