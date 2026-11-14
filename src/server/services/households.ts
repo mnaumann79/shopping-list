@@ -254,10 +254,43 @@ export async function joinHousehold(input: {
   const householdId = rows[0]?.household_id ?? null;
 
   if (!householdId) {
+    // The function answers "nothing" for a link that is not live, and that is
+    // one answer for three cases: a token that was never a link, a link that
+    // has expired and a link that was revoked. The link's own row tells the
+    // expired one apart — it is still there, and it is gone, which is what
+    // 410 says. A row that is not there at all is a 404.
+    const expiry = await joinLinkExpiry(input.token, input.userId);
+    if (expiry && expiry.getTime() <= Date.now()) {
+      throw new ServiceError(410, "This join link has expired");
+    }
+
     throw new ServiceError(404, "Invalid join link");
   }
 
   return { householdId };
+}
+
+/**
+ * The link's expiry, when the caller may see the link.
+ *
+ * The links of a household are readable by that household's members and by
+ * nobody else, so a caller who is not a member gets nothing here: the
+ * application cannot say that a link it cannot see has expired, and it says
+ * 404 instead — as far as this caller is concerned, the link was never there.
+ *
+ * Telling a stranger that a link has expired needs a function that reads the
+ * link by token with the owner's rights; that is a migration, and until it
+ * lands the member is the one the application can answer for.
+ */
+async function joinLinkExpiry(token: string, userId: string): Promise<Date | null> {
+  const result = await withMembershipScope({ userId }, (tx: Tx) =>
+    tx.execute(sql`select expires_at from household_join_links where token = ${token}`),
+  );
+
+  const rows = (result as unknown as { rows?: Array<{ expires_at?: Date | string | null }> }).rows ?? [];
+  const expiry = rows[0]?.expires_at ?? null;
+
+  return expiry ? new Date(expiry) : null;
 }
 
 /**

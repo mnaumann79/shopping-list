@@ -75,16 +75,35 @@ describe("POST /api/households/join", () => {
     expect(res.status).toBe(400);
   });
 
-  test("returns 404 when the link is not live", async () => {
+  test("returns 404 when there is no such link", async () => {
     // The function resolves the token and writes the row in one statement
-    // path, so an unknown, an expired and a revoked link are one answer:
-    // nothing.
+    // path, so a token that was never a link and a link that was revoked are
+    // one answer: nothing. The link's own row is not there either.
     signedIn();
-    vi.mocked(db.execute).mockResolvedValue({ rows: [{ household_id: null }] } as never);
+    vi.mocked(db.execute)
+      .mockResolvedValueOnce({ rows: [{ household_id: null }] } as never)
+      .mockResolvedValueOnce({ rows: [] } as never);
 
     const res = await POST(makeRequest({ token: "dead-token" }));
 
     expect(res.status).toBe(404);
+  });
+
+  test("returns 410 when the link has expired", async () => {
+    // The link is still there and it is gone: the row says when it lapsed.
+    // The page's "Link expired" branch is what the caller is shown.
+    signedIn();
+    vi.mocked(db.execute)
+      .mockResolvedValueOnce({ rows: [{ household_id: null }] } as never)
+      .mockResolvedValueOnce({
+        rows: [{ expires_at: new Date(Date.now() - 60_000) }],
+      } as never);
+
+    const res = await POST(makeRequest({ token: "expired-token" }));
+
+    expect(res.status).toBe(410);
+    const json = await res.json();
+    expect(json.error).toBe("This join link has expired");
   });
 
   test("returns 200 and the household id when the link is live", async () => {
