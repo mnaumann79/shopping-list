@@ -218,6 +218,25 @@ Each of these cost an hour:
    password, and refusing a wrong one.
 3. **Then put the connection string in `DATABASE_URL`** — the
    application's role, not the owner's.
+4. **Then set the instance's authentication rate limits.** The browser signs
+   up against GoTrue directly (`signUpWithPassword` in
+   `src/lib/auth-client.ts`), so the application never sees a sign-up and
+   cannot limit one: the limit that stands between the instance and a
+   sign-up flood is the instance's own, and it is an operator setting
+   rather than the application's code. It is changed in the dashboard
+   under **Authentication → Rate Limits**, or through the Management API
+   (`PATCH /v1/projects/<project-ref>/config/auth`, the `rate_limit_*`
+   settings). **What matters** — the **email limit**: with the built-in
+   SMTP provider the project sends **30 confirmation emails per hour**
+   across the whole project, and a sign-up is one of them, so a sign-up
+   flood meets that limit and GoTrue answers it with a **429** and the code
+   `over_email_send_rate_limit`; and the **bucket by IP address**: the
+   auth endpoints that are limited by IP address have a token bucket with
+   a capacity of **30 requests**, and a sustained flood is answered with a
+   **429**. **What that means in practice** — the application enforces
+   nothing here, so this setting is the whole of the protection. The email
+   limit only goes up with a custom SMTP provider, and the setting is
+   checked before the window rather than after it.
 
 ---
 
@@ -496,7 +515,9 @@ This is the one step nothing else can do for you — see the last section.
       them would leave two behind, holding whatever was in them.
 - [ ] **The transitional sign-in route is removed**:
       `src/app/api/auth/legacy-signin/` and everything under
-      `src/lib/legacy-auth/`.
+      `src/lib/legacy-auth/`. **The sign-in's own admission limit goes with
+      it** — `src/lib/legacy-auth/attempt-limit.ts` — and the routes that
+      stay have their own, in `src/lib/rate-limit.ts`.
 - [ ] **The legacy code is deleted**, and the dependency with it.
 - [ ] **The rollback window is closed.** Only now may Neon be decommissioned.
 

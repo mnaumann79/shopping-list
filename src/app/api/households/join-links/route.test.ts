@@ -57,13 +57,14 @@ vi.mock("@/db/schema/households", () => ({
 
 import { requireActiveOrganization } from "@/lib/request-auth";
 import { db } from "@/db";
+import { JOIN_LINK_LIMIT } from "@/lib/rate-limit";
 import { POST } from "./route";
 
 // A signed-in caller with a household active.
-function signedIn(userId = "u1") {
-  vi.mocked(requireActiveOrganization).mockResolvedValueOnce({
-    session: { user: { id: userId, name: "U", email: "u@example.test" }, activeHouseholdId: "h1" },
-    orgId: "h1",
+function signedIn(userId = "u1", householdId = "h1") {
+  vi.mocked(requireActiveOrganization).mockResolvedValue({
+    session: { user: { id: userId, name: "U", email: "u@example.test" }, activeHouseholdId: householdId },
+    orgId: householdId,
     requestHeaders: new Headers(),
   } as never);
 }
@@ -77,6 +78,10 @@ function callerIs(role: string | null) {
 describe("POST /api/households/join-links", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The caller's household is the test's own: the limit counts per
+    // household, and a household that carries one test's calls must not
+    // carry the next one's.
+    vi.mocked(requireActiveOrganization).mockReset();
     // Default: the caller is an owner, and the insert is chainable.
     callerIs("owner");
     vi.mocked(db.insert).mockReturnValue({
@@ -146,6 +151,48 @@ describe("POST /api/households/join-links", () => {
     signedIn();
     await POST();
     expect(db.delete).not.toHaveBeenCalled();
+  });
+
+  test("returns 429 when the household is over the limit, and mints no link", async () => {
+    // S-7: the limit answers 429 with a stable code, and the body says what
+    // to try later.
+    signedIn("u1", "h-limit");
+    callerIs("owner");
+
+    for (let call = 0; call < JOIN_LINK_LIMIT.max; call += 1) {
+      const allowed = await POST();
+      expect(allowed.status).toBe(200);
+    }
+
+    const res = await POST();
+
+    expect(res.status).toBe(429);
+    const json = await res.json();
+    expect(json.code).toBe("RATE_LIMITED");
+    expect(json.error).toMatch(/try again/i);
+    // The caller is told when to come back.
+    expect(Number(res.headers.get("Retry-After"))).toBeGreaterThan(0);
+    // The link was not minted: the limit stops the work, it does not only
+    // report it.
+    expect(db.insert).toHaveBeenCalledTimes(JOIN_LINK_LIMIT.max);
+  });
+
+  test("returns 403 for a plain member while the household is over the limit", async () => {
+    // The order of the two answers: a caller who may not act is not a caller
+    // to be counted, and a 429 where a 403 belongs would tell the caller the
+    // wrong thing. The limit is asked after the role check, so the refusal
+    // is the refusal.
+    signedIn("u1", "h-over");
+    callerIs("owner");
+
+    for (let call = 0; call < JOIN_LINK_LIMIT.max; call += 1) {
+      await POST();
+    }
+
+    callerIs("member");
+    const res = await POST();
+
+    expect(res.status).toBe(403);
   });
 
   test("returned URL uses NEXT_PUBLIC_APP_URL as base", async () => {

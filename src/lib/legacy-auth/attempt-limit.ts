@@ -20,6 +20,16 @@
  * cannot count on one: the application has no edge rate limiter — the root
  * middleware is an optimistic redirect for pages, and it limits nothing
  * (§12.1b).
+ *
+ * **This limit is the transitional sign-in's own, and it goes with the
+ * legacy code.** The whole of `src/lib/legacy-auth/` is removed when the
+ * rollback window closes — the cutover checklist's decommission step — and
+ * this file with it. It is not the application's limit: the routes that
+ * stay have their own, in `src/lib/rate-limit.ts`, and they do not share
+ * this one's counters. What this one keeps is the transitional sign-in's
+ * own rule, which is what the sign-in needs and what nothing else does:
+ * a failure against an address is remembered, and a success against a
+ * *different* address does not clear it.
  */
 
 /** How long a failure is remembered. */
