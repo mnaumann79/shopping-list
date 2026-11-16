@@ -10,7 +10,8 @@ restore, and it is available for fourteen days.** Nothing is deleted from
 Neon until the window closes, and reverting means putting the environment
 back and deploying the previous release.
 
-The times are relative to the maintenance window (**T−0**).
+The times are relative to the maintenance window (**T−0**), which is
+**Tuesday 24 November 2026**.
 
 ---
 
@@ -223,7 +224,7 @@ Each of these cost an hour:
 
 ## Before the window
 
-### T−7 days — the target is verified
+### T−7 days — the target is verified (Tuesday 17 November 2026)
 
 - [ ] **The instance's PostgreSQL major version is recorded**, and it is the
       same major version the dump will come from. A dump restored across a
@@ -249,7 +250,7 @@ Each of these cost an hour:
       the role's password alone does not re-sync it. The application
       connects as the role, so the pooler is what decides whether it can.
 
-### T−1 day — the accounts are provisioned
+### T−1 day — the accounts are provisioned (Monday 23 November 2026)
 
 - [ ] **Every legacy user has a GoTrue account** with `email_confirm: true`
       and the legacy display name in `user_metadata`.
@@ -263,7 +264,7 @@ Each of these cost an hour:
       the accounts the transitional route exists for, and the decommission
       step depends on knowing which they are.
 
-### T−1 day — the dry run
+### T−1 day — the dry run (Monday 23 November 2026)
 
 - [ ] **The dump is taken from Neon and restored into a scratch database on
       the instance** — scoped to the shopping list's tables. The scripts do
@@ -308,7 +309,7 @@ Each of these cost an hour:
       The rehearsal prints counts only — the ids are in the mapping table —
       and this repository is public.
 
-### T−1 day — the guard that ships
+### T−1 day — the guard that ships (Monday 23 November 2026)
 
 - [ ] **The deployment carries the guard, the guard keeps the destination,
       and the optimistic cookie check is gone.** The guard is
@@ -322,7 +323,7 @@ Each of these cost an hour:
 
 ---
 
-## In the window
+## In the window — Tuesday 24 November 2026
 
 ### Read-only
 
@@ -477,7 +478,7 @@ This is the one step nothing else can do for you — see the last section.
 
 ## After the window
 
-### T+14 days — decommission
+### T+14 days — decommission (Tuesday 8 December 2026)
 
 - [ ] **Every account that has never signed in has been dealt with.** Those
       accounts still hold the cutover's unusable password: the transitional
