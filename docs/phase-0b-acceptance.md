@@ -133,7 +133,9 @@ deployment runs.
 ## What is open
 
 - **The cutover itself**, and the operator's window: the checklist's T−7 and
-  T−1 steps need dates, and the rollback window is fourteen days.
+  T−1 steps need dates, and the rollback window is fourteen days. **The
+  dates are in the checklist since 16 November 2026** - T−7 is Tuesday 17
+  November, T−0 is Tuesday 24 November, and T+14 is Tuesday 8 December.
 - **The deployment's environment**: the service-role key, the domain, and the
   Resend key if the invitation email is wanted.
 - **The form's race** (P0S-T61): a visitor who types before the page has
@@ -152,6 +154,19 @@ deployment runs.
   caught up.
 
 ## What the release needs from the product owner
+
+**All four were answered on 16 November 2026**, so this list is the answer
+rather than the question, and the live version is the cutover checklist
+rather than this paragraph. The window is dated: T−7 is Tuesday 17 November,
+T−0 is Tuesday 24 November, and T+14 is Tuesday 8 December 2026 - the
+rollback window is the fourteen days decision D-9 chose, and the
+decommission follows it. The service-role key, the domain
+(`shopping-list.mnaumann.com`) and the Resend key are in the deployment's
+environment file. **What is left is the operator's work, not a question for
+the product owner**: the deployment has to carry those values, the domain
+has to resolve to it, and the checklist's steps have to be walked.
+
+The list as it stood when this was written:
 
 - The **cutover window** and the **rollback window** (fourteen days), and the
   decision to decommission the legacy tables at the end of it.
