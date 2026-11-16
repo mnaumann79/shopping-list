@@ -8,8 +8,8 @@ each answer is, and what is still open.
 
 ## What is merged
 
-Sixty-eight pull requests, from #30 to #97. The phase's own tasks are on the
-board (P0S-T01 to P0S-T59); the plan's tasks are the table at the end.
+Sixty-nine pull requests, from #30 to #101. The phase's own tasks are on the
+board (P0S-T01 to P0S-T63); the plan's tasks are the table at the end.
 
 ## The checks on the merged main
 
@@ -139,13 +139,17 @@ deployment runs.
 - **The form's race** (P0S-T61): a visitor who types before the page has
   hydrated loses the text. The suite found it; the specs no longer depend on
   it (P0S-T60), but the product still has it.
-- **The application's patience** (P0S-T63): a request that cannot reach the
-  database waits for ever instead of answering. The pool has no connection
-  timeout, and the second run against the instance is what showed it.
-- **A third run against the instance**, with the pool's timeouts in place,
-  is the one that would close the loop. The instance is as it was: the run's
-  rows and accounts were removed and the counts are back to the ones that
-  predate the run.
+- **The third run against the instance.** The application's patience is answered
+  (P0S-T63, #101): the pool has a connection timeout and an idle timeout, so
+  a request that cannot reach the database answers with an error instead of
+  waiting for ever. The run that would close the loop is the third one, with
+  those timeouts in place. The instance is as it was: the second run's rows
+  and accounts were removed and the counts are back to the ones that predate
+  the run.
+- **The specification's account of the guard** (P0S-T58): `docs/project.md`
+  §12.1b and §14 SEC-01 still name the repository's root `middleware.ts` as
+  the guard's file. It moved to `src/` (P0S-T57), and the section has not
+  caught up.
 
 ## What the release needs from the product owner
 
