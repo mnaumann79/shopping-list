@@ -10,8 +10,12 @@ restore, and it is available for fourteen days.** Nothing is deleted from
 Neon until the window closes, and reverting means putting the environment
 back and deploying the previous release.
 
-The times are relative to the maintenance window (**T−0**), which is
-**Tuesday 24 November 2026**.
+**The window opened on Monday 16 November 2026 (T−0).** The product owner
+decided on 16 November 2026 that the cutover would begin right away, and
+that this repository is not a production one — so the checks that were
+dated for the days before the window were run on the day it opened, and
+the rollback window is still fourteen days: it closes on **Monday
+30 November 2026** (T+14).
 
 ---
 
@@ -224,7 +228,7 @@ Each of these cost an hour:
 
 ## Before the window
 
-### T−7 days — the target is verified (Tuesday 17 November 2026)
+### T−7 days — the target is verified (run on Monday 16 November 2026)
 
 - [ ] **The instance's PostgreSQL major version is recorded**, and it is the
       same major version the dump will come from. A dump restored across a
@@ -250,7 +254,7 @@ Each of these cost an hour:
       the role's password alone does not re-sync it. The application
       connects as the role, so the pooler is what decides whether it can.
 
-### T−1 day — the accounts are provisioned (Monday 23 November 2026)
+### T−1 day — the accounts are provisioned (run on Monday 16 November 2026)
 
 - [ ] **Every legacy user has a GoTrue account** with `email_confirm: true`
       and the legacy display name in `user_metadata`.
@@ -264,7 +268,7 @@ Each of these cost an hour:
       the accounts the transitional route exists for, and the decommission
       step depends on knowing which they are.
 
-### T−1 day — the dry run (Monday 23 November 2026)
+### T−1 day — the dry run (run on Monday 16 November 2026)
 
 - [ ] **The dump is taken from Neon and restored into a scratch database on
       the instance** — scoped to the shopping list's tables. The scripts do
@@ -309,7 +313,7 @@ Each of these cost an hour:
       The rehearsal prints counts only — the ids are in the mapping table —
       and this repository is public.
 
-### T−1 day — the guard that ships (Monday 23 November 2026)
+### T−1 day — the guard that ships (run on Monday 16 November 2026)
 
 - [ ] **The deployment carries the guard, the guard keeps the destination,
       and the optimistic cookie check is gone.** The guard is
@@ -323,7 +327,35 @@ Each of these cost an hour:
 
 ---
 
-## In the window — Tuesday 24 November 2026
+## In the window — Monday 16 November 2026
+
+**How this run differs from the procedure in §13.2a**, because there is no
+Neon with production data behind it: this repository is not a production
+one, and the product owner said so on 16 November 2026. Five things
+change, and nothing else does:
+
+- **The source is a legacy-shaped database on the instance**, built the
+  way the rehearsal built its source ([`docs/cutover-rehearsal.md`](./cutover-rehearsal.md),
+  "The source"). Its ids are made-up strings and its addresses are
+  `@example.test`, so nothing in it is anybody's data.
+- **The target is the instance's main database** — GoTrue's `auth.users`
+  and the deployment's `DATABASE_URL` are there, and the verification
+  queries join against them.
+- **The target is returned to the pre-rename shape first.** The instance
+  was already at the repository's final schema, and the restore carries
+  the legacy shape, so the shopping list's own tables are dropped and
+  migrations `0000`–`0003` are applied before the restore. The drop is
+  scoped: the instance's other application's tables, the `auth` schema
+  and the GoTrue accounts are not touched.
+- **The owner connection is minted for the run.** The Supabase MCP's
+  session is `postgres`, which owns the tables and has BYPASSRLS, so the
+  `postgres` role's password is rotated for the run and rotated again
+  when the run is over.
+- **The read-only step has nothing to switch off.** The deployment's
+  domain answers 404 as of 16 November 2026, so no application is
+  running against the instance. The source database is still left
+  untouched while the window is open, which is the property that step is
+  there for.
 
 ### Read-only
 
@@ -478,7 +510,7 @@ This is the one step nothing else can do for you — see the last section.
 
 ## After the window
 
-### T+14 days — decommission (Tuesday 8 December 2026)
+### T+14 days — decommission (Monday 30 November 2026)
 
 - [ ] **Every account that has never signed in has been dealt with.** Those
       accounts still hold the cutover's unusable password: the transitional
@@ -505,10 +537,53 @@ This is the one step nothing else can do for you — see the last section.
 
 ## Open items
 
-The things that have to be settled before the window is scheduled. Each has a
-name against it. None of them is assumed away.
+**There are none open.** All three were settled on 16 November 2026, when
+the product owner decided that the cutover would begin right away and that
+this repository is not a production one. Each decision is recorded below
+with its date and the name of the person who made it, and the list as it
+stood when the items were open is kept at the end — a record that is edited
+into agreement is not a record.
 
-| Item | What has to be settled | Whose it is |
+### D-11 — the guard that ships: **decided**
+
+The guard in `src/middleware.ts` is the guard that ships. It is the file the
+development server and the built application both run (P0S-T57), so the
+browser suite exercises the guard the deployment ships, and it preserves the
+destination for every protected route.
+
+*Decided by the product owner on 16 November 2026.*
+
+### The accounts that have never signed in: **decided**
+
+Every provisioned account holds an unusable password until the transitional
+route verifies the old one. The route stays for the whole rollback window —
+it goes on 30 November 2026, with the legacy tables — and before it goes,
+every account that has not signed in is sent a password reset, so that
+nobody is left unable to get in. The list of those accounts is kept until
+the reset has been sent.
+
+*Decided by the product owner on 16 November 2026, on the lead's
+recommendation.*
+
+### The writes made after the cutover: **decided**
+
+A rollback to the source drops every write made on the instance after the
+cutover. Those writes are not reconciled into the source: the loss is
+accepted, and the person accepting it is the product owner. There is no
+production data in the loss — the repository is not a production one, and
+the source the window ran against was a synthetic legacy-shaped database on
+the instance. The source stays untouched for the fourteen days of the
+rollback window, and the decision is written down here so that a rollback,
+if one happens, is done with the loss known rather than discovered.
+
+*Accepted by Matthias Naumann, the product owner, on 16 November 2026.*
+
+### The list as it stood when the items were open
+
+The things that had to be settled before the window was scheduled. Each had
+a name against it. None of them was assumed away.
+
+| Item | What had to be settled | Whose it was |
 | --- | --- | --- |
 | **D-11 — the guard that ships** | The guard has landed: P0S-T32 put a real guard in place of the root middleware's optimistic check on the cookie's *presence*, and P0S-T57 moved it to `src/middleware.ts` — the file the development server and the built application both run, so the browser suite exercises the guard the deployment ships. What is left is the product owner's decision: this is the guard that ships, and it preserves the destination for every protected route. | Sara.F, with the product owner |
 | **The accounts that have never signed in** | Every provisioned account holds an unusable password until the transitional route verifies the old one. Before the route goes, those accounts need a password reset or a recovery path. | The lead, with the product owner |
