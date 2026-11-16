@@ -51,6 +51,13 @@ export const items = pgTable("items", {
   isActive: boolean("is_active").notNull().default(true),
   isChecked: boolean("is_checked").notNull().default(false),
   archivedAt: timestamp("archived_at"),
+  // The tombstone (B-11). NULL is a live item, a timestamp is a deleted one;
+  // archived_at keeps its own meaning - cleared, and recoverable.
+  //
+  // is_active above is what the delete wrote before this column existed. It
+  // is left in place and unused, and a later migration drops it
+  // (docs/project.md §9.1). Nothing keeps the two in step.
+  deletedAt: timestamp("deleted_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
   createdById: uuid("created_by_id").references(() => authUsers.id, {

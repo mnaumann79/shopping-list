@@ -203,7 +203,8 @@ CREATE TABLE IF NOT EXISTS "items" (
 	"created_at" timestamp DEFAULT now() NOT NULL,
 	"updated_at" timestamp DEFAULT now() NOT NULL,
 	"created_by_id" uuid,
-	"archived_at" timestamp
+	"archived_at" timestamp,
+	"deleted_at" timestamp
 );
 CREATE TABLE IF NOT EXISTS "stores" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -287,6 +288,7 @@ CREATE INDEX IF NOT EXISTS "sync_changes_household_created" ON "sync_changes" ("
 CREATE INDEX IF NOT EXISTS "sync_operations_household" ON "sync_operations" ("household_id", "applied_at");
 CREATE UNIQUE INDEX IF NOT EXISTS "entity_conflicts_seq" ON "entity_conflicts" ("seq");
 CREATE INDEX IF NOT EXISTS "entity_conflicts_household_seq" ON "entity_conflicts" ("household_id", "seq");
+CREATE INDEX IF NOT EXISTS "items_active_household" ON "items" ("household_id") WHERE "deleted_at" IS NULL;
 ALTER TABLE "account" ADD CONSTRAINT "account_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "invitation" ADD CONSTRAINT "invitation_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;
 ALTER TABLE "invitation" ADD CONSTRAINT "invitation_inviter_id_user_id_fk" FOREIGN KEY ("inviter_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
